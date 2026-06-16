@@ -1,0 +1,33 @@
+[package]
+name = "duroos-watcher"
+version = "0.1.0"
+description = "Local-first study library for educational media"
+authors = ["Duroos Watcher"]
+license = "AGPL-3.0-or-later"
+edition = "2021"
+
+[lib]
+name = "duroos_watcher_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+ed25519-dalek = "2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+roxmltree = "0.20"
+rusqlite = { version = "0.32", features = ["bundled"] }
+scraper = "0.23"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+walkdir = "2"
+tiny_http = "0.12"

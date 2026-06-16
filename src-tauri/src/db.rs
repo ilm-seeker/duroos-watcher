@@ -1,0 +1,5605 @@
+use crate::{
+    manifest,
+    models::{
+        AppSnapshot, ClearSourceSummary, Collection, DownloadSourceSummary, ImportSummary,
+        IngestSummary, Job, Lesson, LiveSession, ManifestValidationReport, MediaFile,
+        ProvenanceRecord, RuntimeDiagnostics, Source, SourceCapability, Teacher, TeacherRelay,
+        TrustCuratorSummary, TrustedCurator, WatchState,
+    },
+};
+use chrono::Utc;
+use reqwest::blocking::Client;
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use scraper::{Html, Selector};
+use sha2::{Digest, Sha256};
+use std::{
+    fs,
+    io::{self, Read},
+    path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
+};
+use tauri::{AppHandle, Manager};
+use url::Url;
+use uuid::Uuid;
+use walkdir::WalkDir;
+
+const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "mkv", "webm"];
+const AUDIO_EXTENSIONS: &[&str] = &["mp3", "m4a", "aac", "wav", "flac", "ogg"];
+const PDF_EXTENSIONS: &[&str] = &["pdf"];
+const INGEST_USER_AGENT: &str = "DuroosWatcher/0.1 local-first-study-library";
+const LOCAL_PROVENANCE_NOTE: &str = "Imported from local media selected by the user.";
+const PUBLIC_SOURCE_PROVENANCE_NOTE: &str =
+    "Captured from public source metadata; media download remains user controlled.";
+const YT_DLP_COOKIE_FILE_NAMES: &[&str] = &["yt-dlp-cookies.txt", "cookies.txt"];
+const DEFAULT_SOURCE_IDS: &[&str] = &[
+    "source-local-files",
+    "source-telegram",
+    "source-rss-feed",
+    "source-archive-org",
+    "source-youtube",
+    "source-x",
+    "source-rumble",
+    "source-odysee",
+    "source-teacher-relay",
+];
+
+#[derive(Debug)]
+struct TelegramSource {
+    username: String,
+    post_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct DiscoveredLesson {
+    title: String,
+    content_type: String,
+    source_url: String,
+    published_at: Option<String>,
+    description: Option<String>,
+    duration_seconds: Option<i64>,
+    adapter_name: String,
+    provenance_note: String,
+    content_hash: Option<String>,
+}
+
+#[derive(Debug)]
+struct ParsedFeed {
+    title: String,
+    feed_format: String,
+    trust_state: String,
+    curator: Option<ManifestCurator>,
+    lessons: Vec<DiscoveredLesson>,
+}
+
+#[derive(Debug)]
+struct ManifestCurator {
+    id: String,
+    display_name: String,
+    public_key: String,
+}
+
+#[derive(Debug)]
+struct SourceContext {
+    source_id: String,
+    platform: String,
+    source_label: String,
+    source_identifier: String,
+    feed_format: String,
+    feed_transport: String,
+    trust_state: String,
+    trusted_curator_id: Option<String>,
+    last_verified_at: Option<String>,
+    source_capability: SourceCapability,
+    teacher_id: String,
+    teacher_label: String,
+    teacher_description: String,
+    teacher_source_links: Vec<String>,
+    collection_id: String,
+    collection_title: String,
+    collection_owner_label: String,
+}
+
+#[derive(Debug)]
+struct DownloadLesson {
+    id: String,
+    title: String,
+    content_type: String,
+    source_url: String,
+    expected_content_hash: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct YtDlpCommand {
+    program: String,
+    args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentTypeEvidence {
+    FilePath,
+    SourceUrlExtension,
+    VideoPage,
+    TextSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ContentTypeInference {
+    content_type: &'static str,
+    evidence: ContentTypeEvidence,
+}
+
+pub fn initialize(app: &AppHandle) -> Result<(), String> {
+    let data_dir = app_data_dir(app)?;
+    fs::create_dir_all(data_dir.join("library/imports")).map_err(|error| error.to_string())?;
+
+    let mut connection = open_connection(app)?;
+    run_migrations(&connection)?;
+    ensure_default_records(&mut connection)?;
+
+    Ok(())
+}
+
+pub fn open_connection(app: &AppHandle) -> Result<Connection, String> {
+    let data_dir = app_data_dir(app)?;
+    fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
+    Connection::open(data_dir.join("duroos.sqlite3")).map_err(|error| error.to_string())
+}
+
+pub fn fetch_snapshot(connection: &Connection) -> Result<AppSnapshot, String> {
+    Ok(AppSnapshot {
+        sources: fetch_sources(connection)?,
+        teachers: fetch_teachers(connection)?,
+        teacher_relays: fetch_teacher_relays(connection)?,
+        live_sessions: fetch_live_sessions(connection)?,
+        collections: fetch_collections(connection)?,
+        lessons: fetch_lessons(connection)?,
+        media_files: fetch_media_files(connection)?,
+        provenance_records: fetch_provenance_records(connection)?,
+        watch_state: fetch_watch_state(connection)?,
+        jobs: fetch_jobs(connection)?,
+        trusted_curators: fetch_trusted_curators(connection)?,
+    })
+}
+
+pub fn runtime_diagnostics(app: &AppHandle) -> RuntimeDiagnostics {
+    let cookies_file = app_data_dir(app)
+        .ok()
+        .and_then(|data_dir| yt_dlp_cookie_file(&data_dir));
+    let cookies_file_name = cookies_file
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .and_then(|file_name| file_name.to_str())
+        .map(str::to_string);
+
+    match find_yt_dlp_command() {
+        Ok(command) => {
+            let version = Command::new(&command.program)
+                .args(&command.args)
+                .arg("--version")
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+                .filter(|value| !value.is_empty());
+            let command_label = if command.args.is_empty() {
+                command.program.clone()
+            } else {
+                format!("{} {}", command.program, command.args.join(" "))
+            };
+
+            let mut messages = vec![format!(
+                "yt-dlp is available{} via {command_label}.",
+                version
+                    .as_ref()
+                    .map(|value| format!(" ({value})"))
+                    .unwrap_or_default()
+            )];
+
+            if let Some(file_name) = cookies_file_name.as_deref() {
+                messages.push(format!(
+                    "Local downloader cookies are configured through {file_name}."
+                ));
+            } else {
+                messages.push(
+                    "For credential-bound platforms, place yt-dlp-cookies.txt in the app data directory."
+                        .to_string(),
+                );
+            }
+
+            RuntimeDiagnostics {
+                desktop_runtime_available: true,
+                yt_dlp_available: true,
+                yt_dlp_version: version.clone(),
+                yt_dlp_command: Some(command_label.clone()),
+                yt_dlp_cookies_configured: cookies_file.is_some(),
+                yt_dlp_cookies_file: cookies_file_name,
+                messages,
+            }
+        }
+        Err(error) => RuntimeDiagnostics {
+            desktop_runtime_available: true,
+            yt_dlp_available: false,
+            yt_dlp_version: None,
+            yt_dlp_command: None,
+            yt_dlp_cookies_configured: cookies_file.is_some(),
+            yt_dlp_cookies_file: cookies_file_name,
+            messages: vec![error],
+        },
+    }
+}
+
+pub fn validate_collection_manifest(
+    connection: &Connection,
+    manifest_json: &str,
+) -> Result<ManifestValidationReport, String> {
+    let mut report = manifest::validate_collection_manifest(manifest_json);
+
+    if report.valid && report.trust_state.as_deref() == Some("signed-untrusted") {
+        if let Some(curator) = report.curator.as_ref() {
+            if let Some(trusted_curator_id) =
+                trusted_curator_id_for_public_key(connection, &curator.public_key)?
+            {
+                report.trust_state = Some("signed-trusted".to_string());
+                report.trusted_curator_id = Some(trusted_curator_id);
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+pub fn add_trusted_curator(
+    connection: &mut Connection,
+    display_name: String,
+    public_key: String,
+    trust_note: Option<String>,
+) -> Result<TrustedCurator, String> {
+    let display_name = display_name.trim();
+    if display_name.is_empty() {
+        return Err("Trusted curator display name is required.".to_string());
+    }
+
+    let public_key = public_key.trim();
+    if public_key.is_empty() {
+        return Err("Trusted curator public key is required.".to_string());
+    }
+    manifest::validate_ed25519_public_key(public_key)
+        .map_err(|_| "Trusted curator public key must be an Ed25519 public key.".to_string())?;
+
+    let trust_note = trust_note
+        .map(|note| note.trim().to_string())
+        .filter(|note| !note.is_empty());
+    let curator_id = format!("trusted-curator-{}", stable_suffix(public_key));
+    let added_at = Utc::now().to_rfc3339();
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+
+    transaction
+        .execute(
+            "INSERT INTO trusted_curators (id, display_name, public_key, trust_note, added_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(public_key) DO UPDATE SET
+               display_name = excluded.display_name,
+               trust_note = excluded.trust_note",
+            params![
+                curator_id,
+                display_name,
+                public_key,
+                trust_note.as_deref(),
+                added_at
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    let curator = trusted_curator_for_public_key(&transaction, public_key)?
+        .ok_or_else(|| "Trusted curator could not be saved.".to_string())?;
+    promote_sources_for_trusted_curator(&transaction, &curator.id, &curator.public_key)?;
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    Ok(curator)
+}
+
+pub fn remove_trusted_curator(
+    connection: &mut Connection,
+    curator_id: String,
+) -> Result<TrustCuratorSummary, String> {
+    let curator_id = curator_id.trim();
+    if curator_id.is_empty() {
+        return Err("Trusted curator id is required.".to_string());
+    }
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let curator = trusted_curator_for_id(&transaction, curator_id)?
+        .ok_or_else(|| "Trusted curator was not found.".to_string())?;
+    let sources_updated =
+        downgrade_sources_for_trusted_curator(&transaction, &curator.id, &curator.public_key)?;
+
+    transaction
+        .execute(
+            "DELETE FROM trusted_curators WHERE id = ?1",
+            params![&curator.id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    Ok(TrustCuratorSummary {
+        curator_id: curator.id,
+        display_name: curator.display_name.clone(),
+        public_key: curator.public_key.clone(),
+        sources_updated,
+        messages: vec![format!(
+            "Removed {} from trusted curators. {} signed source(s) are now untrusted.",
+            curator.display_name, sources_updated
+        )],
+    })
+}
+
+pub fn search_lessons(connection: &Connection, query: &str) -> Result<Vec<Lesson>, String> {
+    let trimmed = query.trim();
+
+    if trimmed.is_empty() {
+        return fetch_lessons(connection);
+    }
+
+    let fts_query = trimmed
+        .split_whitespace()
+        .map(|token| {
+            token
+                .chars()
+                .filter(|character| character.is_alphanumeric())
+                .collect::<String>()
+        })
+        .filter(|token| !token.is_empty())
+        .map(|token| format!("{token}*"))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if fts_query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut statement = connection
+        .prepare(
+            "SELECT l.id, l.title, l.content_type, l.teacher_id, l.collection_id, l.source_id,
+                    l.source_url, l.published_at, l.description, l.thumbnail_tone,
+                    l.duration_seconds, l.media_file_id, l.provenance_id
+             FROM lessons_fts f
+             JOIN lessons l ON l.id = f.lesson_id
+             WHERE lessons_fts MATCH ?
+             ORDER BY rank",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = statement
+        .query_map(params![fts_query], lesson_from_row)
+        .map_err(|error| error.to_string())?;
+    let lessons = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    Ok(lessons)
+}
+
+pub fn resolve_media_file_path(app: &AppHandle, media_file_id: String) -> Result<String, String> {
+    let media_file_id = media_file_id.trim();
+
+    if media_file_id.is_empty() {
+        return Err("Media file id is required.".to_string());
+    }
+
+    let data_dir = app_data_dir(app)?;
+    let connection = open_connection(app)?;
+    let relative_path: Option<String> = connection
+        .query_row(
+            "SELECT relative_path FROM media_files WHERE id = ?1",
+            params![media_file_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let relative_path = relative_path.ok_or_else(|| "Media file was not found.".to_string())?;
+    let media_path = resolve_library_media_path(&data_dir, &relative_path)
+        .ok_or_else(|| "Media file path is outside the app library.".to_string())?;
+
+    if !media_path.is_file() {
+        return Err("Media file is missing from disk. Re-download this lesson.".to_string());
+    }
+
+    Ok(media_path.to_string_lossy().to_string())
+}
+
+pub fn import_local_files(app: &AppHandle, paths: Vec<String>) -> Result<ImportSummary, String> {
+    let data_dir = app_data_dir(app)?;
+    let library_dir = data_dir.join("library/imports");
+    fs::create_dir_all(&library_dir).map_err(|error| error.to_string())?;
+
+    let mut imported: i64 = 0;
+    let mut skipped: i64 = 0;
+    let mut failed: i64 = 0;
+    let mut messages = Vec::new();
+    let mut connection = open_connection(app)?;
+
+    let import_candidates = paths
+        .iter()
+        .flat_map(|path| collect_media_files(Path::new(path)))
+        .collect::<Vec<_>>();
+
+    if import_candidates.is_empty() {
+        return Ok(ImportSummary {
+            imported,
+            skipped: paths.len() as i64,
+            failed,
+            messages: vec!["No supported video, audio, or PDF files were provided.".to_string()],
+        });
+    }
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+
+    for source_path in import_candidates {
+        let title = source_path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("Imported lesson")
+            .replace(['_', '-'], " ");
+        let source_hash = match hash_file(&source_path) {
+            Ok(hash) => format!("sha256:{hash}"),
+            Err(error) => {
+                failed += 1;
+                messages.push(format!("{}: {error}", source_path.display()));
+                continue;
+            }
+        };
+
+        if let Some(existing_title) = duplicate_lesson_title_for_hash(&transaction, &source_hash)? {
+            skipped += 1;
+            messages.push(format!(
+                "Skipped duplicate \"{title}\"; already saved as \"{existing_title}\"."
+            ));
+            continue;
+        }
+
+        match copy_media_into_library(&source_path, &library_dir) {
+            Ok((relative_path, content_hash, size_bytes)) => {
+                let lesson_id = format!("lesson-{}", Uuid::new_v4());
+                let media_file_id = format!("media-{}", Uuid::new_v4());
+                let provenance_id = format!("prov-{}", Uuid::new_v4());
+                let content_type = content_type_from_path(&source_path);
+                let imported_at = Utc::now().to_rfc3339();
+                let origin_url = format!(
+                    "local-import://{}",
+                    source_path
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("unknown")
+                );
+
+                transaction
+                    .execute(
+                        "INSERT INTO lessons
+                         (id, title, content_type, teacher_id, collection_id, source_id, source_url,
+                          published_at, description, thumbnail_tone, duration_seconds,
+                          media_file_id, provenance_id)
+                         VALUES (?1, ?2, ?3, 'teacher-3', 'collection-2', 'source-local-files',
+                          ?4, ?5, 'Imported local study file', 'emerald', NULL, ?6, ?7)",
+                        params![
+                            lesson_id,
+                            title,
+                            content_type,
+                            origin_url,
+                            imported_at,
+                            media_file_id,
+                            provenance_id
+                        ],
+                    )
+                    .map_err(|error| error.to_string())?;
+
+                transaction
+                    .execute(
+                        "INSERT INTO media_files
+                         (id, lesson_id, relative_path, content_hash, size_bytes, codec,
+                          import_status, hash_verification_state)
+                         VALUES (?1, ?2, ?3, ?4, ?5, NULL, 'ready', 'matched')",
+                        params![
+                            media_file_id,
+                            lesson_id,
+                            relative_path,
+                            content_hash,
+                            size_bytes
+                        ],
+                    )
+                    .map_err(|error| error.to_string())?;
+
+                transaction
+                    .execute(
+                        "INSERT INTO provenance_records
+                         (id, lesson_id, origin_url, permission_note, imported_at, adapter_name, content_hash)
+                         VALUES (?1, ?2, ?3, ?4, ?5, 'LocalFilesAdapter', ?6)",
+                        params![
+                            provenance_id,
+                            lesson_id,
+                            origin_url,
+                            LOCAL_PROVENANCE_NOTE,
+                            imported_at,
+                            content_hash
+                        ],
+                    )
+                    .map_err(|error| error.to_string())?;
+
+                transaction
+                    .execute(
+                        "INSERT INTO lessons_fts
+                         (lesson_id, title, description, teacher, collection_title, source_label)
+                         VALUES (?1, ?2, 'Imported local study file', 'Personal Library',
+                          'Local Imports', 'Local Files')",
+                        params![lesson_id, title],
+                    )
+                    .map_err(|error| error.to_string())?;
+
+                imported += 1;
+            }
+            Err(error) => {
+                failed += 1;
+                messages.push(format!("{}: {error}", source_path.display()));
+            }
+        }
+    }
+
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    if messages.is_empty() {
+        messages.push(format!(
+            "{imported} study file(s) imported into the app library."
+        ));
+    } else if imported > 0 || skipped > 0 {
+        messages.insert(
+            0,
+            format!("{imported} study file(s) imported; {skipped} duplicate(s) skipped."),
+        );
+    }
+
+    Ok(ImportSummary {
+        imported,
+        skipped,
+        failed,
+        messages,
+    })
+}
+
+pub fn ingest_source_url(app: &AppHandle, source_url: String) -> Result<IngestSummary, String> {
+    let normalized_input = normalize_source_input(&source_url)?;
+    let mut connection = open_connection(app)?;
+    let client = Client::builder()
+        .user_agent(INGEST_USER_AGENT)
+        .timeout(Duration::from_secs(25))
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    if let Some(telegram_source) = parse_telegram_source(&normalized_input) {
+        return ingest_public_telegram(
+            &mut connection,
+            &client,
+            &normalized_input,
+            telegram_source,
+        );
+    }
+
+    if let Some(identifier) = parse_archive_org_identifier(&normalized_input) {
+        return ingest_archive_org_item(&mut connection, &client, &normalized_input, &identifier);
+    }
+
+    if let Some(summary) = ingest_direct_source_url(&mut connection, &client, &normalized_input)? {
+        return Ok(summary);
+    }
+
+    if is_nostr_reference(&normalized_input) {
+        let detail = "Nostr relay discovery is planned for study circles and curator discovery, but it is not the media distribution layer in v1.".to_string();
+        record_standalone_job(&mut connection, &normalized_input, "unsupported", &detail)?;
+        return Ok(IngestSummary {
+            source_url: normalized_input,
+            discovered: 0,
+            imported: 0,
+            skipped: 0,
+            failed: 1,
+            messages: vec![detail],
+        });
+    }
+
+    let feed_url = normalize_feed_url(&normalized_input);
+    match ingest_feed_url(&mut connection, &client, &normalized_input, &feed_url) {
+        Ok(summary) => Ok(summary),
+        Err(error) => {
+            let detail = if is_probably_telegram_invite(&normalized_input) {
+                "Private Telegram links cannot be scraped without a Telegram session. Export media manually or connect a local session when that adapter is added.".to_string()
+            } else {
+                format!(
+                    "{error} Supported no-login inputs today: Archive.org item URLs, custom RSS/Atom feeds, public t.me channel URLs, YouTube channel_id feeds, YouTube playlist feeds, and direct YouTube/Rumble/Odysee video URLs."
+                )
+            };
+            record_standalone_job(&mut connection, &normalized_input, "unsupported", &detail)?;
+            Ok(IngestSummary {
+                source_url: normalized_input,
+                discovered: 0,
+                imported: 0,
+                skipped: 0,
+                failed: 1,
+                messages: vec![detail],
+            })
+        }
+    }
+}
+
+pub fn clear_source_content(
+    app: &AppHandle,
+    source_id: String,
+    remove_source: bool,
+) -> Result<ClearSourceSummary, String> {
+    let source_id = source_id.trim().to_string();
+
+    if source_id.is_empty() {
+        return Err("Source id is required.".to_string());
+    }
+
+    let data_dir = app_data_dir(app)?;
+    let mut connection = open_connection(app)?;
+    let source_label: Option<String> = connection
+        .query_row(
+            "SELECT label FROM sources WHERE id = ?1",
+            params![&source_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let source_label = source_label.ok_or_else(|| "Source was not found.".to_string())?;
+    let source_is_default = is_default_source_id(&source_id);
+    let should_remove_source = remove_source && !source_is_default;
+    let affected_collections = collect_source_column(&connection, "collection_id", &source_id)?;
+    let affected_teachers = collect_source_column(&connection, "teacher_id", &source_id)?;
+    let media_paths = collect_source_media_paths(&connection, &source_id)?;
+    let lessons_removed: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM lessons WHERE source_id = ?1",
+            params![&source_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let media_files_removed = media_paths.len() as i64;
+    let mut messages = Vec::new();
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+
+    transaction
+        .execute(
+            "DELETE FROM lessons_fts
+             WHERE lesson_id IN (SELECT id FROM lessons WHERE source_id = ?1)",
+            params![&source_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM watch_state
+             WHERE lesson_id IN (SELECT id FROM lessons WHERE source_id = ?1)",
+            params![&source_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM media_files
+             WHERE lesson_id IN (SELECT id FROM lessons WHERE source_id = ?1)",
+            params![&source_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM provenance_records
+             WHERE lesson_id IN (SELECT id FROM lessons WHERE source_id = ?1)",
+            params![&source_id],
+        )
+        .map_err(|error| error.to_string())?;
+    let jobs_removed = transaction
+        .execute(
+            "DELETE FROM jobs
+             WHERE source_id = ?1
+                OR lesson_id IN (SELECT id FROM lessons WHERE source_id = ?1)",
+            params![&source_id],
+        )
+        .map_err(|error| error.to_string())? as i64;
+    transaction
+        .execute(
+            "DELETE FROM teacher_relays WHERE id = ?1",
+            params![format!("relay-{source_id}")],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM lessons WHERE source_id = ?1",
+            params![&source_id],
+        )
+        .map_err(|error| error.to_string())?;
+
+    for collection_id in &affected_collections {
+        let remaining_lessons: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM lessons WHERE collection_id = ?1",
+                params![collection_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+
+        if remaining_lessons == 0
+            && collection_owned_by_source(&transaction, collection_id, &source_id)?
+        {
+            transaction
+                .execute(
+                    "DELETE FROM collections WHERE id = ?1 AND id <> 'collection-2'",
+                    params![collection_id],
+                )
+                .map_err(|error| error.to_string())?;
+        } else {
+            transaction
+                .execute(
+                    "UPDATE collections
+                     SET lesson_count = (SELECT COUNT(*) FROM lessons WHERE collection_id = ?1)
+                     WHERE id = ?1",
+                    params![collection_id],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+    }
+
+    for teacher_id in &affected_teachers {
+        let remaining_lessons: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM lessons WHERE teacher_id = ?1",
+                params![teacher_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+
+        if remaining_lessons == 0 && teacher_id != "teacher-3" {
+            transaction
+                .execute("DELETE FROM teachers WHERE id = ?1", params![teacher_id])
+                .map_err(|error| error.to_string())?;
+        }
+    }
+
+    if should_remove_source {
+        transaction
+            .execute("DELETE FROM sources WHERE id = ?1", params![&source_id])
+            .map_err(|error| error.to_string())?;
+    } else {
+        transaction
+            .execute(
+                "UPDATE sources SET last_checked_at = NULL WHERE id = ?1",
+                params![&source_id],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    let failed_file_deletes = remove_media_files_from_disk(&data_dir, &media_paths);
+
+    if should_remove_source {
+        messages.push(format!(
+            "Removed source and cleared {lessons_removed} lesson(s)."
+        ));
+    } else {
+        messages.push(format!(
+            "Cleared {lessons_removed} lesson(s) from {source_label}."
+        ));
+    }
+
+    if media_files_removed > 0 {
+        messages.push(format!(
+            "Removed {media_files_removed} media file record(s) from the library."
+        ));
+    }
+
+    if failed_file_deletes > 0 {
+        messages.push(format!(
+            "{failed_file_deletes} copied media file(s) could not be removed from disk."
+        ));
+    }
+
+    Ok(ClearSourceSummary {
+        source_id,
+        source_label,
+        removed_source: should_remove_source,
+        lessons_removed,
+        media_files_removed,
+        jobs_removed,
+        messages,
+    })
+}
+
+pub fn download_source_media(
+    app: &AppHandle,
+    source_id: String,
+) -> Result<DownloadSourceSummary, String> {
+    let source_id = source_id.trim().to_string();
+
+    if source_id.is_empty() {
+        return Err("Source id is required.".to_string());
+    }
+
+    let data_dir = app_data_dir(app)?;
+    let download_root = data_dir
+        .join("library")
+        .join("downloads")
+        .join(safe_path_segment(&source_id));
+    fs::create_dir_all(&download_root).map_err(|error| error.to_string())?;
+
+    let mut connection = open_connection(app)?;
+    let source_label: Option<String> = connection
+        .query_row(
+            "SELECT label FROM sources WHERE id = ?1",
+            params![&source_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let source_label = source_label.ok_or_else(|| "Source was not found.".to_string())?;
+    let skipped = count_existing_media_lessons(&connection, &source_id)?;
+    let lessons = fetch_missing_media_lessons(&connection, &source_id)?;
+    let attempted = lessons.len() as i64;
+    let source_job_id = format!("job-download-source-{}", stable_suffix(&source_id));
+    let mut downloaded = 0;
+    let mut failed = 0;
+    let mut messages = Vec::new();
+
+    if lessons.is_empty() {
+        let detail = format!(
+            "No missing video, audio, or PDF files. {skipped} item(s) already have local files or saved post content."
+        );
+        upsert_job(
+            &connection,
+            &source_job_id,
+            "download",
+            "skipped",
+            Some(&source_id),
+            None,
+            &format!("Download media: {source_label}"),
+            &detail,
+        )?;
+
+        return Ok(DownloadSourceSummary {
+            source_id,
+            source_label,
+            attempted,
+            downloaded,
+            skipped,
+            failed,
+            messages: vec![detail],
+        });
+    }
+
+    upsert_job(
+        &connection,
+        &source_job_id,
+        "download",
+        "running",
+        Some(&source_id),
+        None,
+        &format!("Download media: {source_label}"),
+        &format!("Starting download of {attempted} missing file-backed item(s)."),
+    )?;
+
+    let mut yt_dlp = None;
+    let yt_dlp_cookies = yt_dlp_cookie_file(&data_dir);
+    let client = Client::builder()
+        .user_agent(INGEST_USER_AGENT)
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    for (index, lesson) in lessons.iter().enumerate() {
+        let lesson_dir = download_root.join(safe_path_segment(&lesson.id));
+        fs::create_dir_all(&lesson_dir).map_err(|error| error.to_string())?;
+        let lesson_job_id = format!("job-download-lesson-{}", lesson.id);
+        let position = index + 1;
+
+        upsert_job(
+            &connection,
+            &lesson_job_id,
+            "download",
+            "running",
+            Some(&source_id),
+            Some(&lesson.id),
+            &format!("Download: {}", lesson.title),
+            &format!("Item {position} of {attempted} from {source_label}."),
+        )?;
+
+        let media_result = existing_completed_media_file(&lesson_dir)
+            .map(Ok)
+            .unwrap_or_else(|| {
+                download_lesson_media(
+                    &client,
+                    &mut yt_dlp,
+                    lesson,
+                    &lesson_dir,
+                    &data_dir,
+                    yt_dlp_cookies.as_deref(),
+                )
+            })
+            .and_then(|media_path| {
+                record_downloaded_media(
+                    &mut connection,
+                    &data_dir,
+                    &lesson.id,
+                    &media_path,
+                    lesson.expected_content_hash.as_deref(),
+                )?;
+                Ok(media_path)
+            });
+
+        match media_result {
+            Ok(media_path) => {
+                downloaded += 1;
+                upsert_job(
+                    &connection,
+                    &lesson_job_id,
+                    "download",
+                    "downloaded",
+                    Some(&source_id),
+                    Some(&lesson.id),
+                    &format!("Download: {}", lesson.title),
+                    &format!("Saved {}", media_path.display()),
+                )?;
+            }
+            Err(error) => {
+                failed += 1;
+                messages.push(format!("{}: {error}", lesson.title));
+                upsert_job(
+                    &connection,
+                    &lesson_job_id,
+                    "download",
+                    "failed",
+                    Some(&source_id),
+                    Some(&lesson.id),
+                    &format!("Download: {}", lesson.title),
+                    &error,
+                )?;
+            }
+        }
+
+        let remaining = attempted - downloaded - failed;
+        upsert_job(
+            &connection,
+            &source_job_id,
+            "download",
+            "running",
+            Some(&source_id),
+            None,
+            &format!("Download media: {source_label}"),
+            &format!(
+                "{downloaded} downloaded, {failed} failed, {skipped} skipped; {remaining} remaining."
+            ),
+        )?;
+    }
+
+    let job_state = if failed == 0 { "downloaded" } else { "failed" };
+    let detail = format!(
+        "{downloaded} downloaded, {failed} failed, {skipped} skipped from {attempted} missing file-backed item(s)."
+    );
+    upsert_job(
+        &connection,
+        &source_job_id,
+        "download",
+        job_state,
+        Some(&source_id),
+        None,
+        &format!("Download media: {source_label}"),
+        &detail,
+    )?;
+
+    messages.insert(
+        0,
+        format!("{downloaded} file-backed item(s) downloaded for {source_label}."),
+    );
+
+    Ok(DownloadSourceSummary {
+        source_id,
+        source_label,
+        attempted,
+        downloaded,
+        skipped,
+        failed,
+        messages,
+    })
+}
+
+fn ingest_public_telegram(
+    connection: &mut Connection,
+    client: &Client,
+    original_url: &str,
+    telegram_source: TelegramSource,
+) -> Result<IngestSummary, String> {
+    let preview_url = format!("https://t.me/s/{}", telegram_source.username);
+    let body = fetch_text(client, &preview_url)?;
+    let document = Html::parse_document(&body);
+    let message_selector = selector(".tgme_widget_message");
+    let message_text_selector = selector(".tgme_widget_message_text");
+    let message_link_selector = selector("a.tgme_widget_message_date");
+    let message_time_selector = selector(".tgme_widget_message_date time");
+    let channel_title = first_document_text(
+        &document,
+        &[
+            ".tgme_channel_info_header_title span",
+            ".tgme_channel_info_header_title",
+            ".tgme_page_title",
+        ],
+    )
+    .unwrap_or_else(|| telegram_source.username.clone());
+    let mut lessons = Vec::new();
+
+    for message in document.select(&message_selector) {
+        let post_ref = message.value().attr("data-post").unwrap_or_default();
+        let post_id = post_ref
+            .rsplit('/')
+            .next()
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        if let (Some(expected), Some(actual)) = (&telegram_source.post_id, &post_id) {
+            if expected != actual {
+                continue;
+            }
+        }
+
+        let source_url = message
+            .select(&message_link_selector)
+            .next()
+            .and_then(|link| link.value().attr("href"))
+            .map(str::to_string)
+            .or_else(|| {
+                post_id
+                    .as_ref()
+                    .map(|id| format!("https://t.me/{}/{}", telegram_source.username, id))
+            })
+            .unwrap_or_else(|| preview_url.clone());
+
+        let description = message
+            .select(&message_text_selector)
+            .next()
+            .map(|element| normalize_text(&element.text().collect::<Vec<_>>().join(" ")))
+            .filter(|value| !value.is_empty());
+        let published_at = message
+            .select(&message_time_selector)
+            .next()
+            .and_then(|time| time.value().attr("datetime"))
+            .map(str::to_string);
+        let title = title_from_text(description.as_deref())
+            .or_else(|| post_id.as_ref().map(|id| format!("Telegram post {id}")))
+            .unwrap_or_else(|| "Telegram channel post".to_string());
+
+        lessons.push(DiscoveredLesson {
+            title,
+            content_type: "post".to_string(),
+            source_url,
+            published_at,
+            description,
+            duration_seconds: None,
+            adapter_name: "TelegramPublicPreviewAdapter".to_string(),
+            provenance_note: "Captured from Telegram public channel preview.".to_string(),
+            content_hash: None,
+        });
+    }
+
+    if lessons.is_empty() {
+        let detail = format!(
+            "No public posts were found at {preview_url}. Public channels can usually be read without sign-in through t.me/s, but private channels, invite links, removed posts, and restricted media require a Telegram account or manual export."
+        );
+        record_standalone_job(connection, original_url, "unsupported", &detail)?;
+        return Ok(IngestSummary {
+            source_url: original_url.to_string(),
+            discovered: 0,
+            imported: 0,
+            skipped: 0,
+            failed: 1,
+            messages: vec![detail],
+        });
+    }
+
+    let source_suffix = stable_suffix(&format!("telegram:{}", telegram_source.username));
+    let source_label = format!("Telegram: {channel_title}");
+    let context = SourceContext {
+        source_id: format!("source-telegram-{source_suffix}"),
+        platform: "telegram".to_string(),
+        source_label: source_label.clone(),
+        source_identifier: preview_url,
+        feed_format: "rss".to_string(),
+        feed_transport: "https".to_string(),
+        trust_state: "unsigned".to_string(),
+        trusted_curator_id: None,
+        last_verified_at: None,
+        source_capability: capability(
+            "supported",
+            "limited",
+            "supported",
+            false,
+            "none",
+            "best-effort",
+            "Public channel preview scraping works without sign-in when Telegram exposes t.me/s pages; private channels require a local session.",
+        ),
+        teacher_id: format!("teacher-telegram-{source_suffix}"),
+        teacher_label: channel_title,
+        teacher_description: "Imported from a public Telegram channel preview.".to_string(),
+        teacher_source_links: vec![original_url.to_string()],
+        collection_id: format!("collection-telegram-{source_suffix}"),
+        collection_title: format!("Telegram: {}", telegram_source.username),
+        collection_owner_label: "Public Telegram source".to_string(),
+    };
+
+    persist_discovered_lessons(
+        connection,
+        original_url,
+        context,
+        lessons,
+        "Telegram public channel ingest",
+    )
+}
+
+fn ingest_archive_org_item(
+    connection: &mut Connection,
+    client: &Client,
+    original_url: &str,
+    identifier: &str,
+) -> Result<IngestSummary, String> {
+    let metadata_url = archive_metadata_url(identifier);
+    let metadata = fetch_json(client, &metadata_url)?;
+    let item_metadata = metadata.get("metadata").unwrap_or(&metadata);
+    let item_title = json_field_text(item_metadata, "title")
+        .unwrap_or_else(|| format!("Archive.org item {identifier}"));
+    let creator =
+        json_field_text(item_metadata, "creator").unwrap_or_else(|| "Archive.org".to_string());
+    let item_description = json_field_text(item_metadata, "description");
+    let published_at = json_field_text(item_metadata, "date");
+    let Some(files) = metadata.get("files").and_then(serde_json::Value::as_array) else {
+        let detail = metadata
+            .get("error")
+            .and_then(json_text)
+            .map(|error| format!("Archive.org metadata error for {identifier}: {error}."))
+            .unwrap_or_else(|| {
+                format!(
+                    "Archive.org item {identifier} was not found or did not include a files list."
+                )
+            });
+        record_standalone_job(connection, original_url, "unsupported", &detail)?;
+        return Ok(IngestSummary {
+            source_url: original_url.to_string(),
+            discovered: 0,
+            imported: 0,
+            skipped: 0,
+            failed: 1,
+            messages: vec![detail],
+        });
+    };
+    let lessons = files
+        .iter()
+        .filter_map(|file| {
+            archive_file_lesson(
+                identifier,
+                file,
+                &item_title,
+                item_description.as_deref(),
+                published_at.as_deref(),
+            )
+        })
+        .take(300)
+        .collect::<Vec<_>>();
+
+    if lessons.is_empty() {
+        let detail = format!(
+            "Archive.org item {identifier} was found, but no supported video, audio, or PDF files were listed."
+        );
+        record_standalone_job(connection, original_url, "unsupported", &detail)?;
+        return Ok(IngestSummary {
+            source_url: original_url.to_string(),
+            discovered: 0,
+            imported: 0,
+            skipped: 0,
+            failed: 1,
+            messages: vec![detail],
+        });
+    }
+
+    let source_suffix = stable_suffix(&format!("archive-org:{identifier}"));
+    let source_label = format!("Archive.org: {item_title}");
+    let context = SourceContext {
+        source_id: format!("source-archive-org-{source_suffix}"),
+        platform: "archive-org".to_string(),
+        source_label,
+        source_identifier: format!("https://archive.org/details/{identifier}"),
+        feed_format: "json-feed".to_string(),
+        feed_transport: "https".to_string(),
+        trust_state: "unsigned".to_string(),
+        trusted_curator_id: None,
+        last_verified_at: None,
+        source_capability: capability(
+            "supported",
+            "supported",
+            "supported",
+            false,
+            "none",
+            "stable",
+            "Uses Archive.org official metadata and downloadable file listings for videos, audio, and PDFs.",
+        ),
+        teacher_id: format!("teacher-archive-org-{source_suffix}"),
+        teacher_label: creator,
+        teacher_description: "Imported from Archive.org item metadata.".to_string(),
+        teacher_source_links: vec![original_url.to_string()],
+        collection_id: format!("collection-archive-org-{source_suffix}"),
+        collection_title: item_title,
+        collection_owner_label: "Archive.org item".to_string(),
+    };
+
+    persist_discovered_lessons(
+        connection,
+        original_url,
+        context,
+        lessons,
+        "Archive.org metadata ingest",
+    )
+}
+
+fn ingest_direct_source_url(
+    connection: &mut Connection,
+    client: &Client,
+    original_url: &str,
+) -> Result<Option<IngestSummary>, String> {
+    let Some((platform, content_type)) = direct_source_platform(original_url) else {
+        return Ok(None);
+    };
+    let title = direct_source_title(client, original_url);
+    let source_suffix = stable_suffix(&format!("{platform}:{original_url}"));
+    let platform_label = direct_source_platform_label(platform);
+    let context = SourceContext {
+        source_id: format!("source-{platform}-{source_suffix}"),
+        platform: platform.to_string(),
+        source_label: format!("{platform_label}: {title}"),
+        source_identifier: original_url.to_string(),
+        feed_format: "rss".to_string(),
+        feed_transport: "https".to_string(),
+        trust_state: "unsigned".to_string(),
+        trusted_curator_id: None,
+        last_verified_at: None,
+        source_capability: direct_source_capability(platform),
+        teacher_id: format!("teacher-{platform}-{source_suffix}"),
+        teacher_label: host_label(original_url),
+        teacher_description: format!("Imported from a user-added {platform_label} URL."),
+        teacher_source_links: vec![original_url.to_string()],
+        collection_id: format!("collection-{platform}-{source_suffix}"),
+        collection_title: title.clone(),
+        collection_owner_label: format!("{platform_label} source"),
+    };
+    let lessons = vec![DiscoveredLesson {
+        title,
+        content_type: content_type.to_string(),
+        source_url: original_url.to_string(),
+        published_at: None,
+        description: Some(
+            "Captured from a user-added source URL; media download remains user controlled."
+                .to_string(),
+        ),
+        duration_seconds: None,
+        adapter_name: "DirectSourceUrlAdapter".to_string(),
+        provenance_note:
+            "Captured from a user-added source URL; media download remains user controlled."
+                .to_string(),
+        content_hash: None,
+    }];
+
+    persist_discovered_lessons(
+        connection,
+        original_url,
+        context,
+        lessons,
+        "Direct source ingest",
+    )
+    .map(Some)
+}
+
+fn ingest_feed_url(
+    connection: &mut Connection,
+    client: &Client,
+    original_url: &str,
+    feed_url: &str,
+) -> Result<IngestSummary, String> {
+    let body = fetch_text(client, feed_url)?;
+    let mut parsed_feed = parse_feed_document(&body, feed_url)?;
+
+    if parsed_feed.lessons.is_empty() {
+        return Err("Feed parsed successfully but contained no item or entry records.".to_string());
+    }
+
+    let platform = if parsed_feed.feed_format == "duroos-manifest" {
+        "teacher-relay".to_string()
+    } else {
+        platform_for_feed(original_url)
+    };
+    let trusted_curator_id = parsed_feed.curator.as_ref().and_then(|curator| {
+        trusted_curator_id_for_public_key(connection, &curator.public_key)
+            .ok()
+            .flatten()
+    });
+    if parsed_feed.trust_state == "signed-untrusted" && trusted_curator_id.is_some() {
+        parsed_feed.trust_state = "signed-trusted".to_string();
+    }
+    let source_suffix = stable_suffix(feed_url);
+    let source_label = match platform.as_str() {
+        "youtube" => format!("YouTube: {}", parsed_feed.title),
+        "archive-org" => format!("Archive.org: {}", parsed_feed.title),
+        "teacher-relay" => format!("Curator: {}", parsed_feed.title),
+        "rss-feed" => format!("Feed: {}", parsed_feed.title),
+        _ => parsed_feed.title.clone(),
+    };
+    let teacher_label = parsed_feed
+        .curator
+        .as_ref()
+        .map(|curator| curator.display_name.clone())
+        .unwrap_or_else(|| parsed_feed.title.clone());
+    let teacher_description = parsed_feed
+        .curator
+        .as_ref()
+        .map(|curator| format!("Signed curator feed key: {}", curator.public_key))
+        .unwrap_or_else(|| {
+            format!(
+                "Imported from a {} subscription.",
+                parsed_feed.feed_format.replace('-', " ")
+            )
+        });
+    let source_note = match parsed_feed.feed_format.as_str() {
+        "duroos-manifest" => {
+            "Signed Duroos manifests publish curator identity, source refs, hashes, and optional retrieval refs."
+        }
+        "json-feed" => {
+            "JSON Feed subscriptions can ingest videos, audio, PDFs, and posts without account credentials."
+        }
+        "rss" | "atom" => {
+            "RSS/Atom subscriptions can ingest video, audio, PDF, and teacher post items without account credentials."
+        }
+        _ => "Open feed subscriptions keep source metadata local.",
+    };
+    let context = SourceContext {
+        source_id: format!("source-{platform}-{source_suffix}"),
+        platform: platform.clone(),
+        source_label: source_label.clone(),
+        source_identifier: feed_url.to_string(),
+        feed_format: parsed_feed.feed_format.clone(),
+        feed_transport: "https".to_string(),
+        trust_state: parsed_feed.trust_state.clone(),
+        trusted_curator_id,
+        last_verified_at: if parsed_feed.trust_state.starts_with("signed-") {
+            Some(Utc::now().to_rfc3339())
+        } else {
+            None
+        },
+        source_capability: capability(
+            "supported",
+            "limited",
+            "supported",
+            false,
+            "none",
+            if platform == "teacher-relay" {
+                "stable"
+            } else {
+                "best-effort"
+            },
+            source_note,
+        ),
+        teacher_id: parsed_feed
+            .curator
+            .as_ref()
+            .map(|curator| format!("teacher-curator-{}", safe_path_segment(&curator.id)))
+            .unwrap_or_else(|| format!("teacher-feed-{source_suffix}")),
+        teacher_label,
+        teacher_description,
+        teacher_source_links: vec![feed_url.to_string()],
+        collection_id: format!("collection-feed-{source_suffix}"),
+        collection_title: parsed_feed.title.clone(),
+        collection_owner_label: "Subscribed feed".to_string(),
+    };
+
+    persist_discovered_lessons(
+        connection,
+        original_url,
+        context,
+        parsed_feed.lessons,
+        "Feed ingest",
+    )
+}
+
+fn parse_feed_document(body: &str, feed_url: &str) -> Result<ParsedFeed, String> {
+    let trimmed = body.trim_start();
+
+    if trimmed.starts_with('{') {
+        let parsed = serde_json::from_str::<serde_json::Value>(body)
+            .map_err(|error| format!("Could not parse source JSON: {error}."))?;
+
+        if is_duroos_manifest(&parsed) {
+            return parse_duroos_manifest(body, &parsed);
+        }
+
+        if is_json_feed(&parsed) {
+            return parse_json_feed(&parsed, feed_url);
+        }
+
+        return Err("JSON source is not a JSON Feed or Duroos collection manifest.".to_string());
+    }
+
+    let document = roxmltree::Document::parse(body)
+        .map_err(|error| format!("Could not parse source as RSS/Atom XML: {error}."))?;
+    let feed_format = xml_feed_format(&document);
+    let title = feed_title(&document).unwrap_or_else(|| host_label(feed_url));
+    let lessons = feed_lessons(&document)?;
+
+    Ok(ParsedFeed {
+        title,
+        feed_format,
+        trust_state: "unsigned".to_string(),
+        curator: None,
+        lessons,
+    })
+}
+
+fn is_duroos_manifest(value: &serde_json::Value) -> bool {
+    value
+        .get("schemaVersion")
+        .and_then(serde_json::Value::as_i64)
+        .is_some_and(|version| version == 1 || version == 2)
+        && value.get("collection").is_some()
+        && value.get("lessons").is_some()
+}
+
+fn is_json_feed(value: &serde_json::Value) -> bool {
+    value
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(|version| version.contains("jsonfeed.org"))
+        .unwrap_or(false)
+        && value
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .is_some()
+}
+
+fn parse_duroos_manifest(
+    manifest_json: &str,
+    value: &serde_json::Value,
+) -> Result<ParsedFeed, String> {
+    let report = manifest::validate_collection_manifest(manifest_json);
+    if !report.valid {
+        return Err(format!(
+            "Duroos manifest validation failed: {}",
+            report.errors.join("; ")
+        ));
+    }
+
+    let collection = value
+        .get("collection")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "Duroos manifest collection must be an object.".to_string())?;
+    let title = collection
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .map(|title| clip_text(title, 90))
+        .unwrap_or_else(|| "Duroos collection".to_string());
+    let curator = value
+        .get("curator")
+        .and_then(serde_json::Value::as_object)
+        .map(|curator| ManifestCurator {
+            id: curator
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("curator")
+                .to_string(),
+            display_name: curator
+                .get("displayName")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Curator")
+                .to_string(),
+            public_key: curator
+                .get("publicKey")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        });
+    let lessons = value
+        .get("lessons")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "Duroos manifest lessons must be an array.".to_string())?
+        .iter()
+        .take(300)
+        .filter_map(duroos_manifest_lesson)
+        .collect::<Vec<_>>();
+
+    Ok(ParsedFeed {
+        title,
+        feed_format: "duroos-manifest".to_string(),
+        trust_state: report.trust_state.unwrap_or_else(|| "unsigned".to_string()),
+        curator,
+        lessons,
+    })
+}
+
+fn duroos_manifest_lesson(lesson: &serde_json::Value) -> Option<DiscoveredLesson> {
+    let lesson_object = lesson.as_object()?;
+    let title = lesson_object
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .map(|title| clip_text(title, 140))
+        .filter(|title| !title.is_empty())?;
+    let description = lesson_object
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+        .map(|description| clip_text(description, 900));
+    let source_url = downloadable_retrieval_url(lesson_object)
+        .or_else(|| first_source_ref_url(lesson_object))?;
+    let published_at = lesson_object
+        .get("sourceRefs")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|refs| refs.first())
+        .and_then(|source_ref| source_ref.get("publishedAt"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let content_hash = first_sha256_hash(lesson_object);
+    let content_type = lesson_object
+        .get("contentType")
+        .and_then(serde_json::Value::as_str)
+        .filter(|content_type| is_valid_content_type(content_type))
+        .map(str::to_string)
+        .unwrap_or_else(|| classify_feed_content(&source_url, None, description.as_deref()));
+    let provenance_note = lesson_object
+        .get("provenance")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|provenance| provenance.get("permissionNote"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("Imported from a Duroos curator manifest; review rights before downloading.")
+        .to_string();
+
+    Some(DiscoveredLesson {
+        title,
+        content_type,
+        source_url,
+        published_at,
+        description,
+        duration_seconds: lesson_object
+            .get("durationSeconds")
+            .and_then(serde_json::Value::as_i64),
+        adapter_name: "DuroosManifestAdapter".to_string(),
+        provenance_note,
+        content_hash,
+    })
+}
+
+fn parse_json_feed(value: &serde_json::Value, feed_url: &str) -> Result<ParsedFeed, String> {
+    let title = value
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .map(|title| clip_text(title, 90))
+        .unwrap_or_else(|| host_label(feed_url));
+    let lessons = value
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "JSON Feed items must be an array.".to_string())?
+        .iter()
+        .take(100)
+        .filter_map(json_feed_lesson)
+        .collect::<Vec<_>>();
+
+    Ok(ParsedFeed {
+        title,
+        feed_format: "json-feed".to_string(),
+        trust_state: "unsigned".to_string(),
+        curator: None,
+        lessons,
+    })
+}
+
+fn json_feed_lesson(item: &serde_json::Value) -> Option<DiscoveredLesson> {
+    let item_object = item.as_object()?;
+    let attachment = item_object
+        .get("attachments")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|attachments| {
+            attachments
+                .iter()
+                .filter_map(serde_json::Value::as_object)
+                .find(|attachment| {
+                    attachment
+                        .get("url")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|url| {
+                            classify_feed_content(
+                                url,
+                                attachment
+                                    .get("mime_type")
+                                    .and_then(serde_json::Value::as_str),
+                                None,
+                            ) != "post"
+                        })
+                        .unwrap_or(false)
+                })
+        });
+    let source_url = attachment
+        .and_then(|attachment| attachment.get("url"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            item_object
+                .get("external_url")
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| item_object.get("url").and_then(serde_json::Value::as_str))
+        .or_else(|| item_object.get("id").and_then(serde_json::Value::as_str))?
+        .to_string();
+    let description = item_object
+        .get("summary")
+        .or_else(|| item_object.get("content_text"))
+        .or_else(|| item_object.get("content_html"))
+        .and_then(serde_json::Value::as_str)
+        .map(normalize_source_text)
+        .flatten()
+        .map(|description| clip_text(&description, 900));
+    let title = item_object
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .map(|title| clip_text(title, 140))
+        .or_else(|| title_from_text(description.as_deref()))
+        .unwrap_or_else(|| "Untitled JSON feed item".to_string());
+    let mime_type = attachment
+        .and_then(|attachment| attachment.get("mime_type"))
+        .and_then(serde_json::Value::as_str);
+    let content_type = classify_feed_content(&source_url, mime_type, description.as_deref());
+    let content_hash = item_object
+        .get("contentHash")
+        .or_else(|| item_object.get("hash"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|hash| hash.starts_with("sha256:") || hash.len() == 64)
+        .map(str::to_string);
+
+    Some(DiscoveredLesson {
+        title,
+        content_type,
+        source_url,
+        published_at: item_object
+            .get("date_published")
+            .or_else(|| item_object.get("date_modified"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        description,
+        duration_seconds: attachment
+            .and_then(|attachment| attachment.get("duration_in_seconds"))
+            .and_then(serde_json::Value::as_i64),
+        adapter_name: "JsonFeedAdapter".to_string(),
+        provenance_note: PUBLIC_SOURCE_PROVENANCE_NOTE.to_string(),
+        content_hash,
+    })
+}
+
+fn downloadable_retrieval_url(
+    lesson_object: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    lesson_object
+        .get("retrievalRefs")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|refs| {
+            refs.iter()
+                .filter_map(serde_json::Value::as_object)
+                .find_map(|retrieval_ref| {
+                    let kind = retrieval_ref
+                        .get("kind")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    if matches!(kind, "direct-url" | "enclosure-url") {
+                        retrieval_ref
+                            .get("url")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                    } else {
+                        None
+                    }
+                })
+        })
+}
+
+fn first_source_ref_url(
+    lesson_object: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    lesson_object
+        .get("sourceRefs")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|refs| refs.first())
+        .and_then(|source_ref| source_ref.get("originUrl"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+fn first_sha256_hash(lesson_object: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    lesson_object
+        .get("contentHashes")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|hashes| {
+            hashes.iter().find_map(|hash| {
+                let hash = hash.as_str()?;
+                if hash.starts_with("sha256:") {
+                    Some(hash.to_string())
+                } else if hash.len() == 64
+                    && hash.chars().all(|character| character.is_ascii_hexdigit())
+                {
+                    Some(format!("sha256:{hash}"))
+                } else {
+                    None
+                }
+            })
+        })
+}
+
+fn trusted_curator_id_for_public_key(
+    connection: &Connection,
+    public_key: &str,
+) -> Result<Option<String>, String> {
+    connection
+        .query_row(
+            "SELECT id FROM trusted_curators WHERE public_key = ?1",
+            params![public_key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
+fn trusted_curator_for_public_key(
+    connection: &Connection,
+    public_key: &str,
+) -> Result<Option<TrustedCurator>, String> {
+    connection
+        .query_row(
+            "SELECT id, display_name, public_key, trust_note, added_at
+             FROM trusted_curators
+             WHERE public_key = ?1",
+            params![public_key],
+            |row| {
+                Ok(TrustedCurator {
+                    id: row.get(0)?,
+                    display_name: row.get(1)?,
+                    public_key: row.get(2)?,
+                    trust_note: row.get(3)?,
+                    added_at: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
+fn trusted_curator_for_id(
+    connection: &Connection,
+    curator_id: &str,
+) -> Result<Option<TrustedCurator>, String> {
+    connection
+        .query_row(
+            "SELECT id, display_name, public_key, trust_note, added_at
+             FROM trusted_curators
+             WHERE id = ?1",
+            params![curator_id],
+            |row| {
+                Ok(TrustedCurator {
+                    id: row.get(0)?,
+                    display_name: row.get(1)?,
+                    public_key: row.get(2)?,
+                    trust_note: row.get(3)?,
+                    added_at: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
+fn source_ids_for_curator_public_key(
+    connection: &Connection,
+    public_key: &str,
+) -> Result<Vec<String>, String> {
+    let marker = format!("Signed curator feed key: {public_key}");
+    let mut teacher_statement = connection
+        .prepare(
+            "SELECT source_links_json
+             FROM teachers
+             WHERE description = ?1",
+        )
+        .map_err(|error| error.to_string())?;
+    let teacher_rows = teacher_statement
+        .query_map(params![marker], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+    let source_links = teacher_rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter_map(|json| serde_json::from_str::<Vec<String>>(&json).ok())
+        .flatten()
+        .collect::<Vec<_>>();
+
+    if source_links.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut source_statement = connection
+        .prepare(
+            "SELECT id, identifier
+             FROM sources
+             WHERE feed_format = 'duroos-manifest'
+               AND trust_state IN ('signed-untrusted', 'signed-trusted')",
+        )
+        .map_err(|error| error.to_string())?;
+    let source_rows = source_statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| error.to_string())?;
+    let source_rows = source_rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    Ok(source_rows
+        .into_iter()
+        .filter_map(|(source_id, identifier)| {
+            source_links
+                .iter()
+                .any(|source_link| source_link == &identifier)
+                .then_some(source_id)
+        })
+        .collect())
+}
+
+fn promote_sources_for_trusted_curator(
+    connection: &Connection,
+    curator_id: &str,
+    public_key: &str,
+) -> Result<i64, String> {
+    let mut updated = 0;
+    for source_id in source_ids_for_curator_public_key(connection, public_key)? {
+        updated += connection
+            .execute(
+                "UPDATE sources
+                 SET trust_state = 'signed-trusted',
+                     trusted_curator_id = ?1,
+                     last_verified_at = COALESCE(last_verified_at, ?2)
+                 WHERE id = ?3
+                   AND trust_state = 'signed-untrusted'",
+                params![curator_id, Utc::now().to_rfc3339(), source_id],
+            )
+            .map_err(|error| error.to_string())? as i64;
+    }
+
+    Ok(updated)
+}
+
+fn downgrade_sources_for_trusted_curator(
+    connection: &Connection,
+    curator_id: &str,
+    public_key: &str,
+) -> Result<i64, String> {
+    let mut updated = connection
+        .execute(
+            "UPDATE sources
+             SET trust_state = 'signed-untrusted',
+                 trusted_curator_id = NULL
+             WHERE trusted_curator_id = ?1
+               AND trust_state = 'signed-trusted'",
+            params![curator_id],
+        )
+        .map_err(|error| error.to_string())? as i64;
+
+    for source_id in source_ids_for_curator_public_key(connection, public_key)? {
+        updated += connection
+            .execute(
+                "UPDATE sources
+                 SET trust_state = 'signed-untrusted',
+                     trusted_curator_id = NULL
+                 WHERE id = ?1
+                   AND trust_state = 'signed-trusted'",
+                params![source_id],
+            )
+            .map_err(|error| error.to_string())? as i64;
+    }
+
+    Ok(updated)
+}
+
+fn persist_discovered_lessons(
+    connection: &mut Connection,
+    source_url: &str,
+    context: SourceContext,
+    lessons: Vec<DiscoveredLesson>,
+    job_label: &str,
+) -> Result<IngestSummary, String> {
+    let discovered = lessons.len() as i64;
+    let mut imported = 0;
+    let mut skipped = 0;
+    let failed = 0;
+    let mut messages = Vec::new();
+    let now = Utc::now().to_rfc3339();
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+
+    ensure_source_context(&transaction, &context, &now)?;
+
+    for lesson in lessons {
+        if insert_discovered_lesson(&transaction, &context, &lesson, &now)? {
+            imported += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+
+    transaction
+        .execute(
+            "UPDATE collections
+             SET lesson_count = (SELECT COUNT(*) FROM lessons WHERE collection_id = ?1)
+             WHERE id = ?1",
+            params![context.collection_id],
+        )
+        .map_err(|error| error.to_string())?;
+
+    let state = if imported > 0 {
+        "found"
+    } else if skipped > 0 {
+        "skipped"
+    } else {
+        "unsupported"
+    };
+    let detail = format!(
+        "{discovered} item(s) discovered; {imported} new lesson(s), {skipped} duplicate(s)."
+    );
+    transaction
+        .execute(
+            "INSERT INTO jobs
+             (id, kind, state, source_id, lesson_id, label, detail, retry_count, updated_at)
+             VALUES (?1, 'metadata', ?2, ?3, NULL, ?4, ?5, 0, ?6)",
+            params![
+                format!("job-{}", Uuid::new_v4()),
+                state,
+                context.source_id,
+                job_label,
+                detail,
+                now
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    messages.push(format!(
+        "{discovered} item(s) discovered from {}. {imported} new lesson(s) added; {skipped} duplicate(s) skipped.",
+        context.source_label
+    ));
+
+    Ok(IngestSummary {
+        source_url: source_url.to_string(),
+        discovered,
+        imported,
+        skipped,
+        failed,
+        messages,
+    })
+}
+
+fn ensure_source_context(
+    transaction: &Transaction<'_>,
+    context: &SourceContext,
+    checked_at: &str,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "INSERT INTO sources
+             (id, platform, label, identifier, feed_format, feed_transport, trust_state,
+              trusted_curator_id, auth_mode, update_schedule, capability_json, enabled,
+              last_checked_at, last_verified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'none', 'Manual + daily check',
+              ?9, 1, ?10, ?11)
+             ON CONFLICT(id) DO UPDATE SET
+               label = excluded.label,
+               identifier = excluded.identifier,
+               feed_format = excluded.feed_format,
+               feed_transport = excluded.feed_transport,
+               trust_state = excluded.trust_state,
+               trusted_curator_id = excluded.trusted_curator_id,
+               capability_json = excluded.capability_json,
+               enabled = 1,
+               last_checked_at = excluded.last_checked_at,
+               last_verified_at = excluded.last_verified_at",
+            params![
+                context.source_id,
+                context.platform,
+                context.source_label,
+                context.source_identifier,
+                context.feed_format,
+                context.feed_transport,
+                context.trust_state,
+                context.trusted_curator_id.as_deref(),
+                serde_json::to_string(&context.source_capability)
+                    .map_err(|error| error.to_string())?,
+                checked_at,
+                context.last_verified_at.as_deref()
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    transaction
+        .execute(
+            "INSERT INTO teachers (id, display_name, description, source_links_json)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+               display_name = excluded.display_name,
+               description = excluded.description,
+               source_links_json = excluded.source_links_json",
+            params![
+                context.teacher_id,
+                context.teacher_label,
+                context.teacher_description,
+                serde_json::to_string(&context.teacher_source_links)
+                    .map_err(|error| error.to_string())?
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    transaction
+        .execute(
+            "INSERT INTO collections
+             (id, title, owner_label, sort_order, lesson_count, source_ids_json)
+             VALUES (?1, ?2, ?3, 500, 0, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+               title = excluded.title,
+               owner_label = excluded.owner_label,
+               source_ids_json = excluded.source_ids_json",
+            params![
+                context.collection_id,
+                context.collection_title,
+                context.collection_owner_label,
+                serde_json::to_string(&vec![context.source_id.clone()])
+                    .map_err(|error| error.to_string())?
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    if context.platform == "teacher-relay" {
+        let trust_policy = if context.trust_state.starts_with("signed-") {
+            "signed-feed"
+        } else {
+            "manual-review"
+        };
+
+        transaction
+            .execute(
+                "INSERT INTO teacher_relays
+                 (id, teacher_id, title, feed_url, feed_format, feed_transport, trust_state,
+                  subscriber_count, visibility, trust_policy, auto_download, last_published_at,
+                  last_verified_at, description)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 'public', ?8, 0, ?9, ?10, ?11)
+                 ON CONFLICT(id) DO UPDATE SET
+                   teacher_id = excluded.teacher_id,
+                   title = excluded.title,
+                   feed_url = excluded.feed_url,
+                   feed_format = excluded.feed_format,
+                   feed_transport = excluded.feed_transport,
+                   trust_state = excluded.trust_state,
+                   trust_policy = excluded.trust_policy,
+                   auto_download = 0,
+                   last_published_at = excluded.last_published_at,
+                   last_verified_at = excluded.last_verified_at,
+                   description = excluded.description",
+                params![
+                    format!("relay-{}", context.source_id),
+                    context.teacher_id,
+                    context.collection_title,
+                    context.source_identifier,
+                    context.feed_format,
+                    context.feed_transport,
+                    context.trust_state,
+                    trust_policy,
+                    checked_at,
+                    context.last_verified_at.as_deref(),
+                    "Curator feed subscriptions are review-first; no seeding or mirroring is enabled by default."
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn insert_discovered_lesson(
+    transaction: &Transaction<'_>,
+    context: &SourceContext,
+    lesson: &DiscoveredLesson,
+    imported_at: &str,
+) -> Result<bool, String> {
+    if discovered_duplicate_lesson_title(transaction, lesson)?.is_some() {
+        return Ok(false);
+    }
+
+    let lesson_id = format!("lesson-{}", stable_suffix(&lesson.source_url));
+    let provenance_id = format!(
+        "prov-{}",
+        stable_suffix(&format!("prov:{}", lesson.source_url))
+    );
+    let description = lesson
+        .description
+        .as_deref()
+        .unwrap_or("Imported source metadata");
+
+    transaction
+        .execute(
+            "INSERT INTO lessons
+             (id, title, content_type, teacher_id, collection_id, source_id, source_url,
+              published_at, description, thumbnail_tone, duration_seconds, media_file_id, provenance_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'emerald', ?10, NULL, ?11)",
+            params![
+                &lesson_id,
+                &lesson.title,
+                &lesson.content_type,
+                &context.teacher_id,
+                &context.collection_id,
+                &context.source_id,
+                &lesson.source_url,
+                lesson.published_at.as_deref(),
+                description,
+                lesson.duration_seconds,
+                &provenance_id
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    transaction
+        .execute(
+            "INSERT INTO provenance_records
+             (id, lesson_id, origin_url, permission_note, imported_at, adapter_name, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                &provenance_id,
+                &lesson_id,
+                &lesson.source_url,
+                &lesson.provenance_note,
+                imported_at,
+                &lesson.adapter_name,
+                lesson.content_hash.as_deref()
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    transaction
+        .execute(
+            "INSERT INTO lessons_fts
+             (lesson_id, title, description, teacher, collection_title, source_label)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                &lesson_id,
+                &lesson.title,
+                description,
+                &context.teacher_label,
+                &context.collection_title,
+                &context.source_label
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    Ok(true)
+}
+
+fn record_standalone_job(
+    connection: &mut Connection,
+    source_url: &str,
+    state: &str,
+    detail: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO jobs
+             (id, kind, state, source_id, lesson_id, label, detail, retry_count, updated_at)
+             VALUES (?1, 'metadata', ?2, NULL, NULL, 'Source ingest', ?3, 0, ?4)",
+            params![
+                format!("job-{}", Uuid::new_v4()),
+                state,
+                format!("{detail} Source: {source_url}"),
+                Utc::now().to_rfc3339()
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn upsert_job(
+    connection: &Connection,
+    id: &str,
+    kind: &str,
+    state: &str,
+    source_id: Option<&str>,
+    lesson_id: Option<&str>,
+    label: &str,
+    detail: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO jobs
+             (id, kind, state, source_id, lesson_id, label, detail, retry_count, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)
+             ON CONFLICT(id) DO UPDATE SET
+               kind = excluded.kind,
+               state = excluded.state,
+               source_id = excluded.source_id,
+               lesson_id = excluded.lesson_id,
+               label = excluded.label,
+               detail = excluded.detail,
+               updated_at = excluded.updated_at",
+            params![
+                id,
+                kind,
+                state,
+                source_id,
+                lesson_id,
+                label,
+                detail,
+                Utc::now().to_rfc3339()
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn record_downloaded_media(
+    connection: &mut Connection,
+    data_dir: &Path,
+    lesson_id: &str,
+    media_path: &Path,
+    expected_content_hash: Option<&str>,
+) -> Result<(), String> {
+    let media_file_id = format!("media-{}", Uuid::new_v4());
+    let hash = hash_file(media_path)?;
+    let content_hash = format!("sha256:{hash}");
+    let hash_verification_state = verify_downloaded_hash(expected_content_hash, &content_hash)
+        .inspect_err(|_| {
+            let _ = fs::remove_file(media_path);
+        })?;
+    let size_bytes = media_path
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .len() as i64;
+    let relative_path = media_path
+        .strip_prefix(data_dir)
+        .map_err(|_| "Downloaded file escaped the app data directory.".to_string())?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+
+    transaction
+        .execute(
+            "INSERT INTO media_files
+             (id, lesson_id, relative_path, content_hash, size_bytes, codec, import_status,
+              hash_verification_state)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL, 'ready', ?6)",
+            params![
+                &media_file_id,
+                lesson_id,
+                &relative_path,
+                &content_hash,
+                size_bytes,
+                hash_verification_state
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "UPDATE lessons SET media_file_id = ?1 WHERE id = ?2",
+            params![&media_file_id, lesson_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "UPDATE provenance_records
+             SET content_hash = ?1
+             WHERE lesson_id = ?2",
+            params![&content_hash, lesson_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+fn verify_downloaded_hash(
+    expected_content_hash: Option<&str>,
+    actual_content_hash: &str,
+) -> Result<&'static str, String> {
+    let Some(expected) = expected_content_hash
+        .map(str::trim)
+        .filter(|hash| !hash.is_empty())
+    else {
+        return Ok("not-provided");
+    };
+    let normalized_expected = expected
+        .strip_prefix("sha256:")
+        .unwrap_or(expected)
+        .to_ascii_lowercase();
+
+    if normalized_expected.len() != 64
+        || !normalized_expected
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Ok("unverified");
+    }
+
+    let normalized_actual = actual_content_hash
+        .strip_prefix("sha256:")
+        .unwrap_or(actual_content_hash)
+        .to_ascii_lowercase();
+    if normalized_expected == normalized_actual {
+        Ok("matched")
+    } else {
+        Err(format!(
+            "Downloaded file hash mismatch. Expected sha256:{normalized_expected}, got sha256:{normalized_actual}."
+        ))
+    }
+}
+
+fn archive_file_lesson(
+    identifier: &str,
+    file: &serde_json::Value,
+    item_title: &str,
+    item_description: Option<&str>,
+    published_at: Option<&str>,
+) -> Option<DiscoveredLesson> {
+    let name = json_field_text(file, "name")?;
+    if should_skip_archive_file(&name, file) {
+        return None;
+    }
+
+    let extension = Path::new(&name)
+        .extension()
+        .and_then(|extension| extension.to_str())?;
+    if !is_supported_file_extension(extension) {
+        return None;
+    }
+
+    let content_type = content_type_from_extension(extension).to_string();
+    let title = json_field_text(file, "title")
+        .unwrap_or_else(|| archive_file_title(item_title, &name, &content_type));
+    let mut description_parts = Vec::new();
+
+    if let Some(format) = json_field_text(file, "format") {
+        description_parts.push(format!("Archive.org format: {format}."));
+    }
+    if let Some(size) = json_field_text(file, "size") {
+        description_parts.push(format!("Archive.org file size: {size} bytes."));
+    }
+    if let Some(description) = item_description {
+        description_parts.push(description.to_string());
+    }
+
+    let content_hash = json_field_text(file, "sha1")
+        .map(|hash| format!("sha1:{hash}"))
+        .or_else(|| json_field_text(file, "md5").map(|hash| format!("md5:{hash}")));
+
+    Some(DiscoveredLesson {
+        title: clip_text(&title, 140),
+        content_type,
+        source_url: archive_download_url(identifier, &name),
+        published_at: published_at.map(str::to_string),
+        description: if description_parts.is_empty() {
+            None
+        } else {
+            Some(clip_text(&description_parts.join(" "), 900))
+        },
+        duration_seconds: None,
+        adapter_name: "ArchiveOrgMetadataAdapter".to_string(),
+        provenance_note: PUBLIC_SOURCE_PROVENANCE_NOTE.to_string(),
+        content_hash,
+    })
+}
+
+fn should_skip_archive_file(name: &str, file: &serde_json::Value) -> bool {
+    let lower_name = name.to_ascii_lowercase();
+    let lower_format = json_field_text(file, "format")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    lower_name.ends_with("_files.xml")
+        || lower_name.ends_with("_meta.xml")
+        || lower_name.ends_with("_reviews.xml")
+        || lower_name.ends_with("_itemimage.jpg")
+        || lower_name.ends_with(".torrent")
+        || lower_name.ends_with(".sqlite")
+        || lower_format.contains("metadata")
+        || lower_format.contains("torrent")
+        || lower_format.contains("item tile")
+}
+
+fn archive_file_title(item_title: &str, file_name: &str, content_type: &str) -> String {
+    let file_stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(|value| value.replace(['_', '-'], " "))
+        .map(|value| normalize_text(&value))
+        .filter(|value| !value.is_empty());
+
+    match file_stem {
+        Some(stem) if stem != item_title => stem,
+        _ => format!("{item_title} ({content_type})"),
+    }
+}
+
+fn json_field_text(value: &serde_json::Value, field: &str) -> Option<String> {
+    value.get(field).and_then(json_text)
+}
+
+fn json_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => normalize_source_text(text),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        serde_json::Value::Array(values) => {
+            let parts = values.iter().filter_map(json_text).collect::<Vec<_>>();
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join(", "))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn normalize_source_text(text: &str) -> Option<String> {
+    let normalized = if text.contains('<') && text.contains('>') {
+        let fragment = Html::parse_fragment(text);
+        normalize_text(&fragment.root_element().text().collect::<Vec<_>>().join(" "))
+    } else {
+        normalize_text(text)
+    };
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn feed_lessons(document: &roxmltree::Document<'_>) -> Result<Vec<DiscoveredLesson>, String> {
+    let mut lessons = Vec::new();
+
+    for item in document
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == "item")
+        .take(100)
+    {
+        let title = child_text(item, "title").unwrap_or_else(|| "Untitled feed item".to_string());
+        let enclosure = rss_enclosure(item);
+        let source_url = enclosure
+            .as_ref()
+            .map(|enclosure| enclosure.url.clone())
+            .or_else(|| child_text(item, "link"))
+            .ok_or_else(|| "Feed item is missing a link or enclosure URL.".to_string())?;
+        let description = child_text(item, "description");
+        let content_hash = child_text(item, "contentHash").or_else(|| child_text(item, "hash"));
+        let content_type = classify_feed_content(
+            &source_url,
+            enclosure
+                .as_ref()
+                .and_then(|enclosure| enclosure.mime_type.as_deref()),
+            description.as_deref(),
+        );
+
+        lessons.push(DiscoveredLesson {
+            title: clip_text(&title, 140),
+            content_type,
+            source_url,
+            published_at: child_text(item, "pubDate"),
+            description,
+            duration_seconds: child_text(item, "duration")
+                .and_then(|duration| duration.parse::<i64>().ok()),
+            adapter_name: "FeedAdapter".to_string(),
+            provenance_note: PUBLIC_SOURCE_PROVENANCE_NOTE.to_string(),
+            content_hash,
+        });
+    }
+
+    if !lessons.is_empty() {
+        return Ok(lessons);
+    }
+
+    for entry in document
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == "entry")
+        .take(100)
+    {
+        let title = child_text(entry, "title").unwrap_or_else(|| "Untitled feed entry".to_string());
+        let atom_link = atom_link(entry);
+        let source_url = atom_link
+            .as_ref()
+            .map(|link| link.url.clone())
+            .or_else(|| child_text(entry, "id"))
+            .ok_or_else(|| "Atom entry is missing a link or id.".to_string())?;
+        let description = child_text(entry, "summary").or_else(|| child_text(entry, "content"));
+        let content_type = classify_feed_content(
+            &source_url,
+            atom_link
+                .as_ref()
+                .and_then(|link| link.mime_type.as_deref()),
+            description.as_deref(),
+        );
+
+        lessons.push(DiscoveredLesson {
+            title: clip_text(&title, 140),
+            content_type,
+            source_url,
+            published_at: child_text(entry, "published").or_else(|| child_text(entry, "updated")),
+            description,
+            duration_seconds: child_text(entry, "duration")
+                .and_then(|duration| duration.parse::<i64>().ok()),
+            adapter_name: "FeedAdapter".to_string(),
+            provenance_note: PUBLIC_SOURCE_PROVENANCE_NOTE.to_string(),
+            content_hash: child_text(entry, "contentHash").or_else(|| child_text(entry, "hash")),
+        });
+    }
+
+    Ok(lessons)
+}
+
+fn feed_title(document: &roxmltree::Document<'_>) -> Option<String> {
+    document
+        .descendants()
+        .find(|node| {
+            node.is_element()
+                && matches!(node.tag_name().name(), "channel" | "feed")
+                && child_text(*node, "title").is_some()
+        })
+        .and_then(|node| child_text(node, "title"))
+        .map(|title| clip_text(&title, 90))
+}
+
+fn xml_feed_format(document: &roxmltree::Document<'_>) -> String {
+    document
+        .root_element()
+        .tag_name()
+        .name()
+        .eq_ignore_ascii_case("feed")
+        .then(|| "atom".to_string())
+        .unwrap_or_else(|| "rss".to_string())
+}
+
+fn child_text(node: roxmltree::Node<'_, '_>, child_name: &str) -> Option<String> {
+    node.children()
+        .find(|child| child.is_element() && child.tag_name().name() == child_name)
+        .and_then(|child| child.text())
+        .map(normalize_text)
+        .filter(|value| !value.is_empty())
+}
+
+#[derive(Debug, Clone)]
+struct FeedLink {
+    url: String,
+    mime_type: Option<String>,
+}
+
+fn rss_enclosure(node: roxmltree::Node<'_, '_>) -> Option<FeedLink> {
+    node.children()
+        .find(|child| child.is_element() && child.tag_name().name() == "enclosure")
+        .and_then(|child| {
+            let url = child.attribute("url")?.to_string();
+            if url.is_empty() {
+                return None;
+            }
+
+            Some(FeedLink {
+                url,
+                mime_type: child.attribute("type").map(str::to_string),
+            })
+        })
+}
+
+fn atom_link(node: roxmltree::Node<'_, '_>) -> Option<FeedLink> {
+    node.children()
+        .filter(|child| child.is_element() && child.tag_name().name() == "link")
+        .filter(|child| {
+            child
+                .attribute("rel")
+                .map(|rel| matches!(rel, "alternate" | "enclosure"))
+                .unwrap_or(true)
+        })
+        .filter_map(|child| {
+            let url = child.attribute("href")?.to_string();
+            if url.is_empty() {
+                return None;
+            }
+
+            Some(FeedLink {
+                url,
+                mime_type: child.attribute("type").map(str::to_string),
+            })
+        })
+        .max_by_key(|link| {
+            if link
+                .mime_type
+                .as_deref()
+                .is_some_and(is_file_backed_mime_type)
+            {
+                1
+            } else {
+                0
+            }
+        })
+}
+
+fn fetch_text(client: &Client, url: &str) -> Result<String, String> {
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|error| format!("Could not fetch {url}: {error}"))?;
+    let status = response.status();
+
+    if !status.is_success() {
+        return Err(format!("Could not fetch {url}: HTTP {status}."));
+    }
+
+    response
+        .text()
+        .map_err(|error| format!("Could not read response from {url}: {error}"))
+}
+
+fn fetch_json(client: &Client, url: &str) -> Result<serde_json::Value, String> {
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|error| format!("Could not fetch {url}: {error}"))?;
+    let status = response.status();
+
+    if !status.is_success() {
+        return Err(format!("Could not fetch {url}: HTTP {status}."));
+    }
+
+    let body = response
+        .text()
+        .map_err(|error| format!("Could not read response from {url}: {error}"))?;
+
+    serde_json::from_str(&body).map_err(|error| format!("Could not parse JSON from {url}: {error}"))
+}
+
+fn normalize_source_input(input: &str) -> Result<String, String> {
+    let trimmed = input.trim();
+
+    if trimmed.is_empty() {
+        return Err("Source URL is required.".to_string());
+    }
+
+    let with_scheme = if let Some(username) = trimmed.strip_prefix('@') {
+        format!("https://t.me/{username}")
+    } else if trimmed.starts_with("t.me/") || trimmed.starts_with("telegram.me/") {
+        format!("https://{trimmed}")
+    } else if trimmed.starts_with("lbry://") {
+        trimmed.to_string()
+    } else if trimmed.starts_with("www.")
+        || trimmed.starts_with("youtube.com/")
+        || trimmed.starts_with("archive.org/")
+        || trimmed.starts_with("rumble.com/")
+        || trimmed.starts_with("odysee.com/")
+        || trimmed.starts_with("x.com/")
+        || trimmed.starts_with("twitter.com/")
+    {
+        format!("https://{trimmed}")
+    } else {
+        trimmed.to_string()
+    };
+
+    if with_scheme.starts_with("lbry://") {
+        return Ok(with_scheme);
+    }
+
+    Url::parse(&with_scheme)
+        .map(|url| url.to_string())
+        .map_err(|error| format!("Source must be a valid URL: {error}"))
+}
+
+fn parse_archive_org_identifier(source_url: &str) -> Option<String> {
+    let url = Url::parse(source_url).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+
+    if host != "archive.org" && host != "www.archive.org" {
+        return None;
+    }
+
+    let segments = url
+        .path_segments()
+        .map(|segments| {
+            segments
+                .filter(|segment| !segment.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let identifier = match segments.as_slice() {
+        ["details", identifier, ..]
+        | ["download", identifier, ..]
+        | ["metadata", identifier, ..] => *identifier,
+        _ => return None,
+    };
+
+    if identifier == "." || identifier == ".." || identifier.contains('/') {
+        return None;
+    }
+
+    Some(identifier.to_string())
+}
+
+fn archive_metadata_url(identifier: &str) -> String {
+    format!(
+        "https://archive.org/metadata/{}",
+        encode_url_path_segment(identifier)
+    )
+}
+
+fn archive_download_url(identifier: &str, file_name: &str) -> String {
+    let encoded_name = file_name
+        .split('/')
+        .map(encode_url_path_segment)
+        .collect::<Vec<_>>()
+        .join("/");
+
+    format!(
+        "https://archive.org/download/{}/{encoded_name}",
+        encode_url_path_segment(identifier)
+    )
+}
+
+fn encode_url_path_segment(value: &str) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .map(|byte| match *byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (*byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
+}
+
+fn normalize_feed_url(source_url: &str) -> String {
+    let Ok(url) = Url::parse(source_url) else {
+        return source_url.to_string();
+    };
+
+    let Some(host) = url.host_str().map(|host| host.to_ascii_lowercase()) else {
+        return source_url.to_string();
+    };
+
+    if !host.ends_with("youtube.com") && host != "youtu.be" {
+        return source_url.to_string();
+    }
+
+    if url.path().contains("/feeds/videos.xml") {
+        return source_url.to_string();
+    }
+
+    if let Some(list_id) = url.query_pairs().find_map(|(key, value)| {
+        if key == "list" {
+            Some(value.into_owned())
+        } else {
+            None
+        }
+    }) {
+        return format!("https://www.youtube.com/feeds/videos.xml?playlist_id={list_id}");
+    }
+
+    let segments = url
+        .path_segments()
+        .map(|segments| segments.collect::<Vec<_>>())
+        .unwrap_or_default();
+    if segments.len() >= 2 && segments[0] == "channel" {
+        return format!(
+            "https://www.youtube.com/feeds/videos.xml?channel_id={}",
+            segments[1]
+        );
+    }
+
+    source_url.to_string()
+}
+
+fn parse_telegram_source(source_url: &str) -> Option<TelegramSource> {
+    let url = Url::parse(source_url).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+
+    if host != "t.me" && host != "telegram.me" {
+        return None;
+    }
+
+    let segments = url
+        .path_segments()
+        .map(|segments| {
+            segments
+                .filter(|segment| !segment.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let (username, post_id) = match segments.as_slice() {
+        ["s", username, post_id, ..] => ((*username).to_string(), Some((*post_id).to_string())),
+        ["s", username] => ((*username).to_string(), None),
+        [username, post_id, ..] => ((*username).to_string(), Some((*post_id).to_string())),
+        [username] => ((*username).to_string(), None),
+        _ => return None,
+    };
+
+    if username == "c" || username == "joinchat" || username.starts_with('+') || username.len() < 3
+    {
+        return None;
+    }
+
+    Some(TelegramSource { username, post_id })
+}
+
+fn is_probably_telegram_invite(source_url: &str) -> bool {
+    let Ok(url) = Url::parse(source_url) else {
+        return false;
+    };
+    let Some(host) = url.host_str().map(|host| host.to_ascii_lowercase()) else {
+        return false;
+    };
+
+    if host != "t.me" && host != "telegram.me" {
+        return false;
+    }
+
+    url.path().contains("/joinchat") || url.path().contains("/+") || url.path().starts_with("/c/")
+}
+
+fn is_nostr_reference(source_url: &str) -> bool {
+    source_url.starts_with("nostr:") || source_url.starts_with("nostr+")
+}
+
+fn platform_for_feed(source_url: &str) -> String {
+    let Ok(url) = Url::parse(source_url) else {
+        return "rss-feed".to_string();
+    };
+    let host = url
+        .host_str()
+        .map(|host| host.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    if host.ends_with("youtube.com") || host == "youtu.be" {
+        return "youtube".to_string();
+    }
+
+    if host.ends_with("archive.org") {
+        return "archive-org".to_string();
+    }
+
+    if host.ends_with("odysee.com") {
+        return "odysee".to_string();
+    }
+
+    "rss-feed".to_string()
+}
+
+fn direct_source_platform(source_url: &str) -> Option<(&'static str, &'static str)> {
+    if source_url.starts_with("lbry://") {
+        return Some(("odysee", "video"));
+    }
+
+    let url = Url::parse(source_url).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+
+    if host.ends_with("youtube.com") || host == "youtu.be" {
+        return Some(("youtube", "video"));
+    }
+
+    if host.ends_with("rumble.com") {
+        return Some(("rumble", "video"));
+    }
+
+    if host.ends_with("odysee.com") {
+        return Some(("odysee", "video"));
+    }
+
+    if host == "x.com"
+        || host.ends_with(".x.com")
+        || host == "twitter.com"
+        || host.ends_with(".twitter.com")
+    {
+        return Some(("x", "post"));
+    }
+
+    None
+}
+
+fn direct_source_platform_label(platform: &str) -> &'static str {
+    match platform {
+        "youtube" => "YouTube",
+        "rumble" => "Rumble",
+        "odysee" => "Odysee",
+        "x" => "X",
+        _ => "Source",
+    }
+}
+
+fn direct_source_capability(platform: &str) -> SourceCapability {
+    match platform {
+        "youtube" => capability(
+            "supported",
+            "limited",
+            "limited",
+            true,
+            "api-key",
+            "best-effort",
+            "Official API covers metadata; user-initiated downloads depend on permitted content and local yt-dlp.",
+        ),
+        "rumble" => capability(
+            "limited",
+            "limited",
+            "limited",
+            false,
+            "none",
+            "best-effort",
+            "No broad public catalog API is assumed; direct URL downloads are best-effort through local tooling.",
+        ),
+        "odysee" => capability(
+            "limited",
+            "limited",
+            "limited",
+            false,
+            "none",
+            "best-effort",
+            "Odysee/LBRY URLs are tracked as best-effort references; native daemon support is future work.",
+        ),
+        "x" => capability(
+            "limited",
+            "limited",
+            "limited",
+            true,
+            "api-key",
+            "credential-bound",
+            "X post and media metadata are credential-bound; saved URL references remain local.",
+        ),
+        _ => capability(
+            "limited",
+            "blocked",
+            "blocked",
+            false,
+            "none",
+            "best-effort",
+            "This source is kept as a local reference.",
+        ),
+    }
+}
+
+fn direct_source_title(client: &Client, source_url: &str) -> String {
+    fetch_text(client, source_url)
+        .ok()
+        .and_then(|body| {
+            let document = Html::parse_document(&body);
+            first_document_text(&document, &["title"])
+        })
+        .map(|title| title.split('|').next().unwrap_or(&title).trim().to_string())
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| {
+            Url::parse(source_url)
+                .ok()
+                .and_then(|url| {
+                    url.path_segments()
+                        .and_then(|segments| segments.filter(|segment| !segment.is_empty()).last())
+                        .map(|segment| segment.replace(['-', '_'], " "))
+                })
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| {
+                    direct_source_platform_label(
+                        direct_source_platform(source_url)
+                            .map(|(platform, _)| platform)
+                            .unwrap_or("source"),
+                    )
+                    .to_string()
+                })
+        })
+}
+
+fn first_document_text(document: &Html, selectors: &[&str]) -> Option<String> {
+    selectors.iter().find_map(|query| {
+        let selector = Selector::parse(query).ok()?;
+        document
+            .select(&selector)
+            .next()
+            .map(|element| normalize_text(&element.text().collect::<Vec<_>>().join(" ")))
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn selector(query: &str) -> Selector {
+    Selector::parse(query).expect("static CSS selector must parse")
+}
+
+fn title_from_text(text: Option<&str>) -> Option<String> {
+    text.map(|value| clip_text(value, 110))
+        .filter(|value| !value.is_empty())
+}
+
+fn normalize_text(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn clip_text(value: &str, max_chars: usize) -> String {
+    let normalized = normalize_text(value);
+    let character_count = normalized.chars().count();
+
+    if character_count <= max_chars {
+        return normalized;
+    }
+
+    let keep = max_chars.saturating_sub(3);
+    format!("{}...", normalized.chars().take(keep).collect::<String>())
+}
+
+fn host_label(source_url: &str) -> String {
+    Url::parse(source_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_else(|| "Imported Feed".to_string())
+}
+
+fn stable_suffix(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn collect_source_column(
+    connection: &Connection,
+    column: &str,
+    source_id: &str,
+) -> Result<Vec<String>, String> {
+    if !matches!(column, "collection_id" | "teacher_id") {
+        return Err("Unsupported source column lookup.".to_string());
+    }
+
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT DISTINCT {column} FROM lessons WHERE source_id = ?1"
+        ))
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![source_id], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn collect_source_media_paths(
+    connection: &Connection,
+    source_id: &str,
+) -> Result<Vec<String>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT m.relative_path
+             FROM media_files m
+             JOIN lessons l ON l.id = m.lesson_id
+             WHERE l.source_id = ?1",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![source_id], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn duplicate_lesson_title_for_hash(
+    transaction: &Transaction<'_>,
+    content_hash: &str,
+) -> Result<Option<String>, String> {
+    transaction
+        .query_row(
+            "SELECT l.title
+             FROM lessons l
+             LEFT JOIN media_files m ON m.lesson_id = l.id
+             LEFT JOIN provenance_records p ON p.lesson_id = l.id
+             WHERE m.content_hash = ?1 OR p.content_hash = ?1
+             ORDER BY l.published_at DESC, l.title ASC
+             LIMIT 1",
+            params![content_hash],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
+fn discovered_duplicate_lesson_title(
+    transaction: &Transaction<'_>,
+    lesson: &DiscoveredLesson,
+) -> Result<Option<String>, String> {
+    if let Some(title) = transaction
+        .query_row(
+            "SELECT title FROM lessons WHERE source_url = ?1 LIMIT 1",
+            params![lesson.source_url],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(Some(title));
+    }
+
+    if let Some(content_hash) = lesson
+        .content_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Some(title) = duplicate_lesson_title_for_hash(transaction, content_hash)? {
+            return Ok(Some(title));
+        }
+    }
+
+    if let Some(duration_seconds) = lesson.duration_seconds {
+        let normalized_title = normalize_text(&lesson.title).to_ascii_lowercase();
+
+        if normalized_title.chars().count() >= 8 {
+            return transaction
+                .query_row(
+                    "SELECT title
+                     FROM lessons
+                     WHERE lower(trim(title)) = ?1
+                       AND content_type = ?2
+                       AND duration_seconds = ?3
+                     LIMIT 1",
+                    params![normalized_title, lesson.content_type, duration_seconds],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string());
+        }
+    }
+
+    Ok(None)
+}
+
+fn count_existing_media_lessons(connection: &Connection, source_id: &str) -> Result<i64, String> {
+    connection
+        .query_row(
+            "SELECT COUNT(*)
+             FROM lessons
+             WHERE source_id = ?1
+               AND (media_file_id IS NOT NULL OR content_type = 'post')",
+            params![source_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())
+}
+
+fn fetch_missing_media_lessons(
+    connection: &Connection,
+    source_id: &str,
+) -> Result<Vec<DownloadLesson>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT l.id, l.title, l.content_type, l.source_url, p.content_hash
+             FROM lessons l
+             LEFT JOIN provenance_records p ON p.lesson_id = l.id
+             WHERE l.source_id = ?1
+               AND l.media_file_id IS NULL
+               AND l.content_type IN ('video', 'audio', 'pdf')
+             ORDER BY l.published_at DESC, l.title ASC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![source_id], |row| {
+            Ok(DownloadLesson {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                content_type: row.get(2)?,
+                source_url: row.get(3)?,
+                expected_content_hash: row.get(4)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn collection_owned_by_source(
+    transaction: &Transaction<'_>,
+    collection_id: &str,
+    source_id: &str,
+) -> Result<bool, String> {
+    let source_ids_json: Option<String> = transaction
+        .query_row(
+            "SELECT source_ids_json FROM collections WHERE id = ?1",
+            params![collection_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let source_ids = source_ids_json
+        .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
+        .unwrap_or_default();
+
+    Ok(source_ids.len() == 1 && source_ids[0] == source_id)
+}
+
+fn is_default_source_id(source_id: &str) -> bool {
+    DEFAULT_SOURCE_IDS.contains(&source_id)
+}
+
+fn remove_media_files_from_disk(data_dir: &Path, relative_paths: &[String]) -> i64 {
+    relative_paths
+        .iter()
+        .filter_map(|relative_path| resolve_library_media_path(data_dir, relative_path))
+        .filter(|path| path.is_file())
+        .filter(|path| fs::remove_file(path).is_err())
+        .count() as i64
+}
+
+pub(crate) fn resolve_library_media_path(data_dir: &Path, relative_path: &str) -> Option<PathBuf> {
+    let relative = Path::new(relative_path);
+
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+
+    let library_dir = data_dir.join("library");
+    let candidate = data_dir.join(relative);
+
+    if candidate.starts_with(&library_dir) {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn find_yt_dlp_command() -> Result<YtDlpCommand, String> {
+    let candidates = [
+        YtDlpCommand {
+            program: "yt-dlp".to_string(),
+            args: Vec::new(),
+        },
+        YtDlpCommand {
+            program: "/opt/homebrew/bin/yt-dlp".to_string(),
+            args: Vec::new(),
+        },
+        YtDlpCommand {
+            program: "/usr/local/bin/yt-dlp".to_string(),
+            args: Vec::new(),
+        },
+        YtDlpCommand {
+            program: "python3".to_string(),
+            args: vec!["-m".to_string(), "yt_dlp".to_string()],
+        },
+    ];
+
+    for candidate in candidates {
+        let probe = Command::new(&candidate.program)
+            .args(&candidate.args)
+            .arg("--version")
+            .output();
+
+        if probe.map(|output| output.status.success()).unwrap_or(false) {
+            return Ok(candidate);
+        }
+    }
+
+    Err("yt-dlp was not found. Install yt-dlp locally, then retry downloading media for this source.".to_string())
+}
+
+fn download_lesson_media(
+    client: &Client,
+    yt_dlp: &mut Option<YtDlpCommand>,
+    lesson: &DownloadLesson,
+    lesson_dir: &Path,
+    data_dir: &Path,
+    cookies_file: Option<&Path>,
+) -> Result<PathBuf, String> {
+    if !is_file_backed_content_type(&lesson.content_type) {
+        return Err(
+            "This item is a saved post and does not have a downloadable media file.".to_string(),
+        );
+    }
+
+    if is_direct_file_url(&lesson.source_url) {
+        return download_direct_file(client, &lesson.source_url, lesson_dir);
+    }
+
+    let command = match yt_dlp {
+        Some(command) => command.clone(),
+        None => {
+            let command = find_yt_dlp_command()?;
+            *yt_dlp = Some(command.clone());
+            command
+        }
+    };
+
+    download_lesson_with_yt_dlp(
+        &command,
+        &lesson.source_url,
+        lesson_dir,
+        data_dir,
+        cookies_file,
+    )
+}
+
+fn is_direct_file_url(source_url: &str) -> bool {
+    extension_from_url(source_url).is_some()
+}
+
+fn download_direct_file(
+    client: &Client,
+    source_url: &str,
+    lesson_dir: &Path,
+) -> Result<PathBuf, String> {
+    let mut response = client
+        .get(source_url)
+        .send()
+        .map_err(|error| format!("Could not fetch media file: {error}"))?;
+    let status = response.status();
+
+    if !status.is_success() {
+        return Err(format!("Could not fetch media file: HTTP {status}."));
+    }
+
+    let file_name = direct_download_file_name(source_url);
+    let destination = lesson_dir.join(file_name);
+    let partial_destination = destination.with_extension(format!(
+        "{}part",
+        destination
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| format!("{extension}."))
+            .unwrap_or_default()
+    ));
+    let mut file = fs::File::create(&partial_destination).map_err(|error| error.to_string())?;
+    io::copy(&mut response, &mut file).map_err(|error| error.to_string())?;
+    fs::rename(&partial_destination, &destination).map_err(|error| error.to_string())?;
+
+    Ok(destination)
+}
+
+fn direct_download_file_name(source_url: &str) -> String {
+    Url::parse(source_url)
+        .ok()
+        .and_then(|url| {
+            Path::new(url.path())
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(safe_path_segment)
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("download-{}", Uuid::new_v4()))
+}
+
+fn download_lesson_with_yt_dlp(
+    yt_dlp: &YtDlpCommand,
+    source_url: &str,
+    lesson_dir: &Path,
+    data_dir: &Path,
+    cookies_file: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let output_template = lesson_dir.join("%(title).200B-%(id)s.%(ext)s");
+    let mut command = Command::new(&yt_dlp.program);
+    command
+        .args(&yt_dlp.args)
+        .arg("--no-playlist")
+        .arg("--restrict-filenames")
+        .arg("--no-progress")
+        .arg("--continue")
+        .arg("--merge-output-format")
+        .arg("mp4");
+
+    if let Some(cookies_file) = cookies_file {
+        command.arg("--cookies").arg(cookies_file);
+    }
+
+    let output = command
+        .arg("-o")
+        .arg(&output_template)
+        .arg(source_url)
+        .output()
+        .map_err(|error| format!("Could not start yt-dlp: {error}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "yt-dlp failed: {} {}",
+            output_summary(&output.stderr),
+            yt_dlp_auth_hint(cookies_file, data_dir)
+        ));
+    }
+
+    let mut media_files = collect_completed_media_files(lesson_dir);
+    media_files.sort_by_key(|path| {
+        path.metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+    });
+
+    media_files
+        .pop()
+        .ok_or_else(|| "yt-dlp finished but no supported media file was produced.".to_string())
+}
+
+fn yt_dlp_cookie_file(data_dir: &Path) -> Option<PathBuf> {
+    YT_DLP_COOKIE_FILE_NAMES
+        .iter()
+        .map(|file_name| data_dir.join(file_name))
+        .find(|candidate| candidate.is_file())
+}
+
+fn yt_dlp_auth_hint(cookies_file: Option<&Path>, data_dir: &Path) -> String {
+    if cookies_file.is_some() {
+        return "Local cookies were used; if this source still failed, refresh the cookies file or import a manually downloaded file.".to_string();
+    }
+
+    format!(
+        "If this source requires sign-in or blocks anonymous fetches, export browser cookies in Netscape format to {} and retry, or import a manually downloaded file.",
+        data_dir.join("yt-dlp-cookies.txt").display()
+    )
+}
+
+fn existing_completed_media_file(lesson_dir: &Path) -> Option<PathBuf> {
+    let mut media_files = collect_completed_media_files(lesson_dir);
+    media_files.sort_by_key(|path| {
+        path.metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+    });
+    media_files.pop()
+}
+
+fn collect_completed_media_files(path: &Path) -> Vec<PathBuf> {
+    collect_media_files(path)
+        .into_iter()
+        .filter(|path| !is_probably_partial_media_file(path))
+        .collect()
+}
+
+fn is_probably_partial_media_file(path: &Path) -> bool {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if file_name.ends_with(".part") || file_name.contains(".part.") {
+        return true;
+    }
+
+    Path::new(&file_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .and_then(|stem| stem.rsplit('.').next())
+        .map(|last_segment| {
+            last_segment.len() > 1
+                && last_segment.starts_with('f')
+                && last_segment[1..]
+                    .chars()
+                    .all(|character| character.is_ascii_digit())
+        })
+        .unwrap_or(false)
+}
+
+fn safe_path_segment(value: &str) -> String {
+    let normalized = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches(['.', '-', '_'])
+        .to_string();
+
+    if normalized.is_empty() {
+        "item".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn output_summary(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let trimmed = text.trim();
+
+    if trimmed.is_empty() {
+        return "no stderr output".to_string();
+    }
+
+    trimmed
+        .lines()
+        .rev()
+        .take(3)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub(crate) fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not resolve app data directory: {error}"))
+}
+
+fn run_migrations(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "
+            PRAGMA foreign_keys = ON;
+
+            CREATE TABLE IF NOT EXISTS sources (
+              id TEXT PRIMARY KEY,
+              platform TEXT NOT NULL,
+              label TEXT NOT NULL,
+              identifier TEXT NOT NULL,
+              feed_format TEXT NOT NULL DEFAULT 'rss',
+              feed_transport TEXT NOT NULL DEFAULT 'https',
+              trust_state TEXT NOT NULL DEFAULT 'unsigned',
+              trusted_curator_id TEXT,
+              auth_mode TEXT NOT NULL,
+              update_schedule TEXT NOT NULL,
+              capability_json TEXT NOT NULL,
+              enabled INTEGER NOT NULL,
+              last_checked_at TEXT,
+              last_verified_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS teachers (
+              id TEXT PRIMARY KEY,
+              display_name TEXT NOT NULL,
+              description TEXT,
+              source_links_json TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS teacher_relays (
+              id TEXT PRIMARY KEY,
+              teacher_id TEXT NOT NULL REFERENCES teachers(id),
+              title TEXT NOT NULL,
+              feed_url TEXT NOT NULL,
+              feed_format TEXT NOT NULL DEFAULT 'rss',
+              feed_transport TEXT NOT NULL DEFAULT 'https',
+              trust_state TEXT NOT NULL DEFAULT 'unsigned',
+              subscriber_count INTEGER NOT NULL,
+              visibility TEXT NOT NULL,
+              trust_policy TEXT NOT NULL,
+              auto_download INTEGER NOT NULL,
+              last_published_at TEXT,
+              last_verified_at TEXT,
+              description TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS trusted_curators (
+              id TEXT PRIMARY KEY,
+              display_name TEXT NOT NULL,
+              public_key TEXT NOT NULL UNIQUE,
+              trust_note TEXT,
+              added_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS live_sessions (
+              id TEXT PRIMARY KEY,
+              teacher_id TEXT NOT NULL REFERENCES teachers(id),
+              relay_id TEXT NOT NULL REFERENCES teacher_relays(id),
+              title TEXT NOT NULL,
+              provider TEXT NOT NULL,
+              provider_url TEXT NOT NULL,
+              status TEXT NOT NULL,
+              starts_at TEXT NOT NULL,
+              archive_lesson_id TEXT,
+              auto_publish_archive INTEGER NOT NULL,
+              recording_policy TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS collections (
+              id TEXT PRIMARY KEY,
+              title TEXT NOT NULL,
+              owner_label TEXT NOT NULL,
+              sort_order INTEGER NOT NULL,
+              lesson_count INTEGER NOT NULL,
+              source_ids_json TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS lessons (
+              id TEXT PRIMARY KEY,
+              title TEXT NOT NULL,
+              content_type TEXT NOT NULL DEFAULT 'video',
+              teacher_id TEXT NOT NULL REFERENCES teachers(id),
+              collection_id TEXT NOT NULL REFERENCES collections(id),
+              source_id TEXT NOT NULL REFERENCES sources(id),
+              source_url TEXT NOT NULL,
+              published_at TEXT,
+              description TEXT,
+              thumbnail_tone TEXT NOT NULL,
+              duration_seconds INTEGER,
+              media_file_id TEXT,
+              provenance_id TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS media_files (
+              id TEXT PRIMARY KEY,
+              lesson_id TEXT NOT NULL REFERENCES lessons(id),
+              relative_path TEXT NOT NULL,
+              content_hash TEXT NOT NULL,
+              size_bytes INTEGER NOT NULL,
+              codec TEXT,
+              import_status TEXT NOT NULL,
+              hash_verification_state TEXT NOT NULL DEFAULT 'not-provided'
+            );
+
+            CREATE TABLE IF NOT EXISTS provenance_records (
+              id TEXT PRIMARY KEY,
+              lesson_id TEXT NOT NULL REFERENCES lessons(id),
+              origin_url TEXT NOT NULL,
+              permission_note TEXT NOT NULL,
+              imported_at TEXT NOT NULL,
+              adapter_name TEXT NOT NULL,
+              content_hash TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS watch_state (
+              lesson_id TEXT PRIMARY KEY REFERENCES lessons(id),
+              progress_seconds INTEGER NOT NULL,
+              completed INTEGER NOT NULL,
+              last_watched_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS jobs (
+              id TEXT PRIMARY KEY,
+              kind TEXT NOT NULL,
+              state TEXT NOT NULL,
+              source_id TEXT,
+              lesson_id TEXT,
+              label TEXT NOT NULL,
+              detail TEXT NOT NULL,
+              retry_count INTEGER NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS lessons_fts USING fts5(
+              lesson_id UNINDEXED,
+              title,
+              description,
+              teacher,
+              collection_title,
+              source_label
+            );
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    ensure_column(
+        connection,
+        "sources",
+        "feed_format",
+        "ALTER TABLE sources ADD COLUMN feed_format TEXT NOT NULL DEFAULT 'rss'",
+    )?;
+    ensure_column(
+        connection,
+        "sources",
+        "feed_transport",
+        "ALTER TABLE sources ADD COLUMN feed_transport TEXT NOT NULL DEFAULT 'https'",
+    )?;
+    ensure_column(
+        connection,
+        "sources",
+        "trust_state",
+        "ALTER TABLE sources ADD COLUMN trust_state TEXT NOT NULL DEFAULT 'unsigned'",
+    )?;
+    ensure_column(
+        connection,
+        "sources",
+        "trusted_curator_id",
+        "ALTER TABLE sources ADD COLUMN trusted_curator_id TEXT",
+    )?;
+    ensure_column(
+        connection,
+        "sources",
+        "last_verified_at",
+        "ALTER TABLE sources ADD COLUMN last_verified_at TEXT",
+    )?;
+    ensure_column(
+        connection,
+        "teacher_relays",
+        "feed_format",
+        "ALTER TABLE teacher_relays ADD COLUMN feed_format TEXT NOT NULL DEFAULT 'rss'",
+    )?;
+    ensure_column(
+        connection,
+        "teacher_relays",
+        "feed_transport",
+        "ALTER TABLE teacher_relays ADD COLUMN feed_transport TEXT NOT NULL DEFAULT 'https'",
+    )?;
+    ensure_column(
+        connection,
+        "teacher_relays",
+        "trust_state",
+        "ALTER TABLE teacher_relays ADD COLUMN trust_state TEXT NOT NULL DEFAULT 'unsigned'",
+    )?;
+    ensure_column(
+        connection,
+        "teacher_relays",
+        "last_verified_at",
+        "ALTER TABLE teacher_relays ADD COLUMN last_verified_at TEXT",
+    )?;
+    ensure_column(
+        connection,
+        "media_files",
+        "hash_verification_state",
+        "ALTER TABLE media_files ADD COLUMN hash_verification_state TEXT NOT NULL DEFAULT 'not-provided'",
+    )?;
+    ensure_column(
+        connection,
+        "lessons",
+        "content_type",
+        "ALTER TABLE lessons ADD COLUMN content_type TEXT NOT NULL DEFAULT 'video'",
+    )?;
+    backfill_lesson_content_types(connection)
+}
+
+fn ensure_column(
+    connection: &Connection,
+    table_name: &str,
+    column_name: &str,
+    alter_sql: &str,
+) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table_name})"))
+        .map_err(|error| error.to_string())?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    if columns.iter().any(|column| column == column_name) {
+        return Ok(());
+    }
+
+    connection
+        .execute(alter_sql, [])
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn backfill_lesson_content_types(connection: &Connection) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT l.id,
+                    l.content_type,
+                    l.source_url,
+                    s.platform,
+                    p.adapter_name,
+                    (
+                      SELECT m.relative_path
+                      FROM media_files m
+                      WHERE m.lesson_id = l.id
+                      ORDER BY m.id
+                      LIMIT 1
+                    ) AS relative_path
+             FROM lessons l
+             LEFT JOIN sources s ON s.id = l.source_id
+             LEFT JOIN provenance_records p ON p.lesson_id = l.id",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+
+    let lessons = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    for (lesson_id, current, source_url, platform, adapter_name, relative_path) in lessons {
+        let Some(inference) = infer_existing_content_type(
+            relative_path.as_deref(),
+            &source_url,
+            platform.as_deref(),
+            adapter_name.as_deref(),
+        ) else {
+            continue;
+        };
+
+        if should_update_content_type(&current, inference) {
+            connection
+                .execute(
+                    "UPDATE lessons SET content_type = ?1 WHERE id = ?2",
+                    params![inference.content_type, lesson_id],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_default_records(connection: &mut Connection) -> Result<(), String> {
+    remove_demo_seed_data(connection)?;
+
+    let tx = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+
+    let now = Utc::now().to_rfc3339();
+    let source_rows = [
+        (
+            "source-local-files",
+            "local-files",
+            "Local Files",
+            "App Library",
+            "none",
+            "Manual",
+            capability(
+                "native",
+                "native",
+                "blocked",
+                false,
+                "none",
+                "stable",
+                "Imports video, audio, and PDF files the user selects and records local source metadata.",
+            ),
+            true,
+            Some(now.as_str()),
+        ),
+        (
+            "source-telegram",
+            "telegram",
+            "Telegram Public Preview",
+            "https://t.me/s/<channel>",
+            "none",
+            "Manual + daily check",
+            capability(
+                "supported",
+                "limited",
+                "supported",
+                false,
+                "none",
+                "best-effort",
+                "Public channel previews can be read without sign-in; private channels still require a local session.",
+            ),
+            true,
+            Some(now.as_str()),
+        ),
+        (
+            "source-rss-feed",
+            "rss-feed",
+            "RSS/Atom/JSON Feed",
+            "https://example.com/feed.xml",
+            "none",
+            "Manual + daily check",
+            capability(
+                "supported",
+                "supported",
+                "supported",
+                false,
+                "none",
+                "stable",
+                "Custom RSS, Atom, and JSON Feed subscriptions can ingest videos, audio, PDFs, and teacher message posts.",
+            ),
+            true,
+            Some(now.as_str()),
+        ),
+        (
+            "source-archive-org",
+            "archive-org",
+            "Archive.org",
+            "archive.org/details/<identifier>",
+            "none",
+            "Manual + daily check",
+            capability(
+                "supported",
+                "supported",
+                "supported",
+                false,
+                "none",
+                "stable",
+                "Uses Archive.org item metadata and file listings.",
+            ),
+            true,
+            Some(now.as_str()),
+        ),
+        (
+            "source-youtube",
+            "youtube",
+            "YouTube",
+            "youtube:not-configured",
+            "api-key",
+            "Manual until configured",
+            capability(
+                "supported",
+                "limited",
+                "limited",
+                true,
+                "api-key",
+                "best-effort",
+                "Official API covers metadata; RSS feed URLs work without an API key where available.",
+            ),
+            false,
+            None,
+        ),
+        (
+            "source-x",
+            "x",
+            "X",
+            "x:not-configured",
+            "api-key",
+            "Manual until configured",
+            capability(
+                "limited",
+                "limited",
+                "limited",
+                true,
+                "api-key",
+                "credential-bound",
+                "API access is credential-bound and platform-constrained.",
+            ),
+            false,
+            None,
+        ),
+        (
+            "source-rumble",
+            "rumble",
+            "Rumble",
+            "rumble:not-configured",
+            "none",
+            "Manual until configured",
+            capability(
+                "limited",
+                "limited",
+                "limited",
+                false,
+                "none",
+                "best-effort",
+                "No broad public catalog API is assumed; URL extraction is best-effort.",
+            ),
+            false,
+            None,
+        ),
+        (
+            "source-odysee",
+            "odysee",
+            "Odysee",
+            "odysee:not-configured",
+            "none",
+            "Manual until configured",
+            capability(
+                "limited",
+                "limited",
+                "limited",
+                false,
+                "none",
+                "best-effort",
+                "No broad native catalog adapter is assumed; user-initiated URLs can use local tooling where supported.",
+            ),
+            false,
+            None,
+        ),
+        (
+            "source-teacher-relay",
+            "teacher-relay",
+            "Curator Relay",
+            "https://teacher.example/feed.duroos.json",
+            "none",
+            "Manual + daily check",
+            capability(
+                "native",
+                "supported",
+                "supported",
+                false,
+                "none",
+                "stable",
+                "Signed curator feeds publish classes, live archives, posts, hashes, and source metadata.",
+            ),
+            true,
+            Some(now.as_str()),
+        ),
+    ];
+
+    for source in source_rows {
+        let feed_format = match source.1 {
+            "archive-org" => "json-feed",
+            "teacher-relay" => "duroos-manifest",
+            _ => "rss",
+        };
+        tx.execute(
+            "INSERT INTO sources
+             (id, platform, label, identifier, feed_format, feed_transport, trust_state,
+              trusted_curator_id, auth_mode, update_schedule, capability_json, enabled,
+              last_checked_at, last_verified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'https', 'unsigned', NULL, ?6, ?7, ?8, ?9, ?10, NULL)
+             ON CONFLICT(id) DO UPDATE SET
+               label = excluded.label,
+               identifier = excluded.identifier,
+               feed_format = excluded.feed_format,
+               feed_transport = excluded.feed_transport,
+               trust_state = excluded.trust_state,
+               auth_mode = excluded.auth_mode,
+               update_schedule = excluded.update_schedule,
+               capability_json = excluded.capability_json,
+               enabled = sources.enabled,
+               last_checked_at = COALESCE(sources.last_checked_at, excluded.last_checked_at),
+               last_verified_at = sources.last_verified_at",
+            params![
+                source.0,
+                source.1,
+                source.2,
+                source.3,
+                feed_format,
+                source.4,
+                source.5,
+                serde_json::to_string(&source.6).map_err(|error| error.to_string())?,
+                if source.7 { 1 } else { 0 },
+                source.8
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
+    tx.execute(
+        "INSERT INTO teachers (id, display_name, description, source_links_json)
+         VALUES ('teacher-3', 'Personal Library', 'Imported local files on this machine.', '[]')
+         ON CONFLICT(id) DO UPDATE SET
+           display_name = excluded.display_name,
+           description = excluded.description",
+        [],
+    )
+    .map_err(|error| error.to_string())?;
+
+    tx.execute(
+        "INSERT INTO collections (id, title, owner_label, sort_order, lesson_count, source_ids_json)
+         VALUES ('collection-2', 'Local Imports', 'Local archive', 10, 0, ?1)
+         ON CONFLICT(id) DO UPDATE SET
+           title = excluded.title,
+           owner_label = excluded.owner_label,
+           source_ids_json = excluded.source_ids_json,
+           lesson_count = (SELECT COUNT(*) FROM lessons WHERE collection_id = 'collection-2')",
+        params![serde_json::to_string(&vec!["source-local-files"])
+            .map_err(|error| error.to_string())?],
+    )
+    .map_err(|error| error.to_string())?;
+
+    tx.commit().map_err(|error| error.to_string())
+}
+
+fn remove_demo_seed_data(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "
+            DELETE FROM lessons_fts WHERE lesson_id IN ('lesson-1', 'lesson-2', 'lesson-3', 'lesson-4', 'lesson-5');
+            DELETE FROM watch_state WHERE lesson_id IN ('lesson-1', 'lesson-2', 'lesson-3', 'lesson-4', 'lesson-5');
+            DELETE FROM media_files WHERE id IN ('media-1', 'media-2', 'media-3', 'media-4');
+            DELETE FROM provenance_records WHERE id IN ('prov-1', 'prov-2', 'prov-3', 'prov-4', 'prov-5');
+            DELETE FROM jobs WHERE id IN ('job-1', 'job-2', 'job-3', 'job-4');
+            DELETE FROM live_sessions WHERE id IN ('live-1', 'live-2', 'live-3');
+            DELETE FROM teacher_relays WHERE id IN ('relay-1', 'relay-2');
+            DELETE FROM lessons WHERE id IN ('lesson-1', 'lesson-2', 'lesson-3', 'lesson-4', 'lesson-5');
+            DELETE FROM collections WHERE id IN ('collection-1', 'collection-3');
+            DELETE FROM teachers WHERE id IN ('teacher-1', 'teacher-2');
+            ",
+        )
+        .map_err(|error| error.to_string())
+}
+
+fn capability(
+    metadata: &str,
+    download: &str,
+    auto_update: &str,
+    auth_required: bool,
+    auth_mode: &str,
+    reliability: &str,
+    note: &str,
+) -> SourceCapability {
+    SourceCapability {
+        metadata: metadata.to_string(),
+        download: download.to_string(),
+        auto_update: auto_update.to_string(),
+        auth_required,
+        auth_mode: auth_mode.to_string(),
+        reliability: reliability.to_string(),
+        note: note.to_string(),
+    }
+}
+
+fn fetch_sources(connection: &Connection) -> Result<Vec<Source>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, platform, label, identifier, feed_format, feed_transport,
+                    trust_state, trusted_curator_id, auth_mode, update_schedule,
+                    capability_json, enabled, last_checked_at, last_verified_at
+             FROM sources
+             ORDER BY rowid",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = statement
+        .query_map([], |row| {
+            let capability_json: String = row.get(10)?;
+            let capability = serde_json::from_str(&capability_json).unwrap_or_else(|_| {
+                capability(
+                    "limited",
+                    "limited",
+                    "limited",
+                    false,
+                    "none",
+                    "best-effort",
+                    "Capability metadata could not be parsed.",
+                )
+            });
+
+            Ok(Source {
+                id: row.get(0)?,
+                platform: row.get(1)?,
+                label: row.get(2)?,
+                identifier: row.get(3)?,
+                feed_format: row.get(4)?,
+                feed_transport: row.get(5)?,
+                trust_state: row.get(6)?,
+                trusted_curator_id: row.get(7)?,
+                auth_mode: row.get(8)?,
+                update_schedule: row.get(9)?,
+                capability,
+                enabled: row.get::<_, i64>(11)? == 1,
+                last_checked_at: row.get(12)?,
+                last_verified_at: row.get(13)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn fetch_teachers(connection: &Connection) -> Result<Vec<Teacher>, String> {
+    let mut statement = connection
+        .prepare("SELECT id, display_name, description, source_links_json FROM teachers")
+        .map_err(|error| error.to_string())?;
+
+    let rows = statement
+        .query_map([], |row| {
+            let source_links_json: String = row.get(3)?;
+            Ok(Teacher {
+                id: row.get(0)?,
+                display_name: row.get(1)?,
+                description: row.get(2)?,
+                source_links: serde_json::from_str(&source_links_json).unwrap_or_default(),
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn fetch_teacher_relays(connection: &Connection) -> Result<Vec<TeacherRelay>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, teacher_id, title, feed_url, feed_format, feed_transport,
+                    trust_state, subscriber_count, visibility, trust_policy, auto_download,
+                    last_published_at, last_verified_at, description
+             FROM teacher_relays
+             ORDER BY title",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(TeacherRelay {
+                id: row.get(0)?,
+                teacher_id: row.get(1)?,
+                title: row.get(2)?,
+                feed_url: row.get(3)?,
+                feed_format: row.get(4)?,
+                feed_transport: row.get(5)?,
+                trust_state: row.get(6)?,
+                subscriber_count: row.get(7)?,
+                visibility: row.get(8)?,
+                trust_policy: row.get(9)?,
+                auto_download: row.get::<_, i64>(10)? == 1,
+                last_published_at: row.get(11)?,
+                last_verified_at: row.get(12)?,
+                description: row.get(13)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn fetch_live_sessions(connection: &Connection) -> Result<Vec<LiveSession>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, teacher_id, relay_id, title, provider, provider_url, status,
+                    starts_at, archive_lesson_id, auto_publish_archive, recording_policy
+             FROM live_sessions
+             ORDER BY starts_at DESC",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(LiveSession {
+                id: row.get(0)?,
+                teacher_id: row.get(1)?,
+                relay_id: row.get(2)?,
+                title: row.get(3)?,
+                provider: row.get(4)?,
+                provider_url: row.get(5)?,
+                status: row.get(6)?,
+                starts_at: row.get(7)?,
+                archive_lesson_id: row.get(8)?,
+                auto_publish_archive: row.get::<_, i64>(9)? == 1,
+                recording_policy: row.get(10)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn fetch_collections(connection: &Connection) -> Result<Vec<Collection>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, title, owner_label, sort_order, lesson_count, source_ids_json
+             FROM collections
+             ORDER BY sort_order",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = statement
+        .query_map([], |row| {
+            let source_ids_json: String = row.get(5)?;
+            Ok(Collection {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                owner_label: row.get(2)?,
+                sort_order: row.get(3)?,
+                lesson_count: row.get(4)?,
+                source_ids: serde_json::from_str(&source_ids_json).unwrap_or_default(),
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn fetch_lessons(connection: &Connection) -> Result<Vec<Lesson>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, title, content_type, teacher_id, collection_id, source_id,
+                    source_url, published_at, description, thumbnail_tone,
+                    duration_seconds, media_file_id, provenance_id
+             FROM lessons
+             ORDER BY published_at DESC, title ASC",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = statement
+        .query_map([], lesson_from_row)
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn lesson_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Lesson> {
+    Ok(Lesson {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        content_type: row.get(2)?,
+        teacher_id: row.get(3)?,
+        collection_id: row.get(4)?,
+        source_id: row.get(5)?,
+        source_url: row.get(6)?,
+        published_at: row.get(7)?,
+        description: row.get(8)?,
+        thumbnail_tone: row.get(9)?,
+        duration_seconds: row.get(10)?,
+        media_file_id: row.get(11)?,
+        provenance_id: row.get(12)?,
+    })
+}
+
+fn fetch_media_files(connection: &Connection) -> Result<Vec<MediaFile>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, lesson_id, relative_path, content_hash, size_bytes, codec,
+                    import_status, hash_verification_state
+             FROM media_files",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(MediaFile {
+                id: row.get(0)?,
+                lesson_id: row.get(1)?,
+                relative_path: row.get(2)?,
+                content_hash: row.get(3)?,
+                size_bytes: row.get(4)?,
+                codec: row.get(5)?,
+                import_status: row.get(6)?,
+                hash_verification_state: row.get(7)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn fetch_trusted_curators(connection: &Connection) -> Result<Vec<TrustedCurator>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, display_name, public_key, trust_note, added_at
+             FROM trusted_curators
+             ORDER BY display_name",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(TrustedCurator {
+                id: row.get(0)?,
+                display_name: row.get(1)?,
+                public_key: row.get(2)?,
+                trust_note: row.get(3)?,
+                added_at: row.get(4)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn fetch_provenance_records(connection: &Connection) -> Result<Vec<ProvenanceRecord>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, lesson_id, origin_url, permission_note, imported_at, adapter_name, content_hash
+             FROM provenance_records",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(ProvenanceRecord {
+                id: row.get(0)?,
+                lesson_id: row.get(1)?,
+                origin_url: row.get(2)?,
+                permission_note: row.get(3)?,
+                imported_at: row.get(4)?,
+                adapter_name: row.get(5)?,
+                content_hash: row.get(6)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn fetch_watch_state(connection: &Connection) -> Result<Vec<WatchState>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT lesson_id, progress_seconds, completed, last_watched_at
+             FROM watch_state",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(WatchState {
+                lesson_id: row.get(0)?,
+                progress_seconds: row.get(1)?,
+                completed: row.get::<_, i64>(2)? == 1,
+                last_watched_at: row.get(3)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn fetch_jobs(connection: &Connection) -> Result<Vec<Job>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, kind, state, source_id, lesson_id, label, detail, retry_count, updated_at
+             FROM jobs
+             ORDER BY updated_at DESC",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(Job {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                state: row.get(2)?,
+                source_id: row.get(3)?,
+                lesson_id: row.get(4)?,
+                label: row.get(5)?,
+                detail: row.get(6)?,
+                retry_count: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn collect_media_files(path: &Path) -> Vec<PathBuf> {
+    if path.is_file() {
+        return if is_media_file(path) {
+            vec![path.to_path_buf()]
+        } else {
+            Vec::new()
+        };
+    }
+
+    if !path.is_dir() {
+        return Vec::new();
+    }
+
+    WalkDir::new(path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| entry.into_path())
+        .filter(|candidate| is_media_file(candidate))
+        .collect()
+}
+
+fn is_media_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(is_supported_file_extension)
+        .unwrap_or(false)
+}
+
+fn is_supported_file_extension(extension: &str) -> bool {
+    VIDEO_EXTENSIONS
+        .iter()
+        .chain(AUDIO_EXTENSIONS.iter())
+        .chain(PDF_EXTENSIONS.iter())
+        .any(|allowed| allowed.eq_ignore_ascii_case(extension))
+}
+
+fn content_type_from_path(path: &Path) -> String {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(content_type_from_extension)
+        .unwrap_or("video")
+        .to_string()
+}
+
+fn content_type_from_extension(extension: &str) -> &'static str {
+    if VIDEO_EXTENSIONS
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(extension))
+    {
+        return "video";
+    }
+
+    if AUDIO_EXTENSIONS
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(extension))
+    {
+        return "audio";
+    }
+
+    if PDF_EXTENSIONS
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(extension))
+    {
+        return "pdf";
+    }
+
+    "post"
+}
+
+fn infer_existing_content_type(
+    relative_path: Option<&str>,
+    source_url: &str,
+    platform: Option<&str>,
+    adapter_name: Option<&str>,
+) -> Option<ContentTypeInference> {
+    if let Some(relative_path) = relative_path {
+        if let Some(extension) = Path::new(relative_path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+        {
+            let content_type = content_type_from_extension(extension);
+
+            if is_file_backed_content_type(content_type) {
+                return Some(ContentTypeInference {
+                    content_type,
+                    evidence: ContentTypeEvidence::FilePath,
+                });
+            }
+        }
+    }
+
+    if let Some(extension) = extension_from_url(source_url) {
+        return Some(ContentTypeInference {
+            content_type: content_type_from_extension(&extension),
+            evidence: ContentTypeEvidence::SourceUrlExtension,
+        });
+    }
+
+    if is_probably_video_page(source_url) {
+        return Some(ContentTypeInference {
+            content_type: "video",
+            evidence: ContentTypeEvidence::VideoPage,
+        });
+    }
+
+    let platform = platform.unwrap_or_default();
+    let adapter_name = adapter_name.unwrap_or_default();
+    if platform == "telegram"
+        || platform == "rss-feed"
+        || platform == "teacher-relay"
+        || platform == "x"
+        || adapter_name == "TelegramPublicPreviewAdapter"
+    {
+        return Some(ContentTypeInference {
+            content_type: "post",
+            evidence: ContentTypeEvidence::TextSource,
+        });
+    }
+
+    None
+}
+
+fn should_update_content_type(current: &str, inference: ContentTypeInference) -> bool {
+    if !is_valid_content_type(current) {
+        return true;
+    }
+
+    match inference.evidence {
+        ContentTypeEvidence::FilePath | ContentTypeEvidence::SourceUrlExtension => {
+            current != inference.content_type
+        }
+        ContentTypeEvidence::VideoPage => current == "post",
+        ContentTypeEvidence::TextSource => current == "video",
+    }
+}
+
+fn is_valid_content_type(content_type: &str) -> bool {
+    matches!(content_type, "video" | "audio" | "pdf" | "post")
+}
+
+fn classify_feed_content(
+    source_url: &str,
+    mime_type: Option<&str>,
+    description: Option<&str>,
+) -> String {
+    if let Some(mime_type) = mime_type {
+        let normalized = mime_type.to_ascii_lowercase();
+
+        if normalized.starts_with("video/") {
+            return "video".to_string();
+        }
+        if normalized.starts_with("audio/") {
+            return "audio".to_string();
+        }
+        if normalized.contains("pdf") {
+            return "pdf".to_string();
+        }
+    }
+
+    if let Some(extension) = extension_from_url(source_url) {
+        let content_type = content_type_from_extension(&extension);
+        if content_type != "post" {
+            return content_type.to_string();
+        }
+    }
+
+    if is_probably_video_page(source_url) {
+        return "video".to_string();
+    }
+
+    if description
+        .map(|value| value.contains("<video") || value.contains("<audio"))
+        .unwrap_or(false)
+    {
+        return "video".to_string();
+    }
+
+    "post".to_string()
+}
+
+fn is_file_backed_mime_type(mime_type: &str) -> bool {
+    let normalized = mime_type.to_ascii_lowercase();
+    normalized.starts_with("video/")
+        || normalized.starts_with("audio/")
+        || normalized.contains("pdf")
+}
+
+fn extension_from_url(source_url: &str) -> Option<String> {
+    Url::parse(source_url)
+        .ok()
+        .and_then(|url| {
+            Path::new(url.path())
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(|extension| extension.to_ascii_lowercase())
+        })
+        .filter(|extension| is_supported_file_extension(extension))
+}
+
+fn is_probably_video_page(source_url: &str) -> bool {
+    if source_url.starts_with("lbry://") {
+        return true;
+    }
+
+    let Ok(url) = Url::parse(source_url) else {
+        return false;
+    };
+    let host = url
+        .host_str()
+        .map(|host| host.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    host.ends_with("youtube.com")
+        || host == "youtu.be"
+        || host.ends_with("rumble.com")
+        || host.ends_with("odysee.com")
+}
+
+fn is_file_backed_content_type(content_type: &str) -> bool {
+    matches!(content_type, "video" | "audio" | "pdf")
+}
+
+fn copy_media_into_library(
+    source_path: &Path,
+    library_dir: &Path,
+) -> Result<(String, String, i64), String> {
+    let hash = hash_file(source_path)?;
+    let file_name = source_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "Could not read file name".to_string())?;
+    let safe_name = file_name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let destination_name = format!("{}-{safe_name}", Uuid::new_v4());
+    let destination = library_dir.join(destination_name);
+
+    fs::copy(source_path, &destination).map_err(|error| error.to_string())?;
+    let size = destination
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .len() as i64;
+    let relative_path = destination
+        .strip_prefix(library_dir.parent().unwrap_or(library_dir))
+        .unwrap_or(&destination)
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    Ok((
+        format!("library/{relative_path}"),
+        format!("sha256:{hash}"),
+        size,
+    ))
+}
+
+fn hash_file(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+
+    loop {
+        let bytes_read = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::{engine::general_purpose, Engine as _};
+    use ed25519_dalek::{Signer, SigningKey};
+    use serde_json::{json, Value};
+
+    fn test_connection() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        connection
+    }
+
+    fn test_temp_dir(prefix: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!("{prefix}-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    fn signed_manifest() -> Value {
+        let signing_key = SigningKey::from_bytes(&[9_u8; 32]);
+        let mut manifest = json!({
+            "schemaVersion": 2,
+            "exportedAt": "2026-06-16T05:00:00Z",
+            "curator": {
+                "id": "curator-foundations",
+                "displayName": "Foundations Curator",
+                "publicKey": general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes())
+            },
+            "collection": {
+                "title": "Foundations Class",
+                "ownerLabel": "Foundations Curator"
+            },
+            "lessons": [
+                {
+                    "title": "Opening lesson",
+                    "contentType": "video",
+                    "sourceRefs": [
+                        {
+                            "platform": "youtube",
+                            "originUrl": "https://youtube.com/watch?v=abc123"
+                        }
+                    ],
+                    "retrievalRefs": [
+                        {
+                            "kind": "enclosure-url",
+                            "url": "https://example.org/opening.mp4",
+                            "mediaType": "video/mp4"
+                        }
+                    ],
+                    "contentHashes": [
+                        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    ],
+                    "provenance": {
+                        "adapterName": "DuroosManifestAdapter",
+                        "permissionNote": "Redistributable by the curator."
+                    }
+                }
+            ]
+        });
+        let payload = manifest::canonical_json_for_test(&manifest).unwrap();
+        let signature = signing_key.sign(payload.as_bytes());
+        manifest.as_object_mut().unwrap().insert(
+            "signature".to_string(),
+            json!({
+                "algorithm": "ed25519",
+                "publicKey": general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes()),
+                "value": general_purpose::STANDARD.encode(signature.to_bytes())
+            }),
+        );
+        manifest
+    }
+
+    fn insert_signed_source(connection: &Connection, public_key: &str) {
+        let feed_url = "https://example.org/foundations.duroos.json";
+        connection
+            .execute(
+                "INSERT INTO sources
+                 (id, platform, label, identifier, feed_format, feed_transport, trust_state,
+                  trusted_curator_id, auth_mode, update_schedule, capability_json, enabled,
+                  last_checked_at, last_verified_at)
+                 VALUES (?1, 'teacher-relay', 'Curator: Foundations', ?2, 'duroos-manifest',
+                  'https', 'signed-untrusted', NULL, 'none', 'manual', ?3, 1, NULL, ?4)",
+                params![
+                    "source-teacher-relay-test",
+                    feed_url,
+                    serde_json::to_string(&capability(
+                        "supported",
+                        "limited",
+                        "supported",
+                        false,
+                        "none",
+                        "stable",
+                        "Signed Duroos manifest."
+                    ))
+                    .unwrap(),
+                    Utc::now().to_rfc3339()
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO teachers (id, display_name, description, source_links_json)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    "teacher-curator-test",
+                    "Foundations Curator",
+                    format!("Signed curator feed key: {public_key}"),
+                    serde_json::to_string(&vec![feed_url]).unwrap()
+                ],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn trusted_curator_promotes_database_aware_manifest_validation() {
+        let mut connection = test_connection();
+        let manifest = signed_manifest();
+        let report = validate_collection_manifest(&connection, &manifest.to_string()).unwrap();
+
+        assert!(report.valid, "{:?}", report.errors);
+        assert_eq!(report.trust_state.as_deref(), Some("signed-untrusted"));
+        let curator = report.curator.unwrap();
+
+        let trusted = add_trusted_curator(
+            &mut connection,
+            curator.display_name,
+            curator.public_key,
+            Some("Verified out of band.".to_string()),
+        )
+        .unwrap();
+        let trusted_report =
+            validate_collection_manifest(&connection, &manifest.to_string()).unwrap();
+
+        assert_eq!(
+            trusted_report.trust_state.as_deref(),
+            Some("signed-trusted")
+        );
+        assert_eq!(
+            trusted_report.trusted_curator_id.as_deref(),
+            Some(trusted.id.as_str())
+        );
+    }
+
+    #[test]
+    fn duplicate_trusted_curator_public_keys_do_not_duplicate_rows() {
+        let mut connection = test_connection();
+        let manifest = signed_manifest();
+        let curator = manifest::validate_collection_manifest(&manifest.to_string())
+            .curator
+            .unwrap();
+
+        let first = add_trusted_curator(
+            &mut connection,
+            curator.display_name.clone(),
+            curator.public_key.clone(),
+            None,
+        )
+        .unwrap();
+        let second = add_trusted_curator(
+            &mut connection,
+            "Updated Curator".to_string(),
+            curator.public_key,
+            Some("Updated note.".to_string()),
+        )
+        .unwrap();
+        let trusted_curators = fetch_trusted_curators(&connection).unwrap();
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(trusted_curators.len(), 1);
+        assert_eq!(trusted_curators[0].display_name, "Updated Curator");
+    }
+
+    #[test]
+    fn removing_trusted_curator_downgrades_matching_sources() {
+        let mut connection = test_connection();
+        let manifest = signed_manifest();
+        let curator = manifest::validate_collection_manifest(&manifest.to_string())
+            .curator
+            .unwrap();
+        insert_signed_source(&connection, &curator.public_key);
+
+        let trusted = add_trusted_curator(
+            &mut connection,
+            curator.display_name,
+            curator.public_key,
+            None,
+        )
+        .unwrap();
+        let trusted_source = fetch_sources(&connection)
+            .unwrap()
+            .into_iter()
+            .find(|source| source.id == "source-teacher-relay-test")
+            .unwrap();
+        assert_eq!(trusted_source.trust_state, "signed-trusted");
+        assert_eq!(
+            trusted_source.trusted_curator_id.as_deref(),
+            Some(trusted.id.as_str())
+        );
+
+        let summary = remove_trusted_curator(&mut connection, trusted.id).unwrap();
+        let untrusted_source = fetch_sources(&connection)
+            .unwrap()
+            .into_iter()
+            .find(|source| source.id == "source-teacher-relay-test")
+            .unwrap();
+
+        assert_eq!(summary.sources_updated, 1);
+        assert_eq!(untrusted_source.trust_state, "signed-untrusted");
+        assert_eq!(untrusted_source.trusted_curator_id, None);
+    }
+
+    #[test]
+    fn ipfs_and_magnet_refs_validate_but_do_not_become_download_urls() {
+        let manifest = json!({
+            "schemaVersion": 2,
+            "exportedAt": "2026-06-16T05:00:00Z",
+            "curator": {
+                "id": "curator",
+                "displayName": "Curator",
+                "publicKey": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            },
+            "collection": {
+                "title": "References",
+                "ownerLabel": "Curator"
+            },
+            "lessons": [
+                {
+                    "title": "Modeled refs",
+                    "contentType": "video",
+                    "sourceRefs": [
+                        {
+                            "platform": "youtube",
+                            "originUrl": "https://youtube.com/watch?v=abc123"
+                        }
+                    ],
+                    "retrievalRefs": [
+                        {
+                            "kind": "ipfs-cid",
+                            "cid": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+                            "mediaType": "video/mp4"
+                        },
+                        {
+                            "kind": "magnet",
+                            "magnetUri": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+                            "mediaType": "video/mp4"
+                        }
+                    ],
+                    "contentHashes": [
+                        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    ],
+                    "provenance": {
+                        "adapterName": "DuroosManifestAdapter"
+                    }
+                }
+            ]
+        });
+
+        let report = manifest::validate_collection_manifest(&manifest.to_string());
+        let parsed = parse_feed_document(
+            &manifest.to_string(),
+            "https://example.org/references.duroos.json",
+        )
+        .unwrap();
+
+        assert!(report.valid, "{:?}", report.errors);
+        assert_eq!(
+            parsed.lessons[0].source_url,
+            "https://youtube.com/watch?v=abc123"
+        );
+    }
+
+    #[test]
+    fn nostr_references_remain_modeled_only() {
+        assert!(is_nostr_reference("nostr:npub1example"));
+        assert!(is_nostr_reference("nostr+ws://relay.example"));
+    }
+
+    #[test]
+    fn parses_public_telegram_channel_and_post_urls() {
+        let channel = parse_telegram_source("https://t.me/example_channel").unwrap();
+        assert_eq!(channel.username, "example_channel");
+        assert_eq!(channel.post_id, None);
+
+        let post = parse_telegram_source("https://t.me/s/example_channel/123").unwrap();
+        assert_eq!(post.username, "example_channel");
+        assert_eq!(post.post_id.as_deref(), Some("123"));
+    }
+
+    #[test]
+    fn rejects_private_telegram_invite_paths_for_public_scraping() {
+        assert!(parse_telegram_source("https://t.me/+privateInvite").is_none());
+        assert!(parse_telegram_source("https://t.me/c/123456/7").is_none());
+        assert!(is_probably_telegram_invite("https://t.me/c/123456/7"));
+    }
+
+    #[test]
+    fn normalizes_youtube_playlist_and_channel_urls_to_feeds() {
+        assert_eq!(
+            normalize_feed_url("https://www.youtube.com/playlist?list=PL123"),
+            "https://www.youtube.com/feeds/videos.xml?playlist_id=PL123"
+        );
+        assert_eq!(
+            normalize_feed_url("https://www.youtube.com/channel/UCabc123"),
+            "https://www.youtube.com/feeds/videos.xml?channel_id=UCabc123"
+        );
+    }
+
+    #[test]
+    fn parses_archive_org_item_download_and_metadata_urls() {
+        assert_eq!(
+            parse_archive_org_identifier("https://archive.org/details/class-series").as_deref(),
+            Some("class-series")
+        );
+        assert_eq!(
+            parse_archive_org_identifier("https://archive.org/download/class-series/lesson.mp3")
+                .as_deref(),
+            Some("class-series")
+        );
+        assert_eq!(
+            parse_archive_org_identifier("https://archive.org/metadata/class-series").as_deref(),
+            Some("class-series")
+        );
+        assert!(parse_archive_org_identifier("https://archive.com/details/class-series").is_none());
+    }
+
+    #[test]
+    fn builds_archive_org_file_download_urls_with_path_encoding() {
+        assert_eq!(
+            archive_download_url("class series", "folder/Lesson 01 intro.mp3"),
+            "https://archive.org/download/class%20series/folder/Lesson%2001%20intro.mp3"
+        );
+    }
+
+    #[test]
+    fn creates_archive_lessons_from_supported_metadata_files() {
+        let file = serde_json::json!({
+            "name": "audio/Lesson 01.mp3",
+            "format": "VBR MP3",
+            "size": "12345",
+            "sha1": "abc123"
+        });
+        let lesson = archive_file_lesson(
+            "class-series",
+            &file,
+            "Class Series",
+            Some("Introductory course."),
+            Some("2026-06-16"),
+        )
+        .unwrap();
+
+        assert_eq!(lesson.content_type, "audio");
+        assert_eq!(
+            lesson.source_url,
+            "https://archive.org/download/class-series/audio/Lesson%2001.mp3"
+        );
+        assert_eq!(lesson.content_hash.as_deref(), Some("sha1:abc123"));
+        assert_eq!(lesson.adapter_name, "ArchiveOrgMetadataAdapter");
+    }
+
+    #[test]
+    fn parses_rss_items_without_requiring_permission_notes() {
+        let xml = r#"
+          <rss version="2.0">
+            <channel>
+              <title>Class Feed</title>
+              <item>
+                <title>Opening Class</title>
+                <link>https://example.com/lesson-1</link>
+                <description>First lesson in the class.</description>
+                <pubDate>Tue, 16 Jun 2026 12:00:00 GMT</pubDate>
+              </item>
+            </channel>
+          </rss>
+        "#;
+        let document = roxmltree::Document::parse(xml).unwrap();
+        let lessons = feed_lessons(&document).unwrap();
+
+        assert_eq!(feed_title(&document).as_deref(), Some("Class Feed"));
+        assert_eq!(lessons.len(), 1);
+        assert_eq!(lessons[0].title, "Opening Class");
+        assert_eq!(lessons[0].content_type, "post");
+        assert_eq!(lessons[0].provenance_note, PUBLIC_SOURCE_PROVENANCE_NOTE);
+    }
+
+    #[test]
+    fn classifies_feed_enclosures_as_audio_pdf_or_video() {
+        let xml = r#"
+          <rss version="2.0">
+            <channel>
+              <title>Mixed Feed</title>
+              <item>
+                <title>Audio Lesson</title>
+                <enclosure url="https://example.com/lesson.mp3" type="audio/mpeg" />
+              </item>
+              <item>
+                <title>Class Handout</title>
+                <enclosure url="https://example.com/handout.pdf" type="application/pdf" />
+              </item>
+              <item>
+                <title>Video Class</title>
+                <enclosure url="https://example.com/class.mp4" type="video/mp4" />
+              </item>
+            </channel>
+          </rss>
+        "#;
+        let document = roxmltree::Document::parse(xml).unwrap();
+        let lessons = feed_lessons(&document).unwrap();
+
+        assert_eq!(lessons.len(), 3);
+        assert_eq!(lessons[0].content_type, "audio");
+        assert_eq!(lessons[1].content_type, "pdf");
+        assert_eq!(lessons[2].content_type, "video");
+    }
+
+    #[test]
+    fn parses_atom_feed_entries() {
+        let xml = r#"
+          <feed xmlns="http://www.w3.org/2005/Atom">
+            <title>Atom Class</title>
+            <entry>
+              <title>Atom Audio</title>
+              <link rel="enclosure" href="https://example.com/atom.mp3" type="audio/mpeg" />
+              <summary>Audio lesson.</summary>
+              <published>2026-06-16T12:00:00Z</published>
+            </entry>
+          </feed>
+        "#;
+        let parsed = parse_feed_document(xml, "https://example.com/feed.atom").unwrap();
+
+        assert_eq!(parsed.feed_format, "atom");
+        assert_eq!(parsed.title, "Atom Class");
+        assert_eq!(parsed.lessons.len(), 1);
+        assert_eq!(parsed.lessons[0].content_type, "audio");
+        assert_eq!(parsed.lessons[0].source_url, "https://example.com/atom.mp3");
+    }
+
+    #[test]
+    fn parses_json_feed_attachments() {
+        let feed = serde_json::json!({
+            "version": "https://jsonfeed.org/version/1.1",
+            "title": "JSON Class",
+            "items": [
+                {
+                    "id": "lesson-1",
+                    "title": "JSON Audio",
+                    "date_published": "2026-06-16T12:00:00Z",
+                    "attachments": [
+                        {
+                            "url": "https://example.com/json.mp3",
+                            "mime_type": "audio/mpeg",
+                            "duration_in_seconds": 120
+                        }
+                    ],
+                    "contentHash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                }
+            ]
+        });
+        let parsed =
+            parse_feed_document(&feed.to_string(), "https://example.com/feed.json").unwrap();
+
+        assert_eq!(parsed.feed_format, "json-feed");
+        assert_eq!(parsed.title, "JSON Class");
+        assert_eq!(parsed.lessons.len(), 1);
+        assert_eq!(parsed.lessons[0].content_type, "audio");
+        assert_eq!(parsed.lessons[0].duration_seconds, Some(120));
+        assert_eq!(
+            parsed.lessons[0].content_hash.as_deref(),
+            Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        );
+    }
+
+    #[test]
+    fn parses_duroos_manifest_retrieval_refs() {
+        let manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "exportedAt": "2026-06-16T05:00:00Z",
+            "curator": {
+                "id": "curator-foundations",
+                "displayName": "Foundations Curator",
+                "publicKey": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            },
+            "collection": {
+                "title": "Foundations Class",
+                "ownerLabel": "Foundations Curator"
+            },
+            "lessons": [
+                {
+                    "title": "Opening lesson",
+                    "contentType": "video",
+                    "durationSeconds": 240,
+                    "sourceRefs": [
+                        {
+                            "platform": "youtube",
+                            "originUrl": "https://youtube.com/watch?v=abc123",
+                            "publishedAt": "2026-06-16T12:00:00Z"
+                        }
+                    ],
+                    "retrievalRefs": [
+                        {
+                            "kind": "enclosure-url",
+                            "url": "https://example.org/opening.mp4",
+                            "mediaType": "video/mp4"
+                        }
+                    ],
+                    "contentHashes": [
+                        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    ],
+                    "provenance": {
+                        "adapterName": "DuroosManifestAdapter",
+                        "permissionNote": "Redistributable by the curator."
+                    }
+                }
+            ]
+        });
+        let parsed = parse_feed_document(
+            &manifest.to_string(),
+            "https://example.org/foundations.duroos.json",
+        )
+        .unwrap();
+
+        assert_eq!(parsed.feed_format, "duroos-manifest");
+        assert_eq!(parsed.trust_state, "unsigned");
+        assert_eq!(
+            parsed
+                .curator
+                .as_ref()
+                .map(|curator| curator.display_name.as_str()),
+            Some("Foundations Curator")
+        );
+        assert_eq!(
+            parsed.lessons[0].source_url,
+            "https://example.org/opening.mp4"
+        );
+        assert_eq!(parsed.lessons[0].duration_seconds, Some(240));
+    }
+
+    #[test]
+    fn rejects_hash_mismatches_before_recording_media() {
+        assert_eq!(
+            verify_downloaded_hash(
+                Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            )
+            .unwrap(),
+            "matched"
+        );
+        assert!(verify_downloaded_hash(
+            Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+            "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        )
+        .is_err());
+        assert_eq!(
+            verify_downloaded_hash(None, "sha256:abc").unwrap(),
+            "not-provided"
+        );
+        assert_eq!(
+            verify_downloaded_hash(Some("sha1:abc123"), "sha256:abc").unwrap(),
+            "unverified"
+        );
+    }
+
+    #[test]
+    fn generic_feeds_are_user_rss_sources_not_teacher_relays() {
+        assert_eq!(
+            platform_for_feed("https://example.com/classes/feed.xml"),
+            "rss-feed"
+        );
+    }
+
+    #[test]
+    fn infers_existing_content_type_from_local_or_direct_file_evidence() {
+        assert_eq!(
+            infer_existing_content_type(
+                Some("library/imports/lesson.MP3"),
+                "local-import://lesson",
+                Some("local-files"),
+                Some("LocalFilesAdapter"),
+            )
+            .unwrap(),
+            ContentTypeInference {
+                content_type: "audio",
+                evidence: ContentTypeEvidence::FilePath,
+            }
+        );
+        assert_eq!(
+            infer_existing_content_type(
+                None,
+                "https://example.com/handouts/book.pdf",
+                Some("rss-feed"),
+                Some("FeedAdapter"),
+            )
+            .unwrap(),
+            ContentTypeInference {
+                content_type: "pdf",
+                evidence: ContentTypeEvidence::SourceUrlExtension,
+            }
+        );
+    }
+
+    #[test]
+    fn infers_existing_text_sources_without_overwriting_stronger_types() {
+        let inference = infer_existing_content_type(
+            None,
+            "https://t.me/example/12",
+            Some("telegram"),
+            Some("TelegramPublicPreviewAdapter"),
+        )
+        .unwrap();
+
+        assert_eq!(inference.content_type, "post");
+        assert!(should_update_content_type("video", inference));
+        assert!(!should_update_content_type("audio", inference));
+    }
+
+    #[test]
+    fn updates_mismatched_file_evidence_even_when_current_type_is_valid() {
+        let inference = ContentTypeInference {
+            content_type: "pdf",
+            evidence: ContentTypeEvidence::FilePath,
+        };
+
+        assert!(should_update_content_type("video", inference));
+        assert!(should_update_content_type("audio", inference));
+        assert!(!should_update_content_type("pdf", inference));
+    }
+
+    #[test]
+    fn protects_default_source_rows_from_removal() {
+        assert!(is_default_source_id("source-youtube"));
+        assert!(is_default_source_id("source-odysee"));
+        assert!(!is_default_source_id("source-youtube-abc123"));
+    }
+
+    #[test]
+    fn classifies_odysee_as_best_effort_source() {
+        assert_eq!(
+            normalize_source_input("odysee.com/@teacher/class:1").unwrap(),
+            "https://odysee.com/@teacher/class:1"
+        );
+        assert_eq!(
+            normalize_source_input("rumble.com/v123-class.html").unwrap(),
+            "https://rumble.com/v123-class.html"
+        );
+        assert_eq!(
+            normalize_source_input("x.com/teacher/status/123").unwrap(),
+            "https://x.com/teacher/status/123"
+        );
+        assert_eq!(
+            normalize_source_input("lbry://@teacher/class-1").unwrap(),
+            "lbry://@teacher/class-1"
+        );
+        assert_eq!(
+            platform_for_feed("https://odysee.com/@teacher/class:1"),
+            "odysee"
+        );
+        assert!(is_probably_video_page(
+            "https://odysee.com/@teacher/class:1"
+        ));
+        assert_eq!(
+            direct_source_platform("https://odysee.com/@teacher/class:1"),
+            Some(("odysee", "video"))
+        );
+        assert_eq!(
+            direct_source_platform("https://rumble.com/v123-class.html"),
+            Some(("rumble", "video"))
+        );
+        assert_eq!(
+            direct_source_platform("https://x.com/teacher/status/123"),
+            Some(("x", "post"))
+        );
+    }
+
+    #[test]
+    fn detects_duplicate_discovered_lessons_by_url_hash_and_duration() {
+        let mut connection = test_connection();
+        let transaction = connection.transaction().unwrap();
+        transaction
+            .execute(
+                "INSERT INTO sources
+                 (id, platform, label, identifier, feed_format, feed_transport, trust_state,
+                  trusted_curator_id, auth_mode, update_schedule, capability_json, enabled,
+                  last_checked_at, last_verified_at)
+                 VALUES ('source-youtube', 'youtube', 'YouTube', 'youtube:not-configured',
+                  'rss', 'https', 'unsigned', NULL, 'api-key', 'Manual', ?1, 1, NULL, NULL)",
+                params![serde_json::to_string(&capability(
+                    "supported",
+                    "limited",
+                    "limited",
+                    true,
+                    "api-key",
+                    "best-effort",
+                    "Test source"
+                ))
+                .unwrap()],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO teachers (id, display_name, description, source_links_json)
+                 VALUES ('teacher-3', 'Personal Library', NULL, '[]')",
+                [],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO collections (id, title, owner_label, sort_order, lesson_count, source_ids_json)
+                 VALUES ('collection-2', 'Local Imports', 'Local archive', 10, 0, '[\"source-youtube\"]')",
+                [],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO lessons
+                 (id, title, content_type, teacher_id, collection_id, source_id, source_url,
+                  published_at, description, thumbnail_tone, duration_seconds, media_file_id,
+                  provenance_id)
+                 VALUES ('lesson-existing', 'Existing Class', 'video', 'teacher-3',
+                  'collection-2', 'source-youtube', 'https://youtube.com/watch?v=abc123',
+                  NULL, NULL, 'emerald', 3600, NULL, 'prov-existing')",
+                [],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO provenance_records
+                 (id, lesson_id, origin_url, permission_note, imported_at, adapter_name, content_hash)
+                 VALUES ('prov-existing', 'lesson-existing', 'https://youtube.com/watch?v=abc123',
+                  'Test', '2026-06-16T00:00:00Z', 'FeedAdapter',
+                  'sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef')",
+                [],
+            )
+            .unwrap();
+
+        let url_duplicate = DiscoveredLesson {
+            title: "Different title".to_string(),
+            content_type: "video".to_string(),
+            source_url: "https://youtube.com/watch?v=abc123".to_string(),
+            published_at: None,
+            description: None,
+            duration_seconds: None,
+            adapter_name: "FeedAdapter".to_string(),
+            provenance_note: "Test".to_string(),
+            content_hash: None,
+        };
+        let hash_duplicate = DiscoveredLesson {
+            title: "Hash duplicate".to_string(),
+            source_url: "https://example.com/new.mp4".to_string(),
+            content_hash: Some(
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_string(),
+            ),
+            ..url_duplicate.clone()
+        };
+        let natural_duplicate = DiscoveredLesson {
+            title: "Existing Class".to_string(),
+            source_url: "https://rumble.com/example".to_string(),
+            content_hash: None,
+            duration_seconds: Some(3600),
+            ..hash_duplicate.clone()
+        };
+
+        assert_eq!(
+            discovered_duplicate_lesson_title(&transaction, &url_duplicate)
+                .unwrap()
+                .as_deref(),
+            Some("Existing Class")
+        );
+        assert_eq!(
+            discovered_duplicate_lesson_title(&transaction, &hash_duplicate)
+                .unwrap()
+                .as_deref(),
+            Some("Existing Class")
+        );
+        assert_eq!(
+            discovered_duplicate_lesson_title(&transaction, &natural_duplicate)
+                .unwrap()
+                .as_deref(),
+            Some("Existing Class")
+        );
+    }
+
+    #[test]
+    fn sanitizes_source_ids_for_download_paths() {
+        assert_eq!(
+            safe_path_segment("source-youtube PL 123/../bad"),
+            "source-youtube-PL-123-..-bad"
+        );
+        assert_eq!(safe_path_segment("///"), "item");
+    }
+
+    #[test]
+    fn detects_app_local_yt_dlp_cookie_file() {
+        let data_dir = test_temp_dir("duroos-cookies");
+        fs::write(data_dir.join("cookies.txt"), "# Netscape cookies").unwrap();
+        fs::write(
+            data_dir.join("yt-dlp-cookies.txt"),
+            "# Preferred Netscape cookies",
+        )
+        .unwrap();
+
+        let detected = yt_dlp_cookie_file(&data_dir).unwrap();
+        assert_eq!(
+            detected
+                .file_name()
+                .and_then(|file_name| file_name.to_str()),
+            Some("yt-dlp-cookies.txt")
+        );
+
+        fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[test]
+    fn yt_dlp_auth_hint_explains_cookie_and_manual_import_workarounds() {
+        let data_dir = PathBuf::from("/tmp/Duroos Watcher Test");
+        let missing_cookie_hint = yt_dlp_auth_hint(None, &data_dir);
+        assert!(missing_cookie_hint.contains("yt-dlp-cookies.txt"));
+        assert!(missing_cookie_hint.contains("manual"));
+
+        let configured_cookie_hint =
+            yt_dlp_auth_hint(Some(&data_dir.join("cookies.txt")), &data_dir);
+        assert!(configured_cookie_hint.contains("Local cookies were used"));
+        assert!(configured_cookie_hint.contains("refresh"));
+    }
+
+    #[test]
+    fn treats_yt_dlp_fragments_as_partial_media_files() {
+        assert!(is_probably_partial_media_file(Path::new(
+            "Lecture_10-xGSBvoVScqE.f399.mp4"
+        )));
+        assert!(is_probably_partial_media_file(Path::new(
+            "Lecture_10-xGSBvoVScqE.f251.webm"
+        )));
+        assert!(is_probably_partial_media_file(Path::new("lesson.mp4.part")));
+        assert!(!is_probably_partial_media_file(Path::new(
+            "Lecture_10-xGSBvoVScqE.mp4"
+        )));
+    }
+
+    #[test]
+    fn summarizes_last_stderr_lines() {
+        assert_eq!(output_summary(b""), "no stderr output");
+        assert_eq!(output_summary(b"one\ntwo\nthree\nfour"), "two three four");
+    }
+
+    #[test]
+    fn resolves_only_safe_library_media_paths() {
+        let data_dir = Path::new("/tmp/duroos-test");
+
+        assert_eq!(
+            resolve_library_media_path(data_dir, "library/imports/lesson.mp4"),
+            Some(PathBuf::from("/tmp/duroos-test/library/imports/lesson.mp4"))
+        );
+        assert_eq!(resolve_library_media_path(data_dir, "../secret.mp4"), None);
+        assert_eq!(
+            resolve_library_media_path(data_dir, "/tmp/secret.mp4"),
+            None
+        );
+        assert_eq!(
+            resolve_library_media_path(data_dir, "outside/lesson.mp4"),
+            None
+        );
+    }
+}
