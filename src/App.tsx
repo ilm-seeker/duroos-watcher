@@ -685,6 +685,8 @@ const App = () => {
             phoneEligibleMediaCount={phoneEligibleMediaCount}
             phoneAccessBusyAction={phoneAccessBusyAction}
             phoneAccessNotice={phoneAccessNotice}
+            busySourceAction={busySourceAction}
+            onDownloadSource={handleDownloadSource}
             onStartPhoneAccess={handleStartPhoneAccess}
             onStopPhoneAccess={handleStopPhoneAccess}
             onCopyPhoneLink={handleCopyPhoneLink}
@@ -926,6 +928,8 @@ interface DashboardProps {
   phoneEligibleMediaCount: number;
   phoneAccessBusyAction: PhoneAccessBusyAction;
   phoneAccessNotice: string;
+  busySourceAction: BusySourceAction;
+  onDownloadSource: (source: Source) => void;
   onStartPhoneAccess: () => void;
   onStopPhoneAccess: () => void;
   onCopyPhoneLink: () => void;
@@ -953,6 +957,8 @@ const Dashboard = ({
   phoneEligibleMediaCount,
   phoneAccessBusyAction,
   phoneAccessNotice,
+  busySourceAction,
+  onDownloadSource,
   onStartPhoneAccess,
   onStopPhoneAccess,
   onCopyPhoneLink,
@@ -973,6 +979,8 @@ const Dashboard = ({
             selectedLesson,
             watchByLessonId.get(selectedLesson.id),
           )}
+          busySourceAction={busySourceAction}
+          onDownloadSource={onDownloadSource}
         />
       ) : (
         <PlayerEmptyPanel onOpenImport={onOpenImport} runtimeDiagnostics={runtimeDiagnostics} />
@@ -1223,6 +1231,8 @@ interface PlayerPanelProps {
   mediaError: string;
   provenance?: ProvenanceRecord;
   progress: number;
+  busySourceAction: BusySourceAction;
+  onDownloadSource: (source: Source) => void;
 }
 
 const PlayerPanel = ({
@@ -1235,37 +1245,74 @@ const PlayerPanel = ({
   mediaError,
   provenance,
   progress,
-}: PlayerPanelProps) => (
-  <section className="player-panel" aria-label="Selected lesson">
-    <PlayerSurface
-      lesson={lesson}
-      mediaFile={mediaFile}
-      mediaUrl={mediaUrl}
-      mediaError={mediaError}
-    />
-    <div className="player-copy">
-      <h1>{lesson.title}</h1>
-      <p>{teacher?.displayName ?? "Unknown teacher"}</p>
-      <div className="player-tags">
-        <StatusChip label={collection?.title ?? "Unsorted"} tone="neutral" />
-        <StatusChip label={source?.label ?? "Source unknown"} tone="neutral" />
-        <StatusChip label={contentTypeLabel(lesson.contentType)} tone="neutral" />
-        <StatusChip label={availabilityLabel(lesson, mediaFile)} tone={availabilityTone(lesson, mediaFile)} />
+  busySourceAction,
+  onDownloadSource,
+}: PlayerPanelProps) => {
+  const needsMediaFile = isFileBackedContentType(lesson.contentType) && !mediaFile;
+  const isDownloading =
+    Boolean(source) &&
+    busySourceAction?.sourceId === source?.id &&
+    busySourceAction?.action === "download";
+  const downloadBlocked = source?.capability.download === "blocked";
+  const canDownloadMedia = Boolean(source) && !downloadBlocked;
+
+  return (
+    <section className="player-panel" aria-label="Selected lesson">
+      <PlayerSurface
+        lesson={lesson}
+        mediaFile={mediaFile}
+        mediaUrl={mediaUrl}
+        mediaError={mediaError}
+      />
+      <div className="player-copy">
+        <h1>{lesson.title}</h1>
+        <p>{teacher?.displayName ?? "Unknown teacher"}</p>
+        <div className="player-tags">
+          <StatusChip label={collection?.title ?? "Unsorted"} tone="neutral" />
+          <StatusChip label={source?.label ?? "Source unknown"} tone="neutral" />
+          <StatusChip label={contentTypeLabel(lesson.contentType)} tone="neutral" />
+          <StatusChip label={availabilityLabel(lesson, mediaFile)} tone={availabilityTone(lesson, mediaFile)} />
+        </div>
       </div>
-    </div>
-    <div className="progress-track progress-large" aria-label={`${progress}% watched`}>
-      <span style={{ width: `${progress}%` }} />
-    </div>
-    <div className="provenance-box">
-      <div>
-        <ShieldCheck size={17} />
-        <strong>Source Record</strong>
+      {needsMediaFile ? (
+        <div className="player-actions" aria-label="Media actions">
+          <button
+            type="button"
+            className="secondary-action"
+            onClick={() => {
+              if (source) {
+                onDownloadSource(source);
+              }
+            }}
+            disabled={!canDownloadMedia || isDownloading}
+            title={
+              downloadBlocked
+                ? "This source type does not currently support downloads."
+                : "Download missing media files into the local library."
+            }
+          >
+            <Download size={15} />
+            <span>{isDownloading ? "Downloading" : "Download Media"}</span>
+          </button>
+          <span>
+            Download missing media from this source into the local library before playback.
+          </span>
+        </div>
+      ) : null}
+      <div className="progress-track progress-large" aria-label={`${progress}% watched`}>
+        <span style={{ width: `${progress}%` }} />
       </div>
-      <p>{provenance?.permissionNote ?? "No source record found."}</p>
-      <code>{provenance?.originUrl ?? lesson.sourceUrl}</code>
-    </div>
-  </section>
-);
+      <div className="provenance-box">
+        <div>
+          <ShieldCheck size={17} />
+          <strong>Source Record</strong>
+        </div>
+        <p>{provenance?.permissionNote ?? "No source record found."}</p>
+        <code>{provenance?.originUrl ?? lesson.sourceUrl}</code>
+      </div>
+    </section>
+  );
+};
 
 const PlayerSurface = ({
   lesson,

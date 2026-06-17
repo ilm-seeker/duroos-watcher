@@ -784,6 +784,20 @@ button {
   gap: 6px;
 }
 
+.player-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.player-actions span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
 .player-empty-panel {
   align-content: start;
 }
