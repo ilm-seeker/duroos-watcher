@@ -20,6 +20,7 @@ Duroos Watcher is a local-first desktop study library for educational content yo
 - Added-source management with clear/delete controls separate from the platform capability matrix.
 - Local media downloads for added sources through direct HTTP or `yt-dlp` when the lesson URL is supported by `yt-dlp`.
 - Downloaded media is sha256-verified when a source provides a sha256 hash; mismatches are rejected before the file is attached to a lesson.
+- Temporary Watch on Phone sharing for downloaded/imported audio and video through same-Wi-Fi VLC playlist links.
 - Shared collection manifest validation rejects credentials, local absolute paths, command hooks, and unsafe file paths.
 - Offline-friendly dashboard, library search, source capability matrix, import drawer, update queue, and player surface.
 - AGPL-3.0-or-later open-source license posture.
@@ -82,6 +83,17 @@ Rumble and Odysee are treated as best-effort direct URL sources in v1. The app d
 broad official catalog API for either platform; it creates local source rows from user-provided URLs
 and uses local tooling only when the user starts a download.
 
+## Watch On Phone
+
+The desktop app can temporarily share ready audio and video files on the local Wi-Fi network for
+playback in VLC on iOS or Android. Use **Watch on Phone** in the library dashboard, scan the QR code
+with the phone, and open the link in VLC. The desktop app must stay open while the phone is playing.
+
+Phone access is media-only in v1. PDFs and saved posts are not included in the phone playlist. Each
+sharing session uses a random link token, serves only files already copied into the app library, and
+stops when the user turns sharing off or closes the desktop app. It is not remote access outside the
+local network and does not publish media to a Duroos server.
+
 For sources that block anonymous fetches or require sign-in, export browser cookies in Netscape
 format and place them in the app data directory as `yt-dlp-cookies.txt`. The app also accepts
 `cookies.txt`, but prefers `yt-dlp-cookies.txt` when both files exist. Cookies stay local and are not
@@ -95,6 +107,7 @@ same content hash is already present.
 - No accounts.
 - No remote server.
 - No automatic sharing.
+- Phone access is off by default and only runs during a user-started same-Wi-Fi sharing session.
 - Credentials are intended to stay in local OS-protected storage.
 - Offline mode blocks remote source subscription fetches.
 - Shared collection files must never include credentials, cookies, tokens, Telegram sessions, local absolute paths, or command hooks.

@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   ChevronRight,
   Clock3,
+  Copy,
   Database,
   Download,
   FileArchive,
@@ -20,11 +21,14 @@ import {
   Lock,
   MessageSquare,
   Play,
+  QrCode,
   RefreshCcw,
   RadioTower,
   Rss,
   Search,
   ShieldCheck,
+  Smartphone,
+  Square,
   Trash2,
   UploadCloud,
   UserRound,
@@ -33,12 +37,14 @@ import {
   Wifi,
   WifiOff,
 } from "lucide-react";
+import QRCode from "qrcode";
 import { useEffect, useMemo, useState } from "react";
 import {
   addTrustedCurator,
   chooseLocalMediaPaths,
   clearSourceContent,
   downloadSourceMedia,
+  getPhoneMediaSession,
   getAppSnapshot,
   getRuntimeDiagnostics,
   ingestSourceUrl,
@@ -46,6 +52,8 @@ import {
   isTauriRuntime,
   removeTrustedCurator,
   resolveMediaFileUrl,
+  startPhoneMediaSession,
+  stopPhoneMediaSession,
   validateCollectionManifest,
 } from "./lib/tauri";
 import type { ManifestValidationReport } from "./domain/collectionManifest";
@@ -58,6 +66,7 @@ import type {
   Lesson,
   LiveSession,
   MediaFile,
+  PhoneMediaSession,
   ProvenanceRecord,
   RuntimeDiagnostics,
   Source,
@@ -78,6 +87,7 @@ import { seedSnapshot } from "./data/seed";
 
 type ViewMode = "library" | "relays" | "sources" | "queue";
 type BusySourceAction = { sourceId: string; action: "clear" | "download" } | null;
+type PhoneAccessBusyAction = "start" | "stop" | null;
 
 const defaultRuntimeDiagnostics: RuntimeDiagnostics = {
   desktopRuntimeAvailable: isTauriRuntime(),
@@ -251,6 +261,10 @@ const App = () => {
     defaultRuntimeDiagnostics,
   );
   const [isRefreshingSources, setIsRefreshingSources] = useState(false);
+  const [phoneSession, setPhoneSession] = useState<PhoneMediaSession | null>(null);
+  const [phoneAccessBusyAction, setPhoneAccessBusyAction] =
+    useState<PhoneAccessBusyAction>(null);
+  const [phoneAccessNotice, setPhoneAccessNotice] = useState("");
 
   useEffect(() => {
     let isMounted = true;
@@ -292,6 +306,26 @@ const App = () => {
             ytDlpCookiesConfigured: false,
             messages: [message],
           });
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    getPhoneMediaSession()
+      .then((session) => {
+        if (isMounted && session?.active) {
+          setPhoneSession(session);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setPhoneSession(null);
         }
       });
 
@@ -411,6 +445,60 @@ const App = () => {
     .filter((lesson) => !mediaByLessonId.has(lesson.id))
     .concat(snapshot.lessons.filter((lesson) => mediaByLessonId.has(lesson.id)).slice(0, 2))
     .slice(0, 4);
+
+  const phoneEligibleMediaCount = snapshot.lessons.filter((lesson) => {
+    const mediaFile = mediaByLessonId.get(lesson.id);
+    return (
+      mediaFile?.importStatus === "ready" &&
+      (lesson.contentType === "video" || lesson.contentType === "audio")
+    );
+  }).length;
+
+  const handleStartPhoneAccess = async () => {
+    try {
+      setPhoneAccessBusyAction("start");
+      setPhoneAccessNotice("");
+      const session = await startPhoneMediaSession();
+      setPhoneSession(session.active ? session : null);
+      setPhoneAccessNotice(session.messages.join(" "));
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      setPhoneAccessNotice(message);
+    } finally {
+      setPhoneAccessBusyAction(null);
+    }
+  };
+
+  const handleStopPhoneAccess = async () => {
+    if (!phoneSession?.id) {
+      return;
+    }
+
+    try {
+      setPhoneAccessBusyAction("stop");
+      const session = await stopPhoneMediaSession(phoneSession.id);
+      setPhoneSession(null);
+      setPhoneAccessNotice(session.messages.join(" "));
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      setPhoneAccessNotice(message);
+    } finally {
+      setPhoneAccessBusyAction(null);
+    }
+  };
+
+  const handleCopyPhoneLink = async () => {
+    if (!phoneSession?.playlistUrl) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(phoneSession.playlistUrl);
+      setPhoneAccessNotice("Phone link copied.");
+    } catch {
+      setPhoneAccessNotice("Copy failed. Select and copy the link manually.");
+    }
+  };
 
   const handleImportResult = (notice: string) => {
     setSystemNotice(notice);
@@ -593,6 +681,13 @@ const App = () => {
             setSelectedLessonId={setSelectedLessonId}
             onOpenImport={() => setIsImportOpen(true)}
             runtimeDiagnostics={runtimeDiagnostics}
+            phoneSession={phoneSession}
+            phoneEligibleMediaCount={phoneEligibleMediaCount}
+            phoneAccessBusyAction={phoneAccessBusyAction}
+            phoneAccessNotice={phoneAccessNotice}
+            onStartPhoneAccess={handleStartPhoneAccess}
+            onStopPhoneAccess={handleStopPhoneAccess}
+            onCopyPhoneLink={handleCopyPhoneLink}
           />
         ) : null}
 
@@ -827,6 +922,13 @@ interface DashboardProps {
   setSelectedLessonId: (lessonId: string) => void;
   onOpenImport: () => void;
   runtimeDiagnostics: RuntimeDiagnostics;
+  phoneSession: PhoneMediaSession | null;
+  phoneEligibleMediaCount: number;
+  phoneAccessBusyAction: PhoneAccessBusyAction;
+  phoneAccessNotice: string;
+  onStartPhoneAccess: () => void;
+  onStopPhoneAccess: () => void;
+  onCopyPhoneLink: () => void;
 }
 
 const Dashboard = ({
@@ -847,6 +949,13 @@ const Dashboard = ({
   setSelectedLessonId,
   onOpenImport,
   runtimeDiagnostics,
+  phoneSession,
+  phoneEligibleMediaCount,
+  phoneAccessBusyAction,
+  phoneAccessNotice,
+  onStartPhoneAccess,
+  onStopPhoneAccess,
+  onCopyPhoneLink,
 }: DashboardProps) => (
   <div className="dashboard-grid">
     <section className="content-column">
@@ -964,6 +1073,16 @@ const Dashboard = ({
     </section>
 
     <aside className="detail-column">
+      <PhoneAccessPanel
+        session={phoneSession}
+        eligibleMediaCount={phoneEligibleMediaCount}
+        busyAction={phoneAccessBusyAction}
+        notice={phoneAccessNotice}
+        desktopRuntimeAvailable={runtimeDiagnostics.desktopRuntimeAvailable}
+        onStart={onStartPhoneAccess}
+        onStop={onStopPhoneAccess}
+        onCopyLink={onCopyPhoneLink}
+      />
       <SourceReadinessPanel sources={snapshot.sources} runtimeDiagnostics={runtimeDiagnostics} />
       <TeacherPanel teachers={snapshot.teachers} lessons={snapshot.lessons} />
       <LiveSessionPanel
@@ -1241,6 +1360,151 @@ const PlayerEmptyPanel = ({
         <Import size={17} />
         <span>Import Content</span>
       </button>
+    </section>
+  );
+};
+
+interface PhoneAccessPanelProps {
+  session: PhoneMediaSession | null;
+  eligibleMediaCount: number;
+  busyAction: PhoneAccessBusyAction;
+  notice: string;
+  desktopRuntimeAvailable: boolean;
+  onStart: () => void;
+  onStop: () => void;
+  onCopyLink: () => void;
+}
+
+const PhoneAccessPanel = ({
+  session,
+  eligibleMediaCount,
+  busyAction,
+  notice,
+  desktopRuntimeAvailable,
+  onStart,
+  onStop,
+  onCopyLink,
+}: PhoneAccessPanelProps) => {
+  const [qrDataUrl, setQrDataUrl] = useState("");
+  const playlistUrl = session?.playlistUrl ?? "";
+  const isActive = Boolean(session?.active && playlistUrl);
+  const startDisabled =
+    !desktopRuntimeAvailable || busyAction !== null || eligibleMediaCount === 0;
+
+  useEffect(() => {
+    let isMounted = true;
+
+    if (!playlistUrl) {
+      setQrDataUrl("");
+      return () => {
+        isMounted = false;
+      };
+    }
+
+    QRCode.toDataURL(playlistUrl, {
+      errorCorrectionLevel: "M",
+      margin: 1,
+      width: 176,
+      color: {
+        dark: "#13251f",
+        light: "#ffffff",
+      },
+    })
+      .then((url) => {
+        if (isMounted) {
+          setQrDataUrl(url);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setQrDataUrl("");
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [playlistUrl]);
+
+  return (
+    <section className="phone-access-panel" aria-label="Watch on phone">
+      <div className="phone-access-heading">
+        <div>
+          <div className="panel-title-line">
+            <Smartphone size={18} />
+            <h2>Watch on Phone</h2>
+          </div>
+          <p>Scan with your phone, open in VLC, and keep this app open.</p>
+        </div>
+        <StatusChip
+          label={isActive ? "Sharing" : `${eligibleMediaCount} media`}
+          tone={isActive ? "positive" : eligibleMediaCount > 0 ? "neutral" : "warning"}
+        />
+      </div>
+
+      {isActive ? (
+        <div className="phone-session">
+          <div className="qr-frame">
+            {qrDataUrl ? (
+              <img src={qrDataUrl} alt="Phone access QR code" />
+            ) : (
+              <QrCode size={42} aria-hidden="true" />
+            )}
+          </div>
+          <div className="phone-link-box">
+            <span>Open in VLC</span>
+            <code>{playlistUrl}</code>
+          </div>
+          <div className="phone-actions">
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={onCopyLink}
+              disabled={busyAction !== null}
+            >
+              <Copy size={15} />
+              <span>Copy Link</span>
+            </button>
+            <button
+              type="button"
+              className="danger-action"
+              onClick={onStop}
+              disabled={busyAction !== null}
+            >
+              <Square size={15} />
+              <span>{busyAction === "stop" ? "Stopping" : "Stop Sharing"}</span>
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="phone-session phone-session-idle">
+          <div className="phone-steps">
+            <span>1. Start phone access</span>
+            <span>2. Scan the code</span>
+            <span>3. Open in VLC</span>
+          </div>
+          <button
+            type="button"
+            className="primary-action"
+            onClick={onStart}
+            disabled={startDisabled}
+            title={
+              eligibleMediaCount === 0
+                ? "Download or import audio/video before using phone access."
+                : "Share ready audio and video on your Wi-Fi."
+            }
+          >
+            <Smartphone size={17} />
+            <span>{busyAction === "start" ? "Starting" : "Start Phone Access"}</span>
+          </button>
+        </div>
+      )}
+
+      <div className="phone-access-footnote">
+        <Wifi size={15} />
+        <span>Only available on your Wi-Fi while sharing is on.</span>
+      </div>
+      {notice ? <p className="phone-access-notice">{notice}</p> : null}
     </section>
   );
 };

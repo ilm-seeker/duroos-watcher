@@ -7,6 +7,8 @@ import type {
   DownloadSourceSummary,
   ImportSummary,
   IngestSummary,
+  PhoneMediaScope,
+  PhoneMediaSession,
   TrustedCurator,
   TrustCuratorSummary,
   RuntimeDiagnostics,
@@ -133,6 +135,48 @@ export const downloadSourceMedia = async (sourceId: string): Promise<DownloadSou
   }
 
   return invoke<DownloadSourceSummary>("download_source_media", { sourceId });
+};
+
+export const startPhoneMediaSession = async (
+  scope?: PhoneMediaScope,
+): Promise<PhoneMediaSession> => {
+  if (!isTauriRuntime()) {
+    return {
+      id: "",
+      active: false,
+      itemCount: 0,
+      items: [],
+      messages: ["Phone access requires the Tauri desktop runtime."],
+    };
+  }
+
+  return invoke<PhoneMediaSession>("start_phone_media_session", {
+    scope: scope ?? null,
+  });
+};
+
+export const getPhoneMediaSession = async (): Promise<PhoneMediaSession | null> => {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+
+  return invoke<PhoneMediaSession | null>("get_phone_media_session");
+};
+
+export const stopPhoneMediaSession = async (
+  sessionId: string,
+): Promise<PhoneMediaSession> => {
+  if (!isTauriRuntime()) {
+    return {
+      id: sessionId,
+      active: false,
+      itemCount: 0,
+      items: [],
+      messages: ["Phone access requires the Tauri desktop runtime."],
+    };
+  }
+
+  return invoke<PhoneMediaSession>("stop_phone_media_session", { sessionId });
 };
 
 export const chooseLocalMediaPaths = async (): Promise<string[]> => {

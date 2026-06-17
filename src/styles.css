@@ -842,6 +842,145 @@ button {
   padding: 0 12px 12px;
 }
 
+.phone-access-panel {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 14px;
+}
+
+.phone-access-panel:hover {
+  border-color: var(--line-strong);
+}
+
+.phone-access-heading {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.phone-access-heading > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.panel-title-line {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  color: var(--emerald);
+}
+
+.panel-title-line h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 880;
+  line-height: 1.2;
+}
+
+.phone-access-heading p,
+.phone-access-notice,
+.phone-access-footnote {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.phone-session {
+  display: grid;
+  gap: 10px;
+}
+
+.phone-session-idle {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fbfaf6;
+  padding: 10px;
+}
+
+.phone-steps {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.qr-frame {
+  display: flex;
+  width: 196px;
+  height: 196px;
+  align-items: center;
+  justify-content: center;
+  justify-self: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--emerald);
+  padding: 10px;
+}
+
+.qr-frame img {
+  display: block;
+  width: 176px;
+  height: 176px;
+}
+
+.phone-link-box {
+  display: grid;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fbfaf6;
+  padding: 9px;
+}
+
+.phone-link-box span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.phone-link-box code {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.phone-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.phone-actions .secondary-action,
+.phone-actions .danger-action,
+.phone-session-idle .primary-action {
+  width: 100%;
+}
+
+.phone-access-footnote {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #2e5148;
+}
+
+.phone-access-notice {
+  border-top: 1px solid var(--line);
+  padding-top: 9px;
+}
+
 .compact-list {
   display: grid;
   gap: 8px;
@@ -1630,6 +1769,10 @@ button {
   }
 
   .detail-column {
+    grid-template-columns: 1fr;
+  }
+
+  .phone-actions {
     grid-template-columns: 1fr;
   }
 

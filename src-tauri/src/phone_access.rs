@@ -5,7 +5,6 @@ use crate::{
 use chrono::Utc;
 use rusqlite::params;
 use std::{
-    collections::HashMap,
     fs::File,
     io::{Read, Seek, SeekFrom},
     net::{IpAddr, Ipv4Addr, UdpSocket},
@@ -65,9 +64,7 @@ pub fn start_session(
 
     let media = eligible_media_items(app, scope)?;
     if media.is_empty() {
-        return Err(
-            "No downloaded audio or video files are ready for phone access.".to_string(),
-        );
+        return Err("No downloaded audio or video files are ready for phone access.".to_string());
     }
 
     let server = Arc::new(
@@ -109,19 +106,8 @@ pub fn start_session(
     };
 
     let stop = Arc::new(AtomicBool::new(false));
-    let media_by_id = Arc::new(
-        media
-            .into_iter()
-            .map(|item| (item.share.media_file_id.clone(), item))
-            .collect::<HashMap<_, _>>(),
-    );
-    let worker = spawn_server_worker(
-        server.clone(),
-        stop.clone(),
-        media_by_id,
-        base_url,
-        token,
-    );
+    let media_items = Arc::new(media);
+    let worker = spawn_server_worker(server.clone(), stop.clone(), media_items, base_url, token);
 
     *guard = Some(ActivePhoneSession {
         summary: summary.clone(),
@@ -157,7 +143,10 @@ pub fn stop_session(
     if active.summary.id != session_id {
         let current = active.summary.clone();
         *guard = Some(active);
-        return Err(format!("Phone access session {} is still running.", current.id));
+        return Err(format!(
+            "Phone access session {} is still running.",
+            current.id
+        ));
     }
 
     let mut summary = active.summary.clone();
@@ -171,7 +160,7 @@ pub fn stop_session(
 fn spawn_server_worker(
     server: Arc<Server>,
     stop: Arc<AtomicBool>,
-    media_by_id: Arc<HashMap<String, ServedMediaItem>>,
+    media_items: Arc<Vec<ServedMediaItem>>,
     base_url: String,
     token: String,
 ) -> JoinHandle<()> {
@@ -179,7 +168,7 @@ fn spawn_server_worker(
         while !stop.load(Ordering::SeqCst) {
             match server.recv_timeout(Duration::from_millis(250)) {
                 Ok(Some(request)) => {
-                    handle_request(request, &media_by_id, &base_url, &token);
+                    handle_request(request, &media_items, &base_url, &token);
                 }
                 Ok(None) => {}
                 Err(_) => break,
@@ -188,12 +177,7 @@ fn spawn_server_worker(
     })
 }
 
-fn handle_request(
-    request: Request,
-    media_by_id: &HashMap<String, ServedMediaItem>,
-    base_url: &str,
-    token: &str,
-) {
+fn handle_request(request: Request, media_items: &[ServedMediaItem], base_url: &str, token: &str) {
     if !matches!(request.method(), &Method::Get | &Method::Head) {
         respond_text(request, 405, "Only playback requests are supported.");
         return;
@@ -218,7 +202,7 @@ fn handle_request(
 
     match parsed_url.path() {
         PLAYLIST_PATH => {
-            let playlist = build_playlist(base_url, token, media_by_id.values());
+            let playlist = build_playlist(base_url, token, media_items.iter());
             let response = Response::from_string(playlist)
                 .with_header(header("Content-Type", "audio/x-mpegurl; charset=utf-8"))
                 .with_header(header("Cache-Control", "no-store"));
@@ -226,7 +210,10 @@ fn handle_request(
         }
         path if path.starts_with(MEDIA_PREFIX) => {
             let media_file_id = &path[MEDIA_PREFIX.len()..];
-            match media_by_id.get(media_file_id) {
+            match media_items
+                .iter()
+                .find(|item| item.share.media_file_id == media_file_id)
+            {
                 Some(item) => respond_media(request, item),
                 None => respond_text(request, 404, "Media file was not found."),
             }
@@ -255,10 +242,7 @@ fn respond_media(request: Request, item: &ServedMediaItem) {
         Err(_) => {
             let response = Response::from_string("Requested range is not available.")
                 .with_status_code(StatusCode(416))
-                .with_header(header(
-                    "Content-Range",
-                    &format!("bytes */{total_length}"),
-                ))
+                .with_header(header("Content-Range", &format!("bytes */{total_length}")))
                 .with_header(header("Accept-Ranges", "bytes"));
             let _ = request.respond(response);
         }
@@ -599,7 +583,13 @@ mod tests {
 
     #[test]
     fn chooses_media_mime_types() {
-        assert_eq!(mime_type_for_path(Path::new("lesson.webm"), "video"), "video/webm");
-        assert_eq!(mime_type_for_path(Path::new("lesson.mp3"), "audio"), "audio/mpeg");
+        assert_eq!(
+            mime_type_for_path(Path::new("lesson.webm"), "video"),
+            "video/webm"
+        );
+        assert_eq!(
+            mime_type_for_path(Path::new("lesson.mp3"), "audio"),
+            "audio/mpeg"
+        );
     }
 }

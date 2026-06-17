@@ -614,13 +614,7 @@ pub fn ingest_source_url(app: &AppHandle, source_url: String) -> Result<IngestSu
     match ingest_feed_url(&mut connection, &client, &normalized_input, &feed_url) {
         Ok(summary) => Ok(summary),
         Err(error) => {
-            let detail = if is_probably_telegram_invite(&normalized_input) {
-                "Private Telegram links cannot be scraped without a Telegram session. Export media manually or connect a local session when that adapter is added.".to_string()
-            } else {
-                format!(
-                    "{error} Supported no-login inputs today: Archive.org item URLs, custom RSS/Atom feeds, public t.me channel URLs, YouTube channel_id feeds, YouTube playlist feeds, and direct YouTube/Rumble/Odysee video URLs."
-                )
-            };
+            let detail = feed_ingest_error_detail(&normalized_input, &error);
             record_standalone_job(&mut connection, &normalized_input, "unsupported", &detail)?;
             Ok(IngestSummary {
                 source_url: normalized_input,
@@ -632,6 +626,22 @@ pub fn ingest_source_url(app: &AppHandle, source_url: String) -> Result<IngestSu
             })
         }
     }
+}
+
+fn feed_ingest_error_detail(source_url: &str, error: &str) -> String {
+    if is_probably_telegram_invite(source_url) {
+        return "Private Telegram links cannot be scraped without a Telegram session. Export media manually or connect a local session when that adapter is added.".to_string();
+    }
+
+    if is_youtube_feed_source_url(source_url) {
+        return format!(
+            "{error} YouTube playlist and channel imports require a public playlist_id or channel_id that YouTube exposes through its RSS feed."
+        );
+    }
+
+    format!(
+        "{error} Supported no-login inputs today: Archive.org item URLs, custom RSS/Atom feeds, public t.me channel URLs, YouTube channel_id feeds, YouTube playlist feeds, and direct YouTube/Rumble/Odysee video URLs."
+    )
 }
 
 pub fn clear_source_content(
@@ -2896,7 +2906,7 @@ fn direct_source_platform(source_url: &str) -> Option<(&'static str, &'static st
     let url = Url::parse(source_url).ok()?;
     let host = url.host_str()?.to_ascii_lowercase();
 
-    if host.ends_with("youtube.com") || host == "youtu.be" {
+    if (host.ends_with("youtube.com") || host == "youtu.be") && !is_youtube_feed_source(&url) {
         return Some(("youtube", "video"));
     }
 
@@ -2917,6 +2927,37 @@ fn direct_source_platform(source_url: &str) -> Option<(&'static str, &'static st
     }
 
     None
+}
+
+fn is_youtube_feed_source(url: &Url) -> bool {
+    let Some(host) = url.host_str().map(|host| host.to_ascii_lowercase()) else {
+        return false;
+    };
+
+    if !host.ends_with("youtube.com") {
+        return false;
+    }
+
+    if url.path().contains("/feeds/videos.xml") {
+        return true;
+    }
+
+    let segments = url
+        .path_segments()
+        .map(|segments| segments.collect::<Vec<_>>())
+        .unwrap_or_default();
+    let has_playlist_id = url.query_pairs().any(|(key, _)| key == "list");
+    let has_video_id = url.query_pairs().any(|(key, _)| key == "v");
+
+    matches!(segments.as_slice(), ["playlist", ..]) && has_playlist_id
+        || matches!(segments.as_slice(), ["watch", ..]) && has_playlist_id && !has_video_id
+        || matches!(segments.as_slice(), ["channel", channel_id, ..] if !channel_id.is_empty())
+}
+
+fn is_youtube_feed_source_url(source_url: &str) -> bool {
+    Url::parse(source_url)
+        .map(|url| is_youtube_feed_source(&url))
+        .unwrap_or(false)
 }
 
 fn direct_source_platform_label(platform: &str) -> &'static str {
@@ -5044,6 +5085,72 @@ mod tests {
         assert_eq!(
             normalize_feed_url("https://www.youtube.com/channel/UCabc123"),
             "https://www.youtube.com/feeds/videos.xml?channel_id=UCabc123"
+        );
+    }
+
+    #[test]
+    fn routes_youtube_playlist_and_channel_urls_as_feeds_not_direct_videos() {
+        assert_eq!(
+            direct_source_platform("https://www.youtube.com/playlist?list=PL123"),
+            None
+        );
+        assert_eq!(
+            direct_source_platform("https://www.youtube.com/watch?list=PL123"),
+            None
+        );
+        assert_eq!(
+            direct_source_platform("https://www.youtube.com/channel/UCabc123"),
+            None
+        );
+        assert_eq!(
+            direct_source_platform("https://www.youtube.com/watch?v=abc123"),
+            Some(("youtube", "video"))
+        );
+        assert_eq!(
+            direct_source_platform("https://youtu.be/abc123?list=PL123"),
+            Some(("youtube", "video"))
+        );
+    }
+
+    #[test]
+    fn explains_unavailable_youtube_playlist_feeds() {
+        let detail = feed_ingest_error_detail(
+            "https://www.youtube.com/playlist?list=PL123",
+            "Could not fetch https://www.youtube.com/feeds/videos.xml?playlist_id=PL123: HTTP 404 Not Found.",
+        );
+
+        assert!(detail.contains("public playlist_id or channel_id"));
+        assert!(detail.contains("YouTube exposes through its RSS feed"));
+    }
+
+    #[test]
+    fn routes_supported_source_inputs_to_expected_ingest_paths() {
+        assert!(parse_telegram_source("https://t.me/public_channel").is_some());
+        assert!(parse_archive_org_identifier("https://archive.org/details/class-series").is_some());
+        assert!(is_nostr_reference("nostr:npub1example"));
+        assert_eq!(
+            platform_for_feed("https://example.org/feed.xml"),
+            "rss-feed"
+        );
+        assert_eq!(
+            normalize_feed_url("https://www.youtube.com/playlist?list=PL123"),
+            "https://www.youtube.com/feeds/videos.xml?playlist_id=PL123"
+        );
+        assert_eq!(
+            direct_source_platform("https://www.youtube.com/watch?v=abc123"),
+            Some(("youtube", "video"))
+        );
+        assert_eq!(
+            direct_source_platform("https://rumble.com/v123-class.html"),
+            Some(("rumble", "video"))
+        );
+        assert_eq!(
+            direct_source_platform("https://odysee.com/@teacher/class:1"),
+            Some(("odysee", "video"))
+        );
+        assert_eq!(
+            direct_source_platform("https://x.com/teacher/status/123"),
+            Some(("x", "post"))
         );
     }
 

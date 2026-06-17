@@ -267,3 +267,30 @@ export interface RuntimeDiagnostics {
   ytDlpCookiesFile?: string;
   messages: string[];
 }
+
+export interface PhoneMediaScope {
+  sourceId?: string;
+  collectionId?: string;
+}
+
+export interface PhoneMediaShareItem {
+  mediaFileId: string;
+  lessonId: string;
+  title: string;
+  contentType: "video" | "audio";
+  sizeBytes: number;
+  durationSeconds?: number;
+  teacherLabel?: string;
+  collectionTitle?: string;
+}
+
+export interface PhoneMediaSession {
+  id: string;
+  active: boolean;
+  baseUrl?: string;
+  playlistUrl?: string;
+  startedAt?: string;
+  itemCount: number;
+  items: PhoneMediaShareItem[];
+  messages: string[];
+}
