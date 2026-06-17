@@ -551,7 +551,25 @@ button {
   content: "";
 }
 
+.lesson-thumb img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.lesson-thumb-has-image::before {
+  inset: 0;
+  z-index: 1;
+  border: 0;
+  border-radius: 0;
+  background: linear-gradient(180deg, rgba(2, 6, 23, 0.04), rgba(2, 6, 23, 0.5));
+}
+
 .thumb-book {
+  position: relative;
+  z-index: 1;
   display: inline-flex;
   width: 58px;
   height: 58px;
@@ -565,6 +583,7 @@ button {
 .lesson-thumb span,
 .player-duration {
   position: absolute;
+  z-index: 2;
   right: 10px;
   bottom: 10px;
   border-radius: 4px;
@@ -687,8 +706,25 @@ button {
   min-height: 214px;
   align-items: center;
   justify-content: center;
+  overflow: hidden;
   border-radius: 6px;
   color: #fff;
+}
+
+.player-cover-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.player-frame-has-image::before {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(2, 6, 23, 0.08), rgba(2, 6, 23, 0.52));
+  content: "";
 }
 
 .player-frame-live,
@@ -741,6 +777,8 @@ button {
 }
 
 .play-button {
+  position: relative;
+  z-index: 2;
   display: inline-flex;
   width: 68px;
   height: 68px;
@@ -755,6 +793,7 @@ button {
 
 .player-frame-message {
   position: absolute;
+  z-index: 2;
   right: 12px;
   bottom: 12px;
   left: 12px;

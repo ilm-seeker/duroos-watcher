@@ -160,6 +160,7 @@ export interface MediaFile {
   id: string;
   lessonId: string;
   relativePath: string;
+  thumbnailRelativePath?: string;
   contentHash: string;
   sizeBytes: number;
   codec?: string;
@@ -258,11 +259,24 @@ export interface DownloadSourceSummary {
   messages: string[];
 }
 
+export interface NativePlaybackResult {
+  mediaFileId: string;
+  lessonId: string;
+  title: string;
+  playerName: string;
+  commandLabel: string;
+  launched: boolean;
+  messages: string[];
+}
+
 export interface RuntimeDiagnostics {
   desktopRuntimeAvailable: boolean;
   ytDlpAvailable: boolean;
   ytDlpVersion?: string;
   ytDlpCommand?: string;
+  nativePlaybackAvailable: boolean;
+  nativePlaybackPlayer?: string;
+  nativePlaybackCommand?: string;
   ytDlpCookiesConfigured: boolean;
   ytDlpCookiesFile?: string;
   messages: string[];

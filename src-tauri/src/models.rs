@@ -110,6 +110,7 @@ pub struct MediaFile {
     pub id: String,
     pub lesson_id: String,
     pub relative_path: String,
+    pub thumbnail_relative_path: Option<String>,
     pub content_hash: String,
     pub size_bytes: i64,
     pub codec: Option<String>,
@@ -232,11 +233,26 @@ pub struct DownloadSourceSummary {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct NativePlaybackResult {
+    pub media_file_id: String,
+    pub lesson_id: String,
+    pub title: String,
+    pub player_name: String,
+    pub command_label: String,
+    pub launched: bool,
+    pub messages: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeDiagnostics {
     pub desktop_runtime_available: bool,
     pub yt_dlp_available: bool,
     pub yt_dlp_version: Option<String>,
     pub yt_dlp_command: Option<String>,
+    pub native_playback_available: bool,
+    pub native_playback_player: Option<String>,
+    pub native_playback_command: Option<String>,
     pub yt_dlp_cookies_configured: bool,
     pub yt_dlp_cookies_file: Option<String>,
     pub messages: Vec<String>,

@@ -7,8 +7,9 @@ mod publisher;
 use models::{
     AppSnapshot, ChannelPublishResult, ClearSourceSummary, CreatePublisherProfileRequest,
     DownloadSourceSummary, ImportSummary, IngestSummary, Lesson, ManifestValidationReport,
-    NostrChannelPreview, PhoneMediaScope, PhoneMediaSession, PublishTeacherChannelRequest,
-    PublisherProfile, RuntimeDiagnostics, TrustCuratorSummary, TrustedCurator,
+    NativePlaybackResult, NostrChannelPreview, PhoneMediaScope, PhoneMediaSession,
+    PublishTeacherChannelRequest, PublisherProfile, RuntimeDiagnostics, TrustCuratorSummary,
+    TrustedCurator,
 };
 use phone_access::PhoneAccessState;
 
@@ -32,6 +33,14 @@ fn search_lessons(app: tauri::AppHandle, query: String) -> Result<Vec<Lesson>, S
 #[tauri::command]
 fn resolve_media_file_path(app: tauri::AppHandle, media_file_id: String) -> Result<String, String> {
     db::resolve_media_file_path(&app, media_file_id)
+}
+
+#[tauri::command]
+fn resolve_media_thumbnail_path(
+    app: tauri::AppHandle,
+    media_file_id: String,
+) -> Result<String, String> {
+    db::resolve_media_thumbnail_path(&app, media_file_id)
 }
 
 #[tauri::command]
@@ -59,11 +68,21 @@ fn clear_source_content(
 }
 
 #[tauri::command]
-fn download_source_media(
+async fn download_source_media(
     app: tauri::AppHandle,
     source_id: String,
 ) -> Result<DownloadSourceSummary, String> {
-    db::download_source_media(&app, source_id)
+    tauri::async_runtime::spawn_blocking(move || db::download_source_media(&app, source_id))
+        .await
+        .map_err(|error| format!("Downloader worker failed: {error}"))?
+}
+
+#[tauri::command]
+fn play_media_file_native(
+    app: tauri::AppHandle,
+    media_file_id: String,
+) -> Result<NativePlaybackResult, String> {
+    db::play_media_file_native(&app, media_file_id)
 }
 
 #[tauri::command]
@@ -185,11 +204,13 @@ pub fn run() {
             get_runtime_diagnostics,
             search_lessons,
             resolve_media_file_path,
+            resolve_media_thumbnail_path,
             import_local_files,
             ingest_source_url,
             refresh_source,
             clear_source_content,
             download_source_media,
+            play_media_file_native,
             start_phone_media_session,
             get_phone_media_session,
             stop_phone_media_session,

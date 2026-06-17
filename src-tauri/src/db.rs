@@ -3,13 +3,16 @@ use crate::{
     models::{
         AppSnapshot, ClearSourceSummary, Collection, DownloadSourceSummary, ImportSummary,
         IngestSummary, Job, Lesson, LiveSession, ManifestValidationReport, MediaFile,
-        ProvenanceRecord, RuntimeDiagnostics, Source, SourceCapability, Teacher, TeacherRelay,
-        TrustCuratorSummary, TrustedCurator, WatchState,
+        NativePlaybackResult, ProvenanceRecord, RuntimeDiagnostics, Source, SourceCapability,
+        Teacher, TeacherRelay, TrustCuratorSummary, TrustedCurator, WatchState,
     },
     publisher,
 };
 use chrono::Utc;
-use reqwest::blocking::Client;
+use reqwest::{
+    blocking::{Client, Response},
+    header::CONTENT_TYPE,
+};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use scraper::{Html, Selector};
 use sha2::{Digest, Sha256};
@@ -17,7 +20,7 @@ use std::{
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     time::Duration,
 };
 use tauri::{AppHandle, Manager};
@@ -25,13 +28,19 @@ use url::Url;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "mkv", "webm"];
-const AUDIO_EXTENSIONS: &[&str] = &["mp3", "m4a", "aac", "wav", "flac", "ogg"];
+const VIDEO_EXTENSIONS: &[&str] = &[
+    "mp4", "m4v", "mov", "mkv", "webm", "avi", "wmv", "flv", "mpg", "mpeg", "ts", "m2ts", "mts",
+    "vob", "3gp", "3g2",
+];
+const AUDIO_EXTENSIONS: &[&str] = &[
+    "mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "wma", "aiff", "aif", "amr",
+];
 const PDF_EXTENSIONS: &[&str] = &["pdf"];
 const INGEST_USER_AGENT: &str = "DuroosWatcher/0.1 local-first-study-library";
 const LOCAL_PROVENANCE_NOTE: &str = "Imported from local media selected by the user.";
 const PUBLIC_SOURCE_PROVENANCE_NOTE: &str =
     "Captured from public source metadata; media download remains user controlled.";
+const MIN_PLAUSIBLE_MEDIA_BYTES: u64 = 1024;
 const YT_DLP_COOKIE_FILE_NAMES: &[&str] = &["yt-dlp-cookies.txt", "cookies.txt"];
 const DEFAULT_SOURCE_IDS: &[&str] = &[
     "source-local-files",
@@ -116,6 +125,7 @@ struct DownloadLesson {
     content_type: String,
     source_url: String,
     expected_content_hash: Option<String>,
+    has_invalid_media_record: bool,
 }
 
 #[derive(Debug)]
@@ -131,6 +141,13 @@ struct JobUpdate<'a> {
 
 #[derive(Debug, Clone)]
 struct YtDlpCommand {
+    program: String,
+    args: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativePlayerCommand {
+    name: String,
     program: String,
     args: Vec<String>,
 }
@@ -156,6 +173,7 @@ pub fn initialize(app: &AppHandle) -> Result<(), String> {
     let mut connection = open_connection(app)?;
     run_migrations(&connection)?;
     ensure_default_records(&mut connection)?;
+    backfill_missing_video_thumbnails(&connection, &data_dir)?;
 
     Ok(())
 }
@@ -191,6 +209,9 @@ pub fn runtime_diagnostics(app: &AppHandle) -> RuntimeDiagnostics {
         .and_then(|path| path.file_name())
         .and_then(|file_name| file_name.to_str())
         .map(str::to_string);
+    let native_player = native_player_command_for_app(app);
+    let native_player_name = native_player.as_ref().map(|player| player.name.clone());
+    let native_player_command = native_player.as_ref().map(native_player_command_label);
 
     match find_yt_dlp_command() {
         Ok(command) => {
@@ -226,26 +247,56 @@ pub fn runtime_diagnostics(app: &AppHandle) -> RuntimeDiagnostics {
                         .to_string(),
                 );
             }
+            if let Some(player_name) = native_player_name.as_deref() {
+                messages.push(format!(
+                    "Native playback is available through {player_name}."
+                ));
+            } else {
+                messages.push(
+                    "Native playback needs VLC, mpv, or ffplay available locally or bundled with the app."
+                        .to_string(),
+                );
+            }
 
             RuntimeDiagnostics {
                 desktop_runtime_available: true,
                 yt_dlp_available: true,
                 yt_dlp_version: version.clone(),
                 yt_dlp_command: Some(command_label.clone()),
+                native_playback_available: native_player.is_some(),
+                native_playback_player: native_player_name,
+                native_playback_command: native_player_command,
                 yt_dlp_cookies_configured: cookies_file.is_some(),
                 yt_dlp_cookies_file: cookies_file_name,
                 messages,
             }
         }
-        Err(error) => RuntimeDiagnostics {
-            desktop_runtime_available: true,
-            yt_dlp_available: false,
-            yt_dlp_version: None,
-            yt_dlp_command: None,
-            yt_dlp_cookies_configured: cookies_file.is_some(),
-            yt_dlp_cookies_file: cookies_file_name,
-            messages: vec![error],
-        },
+        Err(error) => {
+            let mut messages = vec![error];
+            if let Some(player_name) = native_player_name.as_deref() {
+                messages.push(format!(
+                    "Native playback is available through {player_name}."
+                ));
+            } else {
+                messages.push(
+                    "Native playback needs VLC, mpv, or ffplay available locally or bundled with the app."
+                        .to_string(),
+                );
+            }
+
+            RuntimeDiagnostics {
+                desktop_runtime_available: true,
+                yt_dlp_available: false,
+                yt_dlp_version: None,
+                yt_dlp_command: None,
+                native_playback_available: native_player.is_some(),
+                native_playback_player: native_player_name,
+                native_playback_command: native_player_command,
+                yt_dlp_cookies_configured: cookies_file.is_some(),
+                yt_dlp_cookies_file: cookies_file_name,
+                messages,
+            }
+        }
     }
 }
 
@@ -404,6 +455,78 @@ pub fn search_lessons(connection: &Connection, query: &str) -> Result<Vec<Lesson
     Ok(lessons)
 }
 
+pub fn play_media_file_native(
+    app: &AppHandle,
+    media_file_id: String,
+) -> Result<NativePlaybackResult, String> {
+    let media_file_id = media_file_id.trim();
+
+    if media_file_id.is_empty() {
+        return Err("Media file id is required.".to_string());
+    }
+
+    let data_dir = app_data_dir(app)?;
+    let connection = open_connection(app)?;
+    let record: Option<(String, String, String, String, String)> = connection
+        .query_row(
+            "SELECT m.id, m.relative_path, l.id, l.title, l.content_type
+             FROM media_files m
+             JOIN lessons l ON l.id = m.lesson_id
+             WHERE m.id = ?1",
+            params![media_file_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let (media_file_id, relative_path, lesson_id, title, content_type) =
+        record.ok_or_else(|| "Media file was not found.".to_string())?;
+
+    if !matches!(content_type.as_str(), "video" | "audio") {
+        return Err("Native playback is available for video and audio files.".to_string());
+    }
+
+    let media_path = resolve_library_media_path(&data_dir, &relative_path)
+        .ok_or_else(|| "Media file path is outside the app library.".to_string())?;
+    if !media_path.is_file() {
+        return Err("Media file is missing from disk. Re-download this lesson.".to_string());
+    }
+    validate_downloaded_media_file(&media_path, &content_type)?;
+
+    let player = native_player_command_for_app(app).ok_or_else(|| {
+        "Native playback is unavailable. Install VLC, mpv, or ffplay, or bundle one of them with the app."
+            .to_string()
+    })?;
+    let command_label = native_player_command_label(&player);
+    let mut command = Command::new(&player.program);
+    command
+        .args(&player.args)
+        .arg(&media_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+        .spawn()
+        .map_err(|error| format!("Could not launch {}: {error}", player.name))?;
+
+    Ok(NativePlaybackResult {
+        media_file_id,
+        lesson_id,
+        title: title.clone(),
+        player_name: player.name.clone(),
+        command_label,
+        launched: true,
+        messages: vec![format!("Opened \"{title}\" in {}.", player.name)],
+    })
+}
+
 pub fn resolve_media_file_path(app: &AppHandle, media_file_id: String) -> Result<String, String> {
     let media_file_id = media_file_id.trim();
 
@@ -413,23 +536,88 @@ pub fn resolve_media_file_path(app: &AppHandle, media_file_id: String) -> Result
 
     let data_dir = app_data_dir(app)?;
     let connection = open_connection(app)?;
-    let relative_path: Option<String> = connection
+    let media_record: Option<(String, String)> = connection
         .query_row(
-            "SELECT relative_path FROM media_files WHERE id = ?1",
+            "SELECT m.relative_path, l.content_type
+             FROM media_files m
+             JOIN lessons l ON l.id = m.lesson_id
+             WHERE m.id = ?1",
             params![media_file_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(|error| error.to_string())?;
-    let relative_path = relative_path.ok_or_else(|| "Media file was not found.".to_string())?;
+    let (relative_path, content_type) =
+        media_record.ok_or_else(|| "Media file was not found.".to_string())?;
     let media_path = resolve_library_media_path(&data_dir, &relative_path)
         .ok_or_else(|| "Media file path is outside the app library.".to_string())?;
 
     if !media_path.is_file() {
         return Err("Media file is missing from disk. Re-download this lesson.".to_string());
     }
+    validate_downloaded_media_file(&media_path, &content_type)
+        .map_err(|error| format!("{error} Re-download this lesson."))?;
 
     Ok(media_path.to_string_lossy().to_string())
+}
+
+pub fn resolve_media_thumbnail_path(
+    app: &AppHandle,
+    media_file_id: String,
+) -> Result<String, String> {
+    let media_file_id = media_file_id.trim();
+
+    if media_file_id.is_empty() {
+        return Err("Media file id is required.".to_string());
+    }
+
+    let data_dir = app_data_dir(app)?;
+    let connection = open_connection(app)?;
+    let media_record: Option<(Option<String>, String, String)> = connection
+        .query_row(
+            "SELECT m.thumbnail_relative_path, m.relative_path, l.content_type
+             FROM media_files m
+             JOIN lessons l ON l.id = m.lesson_id
+             WHERE m.id = ?1",
+            params![media_file_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let (thumbnail_relative_path, relative_path, content_type) =
+        media_record.ok_or_else(|| "Media file was not found.".to_string())?;
+
+    if content_type != "video" {
+        return Err("Cover previews are only available for video media.".to_string());
+    }
+
+    if let Some(thumbnail_path) = thumbnail_relative_path
+        .as_deref()
+        .and_then(|path| resolve_library_media_path(&data_dir, path))
+        .filter(|path| path.is_file())
+    {
+        return Ok(thumbnail_path.to_string_lossy().to_string());
+    }
+
+    let media_path = resolve_library_media_path(&data_dir, &relative_path)
+        .ok_or_else(|| "Media file path is outside the app library.".to_string())?;
+    if !media_path.is_file() {
+        return Err("Media file is missing from disk. Re-download this lesson.".to_string());
+    }
+
+    let generated_thumbnail =
+        generate_video_thumbnail(&data_dir, &media_path, media_file_id, &content_type)?
+            .ok_or_else(|| "Cover preview is not available for this video.".to_string())?;
+    connection
+        .execute(
+            "UPDATE media_files SET thumbnail_relative_path = ?1 WHERE id = ?2",
+            params![&generated_thumbnail, media_file_id],
+        )
+        .map_err(|error| error.to_string())?;
+    let thumbnail_path = resolve_library_media_path(&data_dir, &generated_thumbnail)
+        .ok_or_else(|| "Cover preview path is outside the app library.".to_string())?;
+
+    Ok(thumbnail_path.to_string_lossy().to_string())
 }
 
 pub fn import_local_files(app: &AppHandle, paths: Vec<String>) -> Result<ImportSummary, String> {
@@ -490,6 +678,13 @@ pub fn import_local_files(app: &AppHandle, paths: Vec<String>) -> Result<ImportS
                 let media_file_id = format!("media-{}", Uuid::new_v4());
                 let provenance_id = format!("prov-{}", Uuid::new_v4());
                 let content_type = content_type_from_path(&source_path);
+                let media_path = resolve_library_media_path(&data_dir, &relative_path)
+                    .ok_or_else(|| "Imported media path is outside the app library.".to_string())?;
+                let playback_profile = playback_profile_for_media_file(&media_path, &content_type)?;
+                let thumbnail_relative_path =
+                    generate_video_thumbnail(&data_dir, &media_path, &media_file_id, &content_type)
+                        .ok()
+                        .flatten();
                 let imported_at = Utc::now().to_rfc3339();
                 let origin_url = format!(
                     "local-import://{}",
@@ -522,15 +717,17 @@ pub fn import_local_files(app: &AppHandle, paths: Vec<String>) -> Result<ImportS
                 transaction
                     .execute(
                         "INSERT INTO media_files
-                         (id, lesson_id, relative_path, content_hash, size_bytes, codec,
-                          import_status, hash_verification_state)
-                         VALUES (?1, ?2, ?3, ?4, ?5, NULL, 'ready', 'matched')",
+                         (id, lesson_id, relative_path, thumbnail_relative_path, content_hash,
+                          size_bytes, codec, import_status, hash_verification_state)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'ready', 'matched')",
                         params![
                             media_file_id,
                             lesson_id,
                             relative_path,
+                            thumbnail_relative_path,
                             content_hash,
-                            size_bytes
+                            size_bytes,
+                            playback_profile
                         ],
                     )
                     .map_err(|error| error.to_string())?;
@@ -933,8 +1130,7 @@ pub fn download_source_media(
         .optional()
         .map_err(|error| error.to_string())?;
     let source_label = source_label.ok_or_else(|| "Source was not found.".to_string())?;
-    let skipped = count_existing_media_lessons(&connection, &source_id)?;
-    let lessons = fetch_missing_media_lessons(&connection, &source_id)?;
+    let (lessons, skipped) = source_download_plan(&connection, &data_dir, &source_id)?;
     let attempted = lessons.len() as i64;
     let source_job_id = format!("job-download-source-{}", stable_suffix(&source_id));
     let mut downloaded = 0;
@@ -943,7 +1139,7 @@ pub fn download_source_media(
 
     if lessons.is_empty() {
         let detail = format!(
-            "No missing video, audio, or PDF files. {skipped} item(s) already have local files or saved post content."
+            "No missing or invalid video, audio, or PDF files. {skipped} item(s) already have playable local files or saved post content."
         );
         upsert_job(
             &connection,
@@ -978,7 +1174,9 @@ pub fn download_source_media(
             source_id: Some(&source_id),
             lesson_id: None,
             label: &format!("Download media: {source_label}"),
-            detail: &format!("Starting download of {attempted} missing file-backed item(s)."),
+            detail: &format!(
+                "Starting download of {attempted} missing or invalid file-backed item(s)."
+            ),
         },
     )?;
 
@@ -1009,7 +1207,11 @@ pub fn download_source_media(
             },
         )?;
 
-        let media_result = existing_completed_media_file(&lesson_dir)
+        if lesson.has_invalid_media_record {
+            detach_lesson_media_records(&mut connection, &data_dir, &lesson.id)?;
+        }
+
+        let media_result = existing_completed_media_file(&lesson_dir, &lesson.content_type)
             .map(Ok)
             .unwrap_or_else(|| {
                 download_lesson_media(
@@ -1022,11 +1224,14 @@ pub fn download_source_media(
                 )
             })
             .and_then(|media_path| {
+                let media_path =
+                    ensure_webkit_playable_media(&media_path, &lesson.content_type, &lesson_dir)?;
                 record_downloaded_media(
                     &mut connection,
                     &data_dir,
                     &lesson.id,
                     &media_path,
+                    &lesson.content_type,
                     lesson.expected_content_hash.as_deref(),
                 )?;
                 Ok(media_path)
@@ -1085,7 +1290,7 @@ pub fn download_source_media(
 
     let job_state = if failed == 0 { "downloaded" } else { "failed" };
     let detail = format!(
-        "{downloaded} downloaded, {failed} failed, {skipped} skipped from {attempted} missing file-backed item(s)."
+        "{downloaded} downloaded, {failed} failed, {skipped} skipped from {attempted} missing or invalid file-backed item(s)."
     );
     upsert_job(
         &connection,
@@ -2456,8 +2661,11 @@ fn record_downloaded_media(
     data_dir: &Path,
     lesson_id: &str,
     media_path: &Path,
+    content_type: &str,
     expected_content_hash: Option<&str>,
 ) -> Result<(), String> {
+    validate_downloaded_media_file(media_path, content_type)?;
+    let playback_profile = playback_profile_for_media_file(media_path, content_type)?;
     let media_file_id = format!("media-{}", Uuid::new_v4());
     let hash = hash_file(media_path)?;
     let content_hash = format!("sha256:{hash}");
@@ -2474,22 +2682,40 @@ fn record_downloaded_media(
         .map_err(|_| "Downloaded file escaped the app data directory.".to_string())?
         .to_string_lossy()
         .replace('\\', "/");
+    let thumbnail_relative_path =
+        generate_video_thumbnail(data_dir, media_path, &media_file_id, content_type)
+            .ok()
+            .flatten();
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
 
     transaction
         .execute(
+            "UPDATE lessons SET media_file_id = NULL WHERE id = ?1",
+            params![lesson_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM media_files WHERE lesson_id = ?1",
+            params![lesson_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
             "INSERT INTO media_files
-             (id, lesson_id, relative_path, content_hash, size_bytes, codec, import_status,
-              hash_verification_state)
-             VALUES (?1, ?2, ?3, ?4, ?5, NULL, 'ready', ?6)",
+             (id, lesson_id, relative_path, thumbnail_relative_path, content_hash, size_bytes,
+              codec, import_status, hash_verification_state)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'ready', ?8)",
             params![
                 &media_file_id,
                 lesson_id,
                 &relative_path,
+                thumbnail_relative_path,
                 &content_hash,
                 size_bytes,
+                playback_profile,
                 hash_verification_state
             ],
         )
@@ -3322,18 +3548,55 @@ fn collect_source_media_paths(
 ) -> Result<Vec<String>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT m.relative_path
+            "SELECT m.relative_path, m.thumbnail_relative_path
              FROM media_files m
              JOIN lessons l ON l.id = m.lesson_id
              WHERE l.source_id = ?1",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map(params![source_id], |row| row.get::<_, String>(0))
+        .query_map(params![source_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
         .map_err(|error| error.to_string())?;
 
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())
+    let records = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(records
+        .into_iter()
+        .flat_map(|(relative_path, thumbnail_relative_path)| {
+            std::iter::once(relative_path).chain(thumbnail_relative_path)
+        })
+        .collect())
+}
+
+fn collect_lesson_media_paths(
+    connection: &Connection,
+    lesson_id: &str,
+) -> Result<Vec<String>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT relative_path, thumbnail_relative_path
+             FROM media_files
+             WHERE lesson_id = ?1",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![lesson_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .map_err(|error| error.to_string())?;
+    let records = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    Ok(records
+        .into_iter()
+        .flat_map(|(relative_path, thumbnail_relative_path)| {
+            std::iter::once(relative_path).chain(thumbnail_relative_path)
+        })
+        .collect())
 }
 
 fn duplicate_lesson_title_for_hash(
@@ -3406,48 +3669,108 @@ fn discovered_duplicate_lesson_title(
     Ok(None)
 }
 
-fn count_existing_media_lessons(connection: &Connection, source_id: &str) -> Result<i64, String> {
-    connection
-        .query_row(
-            "SELECT COUNT(*)
-             FROM lessons
-             WHERE source_id = ?1
-               AND (media_file_id IS NOT NULL OR content_type = 'post')",
-            params![source_id],
-            |row| row.get(0),
-        )
-        .map_err(|error| error.to_string())
-}
-
-fn fetch_missing_media_lessons(
+fn source_download_plan(
     connection: &Connection,
+    data_dir: &Path,
     source_id: &str,
-) -> Result<Vec<DownloadLesson>, String> {
+) -> Result<(Vec<DownloadLesson>, i64), String> {
     let mut statement = connection
         .prepare(
-            "SELECT l.id, l.title, l.content_type, l.source_url, p.content_hash
+            "SELECT l.id, l.title, l.content_type, l.source_url, p.content_hash,
+                    l.media_file_id, m.relative_path, m.import_status
              FROM lessons l
+             LEFT JOIN media_files m ON m.id = l.media_file_id
              LEFT JOIN provenance_records p ON p.lesson_id = l.id
              WHERE l.source_id = ?1
-               AND l.media_file_id IS NULL
-               AND l.content_type IN ('video', 'audio', 'pdf')
+               AND l.content_type IN ('video', 'audio', 'pdf', 'post')
              ORDER BY l.published_at DESC, l.title ASC",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map(params![source_id], |row| {
-            Ok(DownloadLesson {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                content_type: row.get(2)?,
-                source_url: row.get(3)?,
-                expected_content_hash: row.get(4)?,
-            })
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+            ))
         })
         .map_err(|error| error.to_string())?;
 
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())
+    let mut lessons = Vec::new();
+    let mut skipped = 0;
+
+    for row in rows {
+        let (
+            id,
+            title,
+            content_type,
+            source_url,
+            expected_content_hash,
+            media_file_id,
+            relative_path,
+            import_status,
+        ) = row.map_err(|error| error.to_string())?;
+
+        if content_type == "post" {
+            skipped += 1;
+            continue;
+        }
+
+        let has_ready_media = media_file_id.is_some()
+            && import_status.as_deref() == Some("ready")
+            && relative_path
+                .as_deref()
+                .and_then(|path| resolve_library_media_path(data_dir, path))
+                .filter(|path| validate_downloaded_media_file(path, &content_type).is_ok())
+                .is_some();
+
+        if has_ready_media {
+            skipped += 1;
+            continue;
+        }
+
+        lessons.push(DownloadLesson {
+            id,
+            title,
+            content_type,
+            source_url,
+            expected_content_hash,
+            has_invalid_media_record: media_file_id.is_some(),
+        });
+    }
+
+    Ok((lessons, skipped))
+}
+
+fn detach_lesson_media_records(
+    connection: &mut Connection,
+    data_dir: &Path,
+    lesson_id: &str,
+) -> Result<(), String> {
+    let media_paths = collect_lesson_media_paths(connection, lesson_id)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "UPDATE lessons SET media_file_id = NULL WHERE id = ?1",
+            params![lesson_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM media_files WHERE lesson_id = ?1",
+            params![lesson_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    remove_media_files_from_disk(data_dir, &media_paths);
+    Ok(())
 }
 
 fn collection_owned_by_source(
@@ -3553,7 +3876,7 @@ fn download_lesson_media(
     }
 
     if is_direct_file_url(&lesson.source_url) {
-        return download_direct_file(client, &lesson.source_url, lesson_dir);
+        return download_direct_file(client, &lesson.source_url, lesson_dir, &lesson.content_type);
     }
 
     let command = match yt_dlp {
@@ -3571,6 +3894,7 @@ fn download_lesson_media(
         lesson_dir,
         data_dir,
         cookies_file,
+        &lesson.content_type,
     )
 }
 
@@ -3582,6 +3906,7 @@ fn download_direct_file(
     client: &Client,
     source_url: &str,
     lesson_dir: &Path,
+    content_type: &str,
 ) -> Result<PathBuf, String> {
     let mut response = client
         .get(source_url)
@@ -3592,6 +3917,7 @@ fn download_direct_file(
     if !status.is_success() {
         return Err(format!("Could not fetch media file: HTTP {status}."));
     }
+    validate_response_media_type(&response, content_type)?;
 
     let file_name = direct_download_file_name(source_url);
     let destination = lesson_dir.join(file_name);
@@ -3604,8 +3930,18 @@ fn download_direct_file(
             .unwrap_or_default()
     ));
     let mut file = fs::File::create(&partial_destination).map_err(|error| error.to_string())?;
-    io::copy(&mut response, &mut file).map_err(|error| error.to_string())?;
-    fs::rename(&partial_destination, &destination).map_err(|error| error.to_string())?;
+    if let Err(error) = io::copy(&mut response, &mut file) {
+        let _ = fs::remove_file(&partial_destination);
+        return Err(error.to_string());
+    }
+    if let Err(error) = fs::rename(&partial_destination, &destination) {
+        let _ = fs::remove_file(&partial_destination);
+        return Err(error.to_string());
+    }
+    if let Err(error) = validate_downloaded_media_file(&destination, content_type) {
+        let _ = fs::remove_file(&destination);
+        return Err(error);
+    }
 
     Ok(destination)
 }
@@ -3629,6 +3965,7 @@ fn download_lesson_with_yt_dlp(
     lesson_dir: &Path,
     data_dir: &Path,
     cookies_file: Option<&Path>,
+    content_type: &str,
 ) -> Result<PathBuf, String> {
     let output_template = lesson_dir.join("%(title).200B-%(id)s.%(ext)s");
     let mut command = Command::new(&yt_dlp.program);
@@ -3640,6 +3977,16 @@ fn download_lesson_with_yt_dlp(
         .arg("--continue")
         .arg("--merge-output-format")
         .arg("mp4");
+
+    match content_type {
+        "video" => {
+            command.arg("-f").arg(yt_dlp_video_format_selector());
+        }
+        "audio" => {
+            command.arg("-f").arg(yt_dlp_audio_format_selector());
+        }
+        _ => {}
+    }
 
     if let Some(cookies_file) = cookies_file {
         command.arg("--cookies").arg(cookies_file);
@@ -3660,7 +4007,7 @@ fn download_lesson_with_yt_dlp(
         ));
     }
 
-    let mut media_files = collect_completed_media_files(lesson_dir);
+    let mut media_files = collect_completed_media_files(lesson_dir, content_type);
     media_files.sort_by_key(|path| {
         path.metadata()
             .and_then(|metadata| metadata.modified())
@@ -3669,7 +4016,326 @@ fn download_lesson_with_yt_dlp(
 
     media_files
         .pop()
-        .ok_or_else(|| "yt-dlp finished but no supported media file was produced.".to_string())
+        .ok_or_else(|| {
+            format!(
+                "yt-dlp finished but no playable {content_type} file was produced. The output folder may contain only incomplete adaptive fragments or unsupported media."
+            )
+        })
+}
+
+fn yt_dlp_video_format_selector() -> &'static str {
+    "best[ext=mp4][vcodec^=avc1][acodec^=mp4a]/bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a][acodec^=mp4a]"
+}
+
+fn yt_dlp_audio_format_selector() -> &'static str {
+    "bestaudio[ext=m4a][acodec^=mp4a]/bestaudio[ext=mp3]/bestaudio/best"
+}
+
+fn ensure_webkit_playable_media(
+    media_path: &Path,
+    content_type: &str,
+    output_dir: &Path,
+) -> Result<PathBuf, String> {
+    if !matches!(content_type, "video" | "audio") {
+        return Ok(media_path.to_path_buf());
+    }
+
+    let profile = playback_profile_for_media_file(media_path, content_type)?;
+    if profile.starts_with("webkit-compatible:") {
+        return Ok(media_path.to_path_buf());
+    }
+
+    let Some(ffmpeg) = find_media_tool("ffmpeg") else {
+        return Ok(media_path.to_path_buf());
+    };
+
+    match transcode_media_for_webkit(&ffmpeg, media_path, content_type, output_dir) {
+        Ok(transcoded_path) => {
+            let transcoded_profile =
+                playback_profile_for_media_file(&transcoded_path, content_type)?;
+            if transcoded_profile.starts_with("webkit-compatible:") {
+                Ok(transcoded_path)
+            } else {
+                let _ = fs::remove_file(&transcoded_path);
+                Ok(media_path.to_path_buf())
+            }
+        }
+        Err(_) => Ok(media_path.to_path_buf()),
+    }
+}
+
+fn generate_video_thumbnail(
+    data_dir: &Path,
+    media_path: &Path,
+    media_file_id: &str,
+    content_type: &str,
+) -> Result<Option<String>, String> {
+    if content_type != "video" {
+        return Ok(None);
+    }
+
+    let Some(ffmpeg) = find_media_tool("ffmpeg") else {
+        return Ok(None);
+    };
+
+    let thumbnail_dir = data_dir.join("library").join("thumbnails");
+    fs::create_dir_all(&thumbnail_dir).map_err(|error| error.to_string())?;
+    let file_stem = safe_path_segment(media_file_id);
+    let destination = thumbnail_dir.join(format!("{file_stem}.jpg"));
+
+    if destination
+        .metadata()
+        .map(|metadata| metadata.len() > 0)
+        .unwrap_or(false)
+    {
+        return destination
+            .strip_prefix(data_dir)
+            .map(|path| Some(path.to_string_lossy().replace('\\', "/")))
+            .map_err(|_| "Generated thumbnail escaped the app data directory.".to_string());
+    }
+
+    let partial_destination = thumbnail_dir.join(format!("{file_stem}.part.jpg"));
+    let output = Command::new(ffmpeg)
+        .arg("-nostdin")
+        .arg("-y")
+        .args(["-ss", "00:00:01"])
+        .arg("-i")
+        .arg(media_path)
+        .args(["-frames:v", "1"])
+        .args(["-vf", "scale=640:-2"])
+        .args(["-q:v", "4"])
+        .arg(&partial_destination)
+        .output()
+        .map_err(|error| format!("Could not start ffmpeg for thumbnail generation: {error}"))?;
+
+    if !output.status.success() || !partial_destination.is_file() {
+        let _ = fs::remove_file(&partial_destination);
+        return Ok(None);
+    }
+
+    if let Err(error) = fs::rename(&partial_destination, &destination) {
+        let _ = fs::remove_file(&partial_destination);
+        return Err(error.to_string());
+    }
+
+    destination
+        .strip_prefix(data_dir)
+        .map(|path| Some(path.to_string_lossy().replace('\\', "/")))
+        .map_err(|_| "Generated thumbnail escaped the app data directory.".to_string())
+}
+
+fn transcode_media_for_webkit(
+    ffmpeg: &str,
+    media_path: &Path,
+    content_type: &str,
+    output_dir: &Path,
+) -> Result<PathBuf, String> {
+    let stem = media_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(safe_path_segment)
+        .unwrap_or_else(|| "media".to_string());
+    let destination = match content_type {
+        "video" => output_dir.join(format!("{stem}-webkit.mp4")),
+        "audio" => output_dir.join(format!("{stem}-webkit.m4a")),
+        _ => return Ok(media_path.to_path_buf()),
+    };
+    let partial_destination = destination.with_extension(format!(
+        "{}part",
+        destination
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| format!("{extension}."))
+            .unwrap_or_default()
+    ));
+
+    let mut command = Command::new(ffmpeg);
+    command.arg("-nostdin").arg("-y").arg("-i").arg(media_path);
+
+    match content_type {
+        "video" => {
+            command
+                .args(["-map", "0:v:0", "-map", "0:a:0?"])
+                .args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"])
+                .args(["-pix_fmt", "yuv420p"])
+                .args(["-c:a", "aac", "-b:a", "128k"])
+                .args(["-movflags", "+faststart"]);
+        }
+        "audio" => {
+            command.arg("-vn").args(["-c:a", "aac", "-b:a", "128k"]);
+        }
+        _ => {}
+    }
+
+    let output = command
+        .arg(&partial_destination)
+        .output()
+        .map_err(|error| format!("Could not start ffmpeg: {error}"))?;
+
+    if !output.status.success() {
+        let _ = fs::remove_file(&partial_destination);
+        return Err(format!(
+            "ffmpeg failed while normalizing media: {}",
+            output_summary(&output.stderr)
+        ));
+    }
+
+    if let Err(error) = fs::rename(&partial_destination, &destination) {
+        let _ = fs::remove_file(&partial_destination);
+        return Err(error.to_string());
+    }
+
+    Ok(destination)
+}
+
+fn find_media_tool(tool_name: &str) -> Option<String> {
+    [
+        tool_name.to_string(),
+        format!("/opt/homebrew/bin/{tool_name}"),
+        format!("/usr/local/bin/{tool_name}"),
+    ]
+    .into_iter()
+    .find(|candidate| {
+        Command::new(candidate)
+            .arg("-version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    })
+}
+
+fn native_player_command_for_app(app: &AppHandle) -> Option<NativePlayerCommand> {
+    let search_dirs = app
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|resource_dir| vec![resource_dir.join("binaries"), resource_dir])
+        .unwrap_or_default();
+
+    find_native_player_command(&search_dirs)
+}
+
+fn find_native_player_command(search_dirs: &[PathBuf]) -> Option<NativePlayerCommand> {
+    native_player_candidates(search_dirs)
+        .into_iter()
+        .find(native_player_command_available)
+}
+
+fn native_player_candidates(search_dirs: &[PathBuf]) -> Vec<NativePlayerCommand> {
+    let mut candidates = Vec::new();
+
+    for directory in search_dirs {
+        candidates.push(NativePlayerCommand {
+            name: "mpv".to_string(),
+            program: directory.join("mpv").to_string_lossy().to_string(),
+            args: vec![
+                "--force-window=yes".to_string(),
+                "--no-terminal".to_string(),
+            ],
+        });
+        candidates.push(NativePlayerCommand {
+            name: "VLC".to_string(),
+            program: directory.join("vlc").to_string_lossy().to_string(),
+            args: vec![
+                "--started-from-file".to_string(),
+                "--no-playlist-enqueue".to_string(),
+            ],
+        });
+        candidates.push(NativePlayerCommand {
+            name: "ffplay".to_string(),
+            program: directory.join("ffplay").to_string_lossy().to_string(),
+            args: vec![
+                "-hide_banner".to_string(),
+                "-loglevel".to_string(),
+                "warning".to_string(),
+            ],
+        });
+    }
+
+    candidates.extend([
+        NativePlayerCommand {
+            name: "mpv".to_string(),
+            program: "mpv".to_string(),
+            args: vec![
+                "--force-window=yes".to_string(),
+                "--no-terminal".to_string(),
+            ],
+        },
+        NativePlayerCommand {
+            name: "mpv".to_string(),
+            program: "/Applications/mpv.app/Contents/MacOS/mpv".to_string(),
+            args: vec![
+                "--force-window=yes".to_string(),
+                "--no-terminal".to_string(),
+            ],
+        },
+        NativePlayerCommand {
+            name: "VLC".to_string(),
+            program: "vlc".to_string(),
+            args: vec![
+                "--started-from-file".to_string(),
+                "--no-playlist-enqueue".to_string(),
+            ],
+        },
+        NativePlayerCommand {
+            name: "VLC".to_string(),
+            program: "/Applications/VLC.app/Contents/MacOS/VLC".to_string(),
+            args: vec![
+                "--started-from-file".to_string(),
+                "--no-playlist-enqueue".to_string(),
+            ],
+        },
+        NativePlayerCommand {
+            name: "ffplay".to_string(),
+            program: "ffplay".to_string(),
+            args: vec![
+                "-hide_banner".to_string(),
+                "-loglevel".to_string(),
+                "warning".to_string(),
+            ],
+        },
+        NativePlayerCommand {
+            name: "ffplay".to_string(),
+            program: "/opt/homebrew/bin/ffplay".to_string(),
+            args: vec![
+                "-hide_banner".to_string(),
+                "-loglevel".to_string(),
+                "warning".to_string(),
+            ],
+        },
+        NativePlayerCommand {
+            name: "ffplay".to_string(),
+            program: "/usr/local/bin/ffplay".to_string(),
+            args: vec![
+                "-hide_banner".to_string(),
+                "-loglevel".to_string(),
+                "warning".to_string(),
+            ],
+        },
+    ]);
+
+    candidates
+}
+
+fn native_player_command_available(command: &NativePlayerCommand) -> bool {
+    let program_path = Path::new(&command.program);
+    if program_path.components().count() > 1 && !program_path.is_file() {
+        return false;
+    }
+
+    Command::new(&command.program)
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn native_player_command_label(command: &NativePlayerCommand) -> String {
+    if command.args.is_empty() {
+        command.program.clone()
+    } else {
+        format!("{} {}", command.program, command.args.join(" "))
+    }
 }
 
 fn yt_dlp_cookie_file(data_dir: &Path) -> Option<PathBuf> {
@@ -3690,21 +4356,343 @@ fn yt_dlp_auth_hint(cookies_file: Option<&Path>, data_dir: &Path) -> String {
     )
 }
 
-fn existing_completed_media_file(lesson_dir: &Path) -> Option<PathBuf> {
-    let mut media_files = collect_completed_media_files(lesson_dir);
+fn existing_completed_media_file(lesson_dir: &Path, content_type: &str) -> Option<PathBuf> {
+    let mut media_files = collect_completed_media_files(lesson_dir, content_type);
     media_files.sort_by_key(|path| {
         path.metadata()
             .and_then(|metadata| metadata.modified())
             .ok()
     });
-    media_files.pop()
+
+    media_files
+        .iter()
+        .rev()
+        .find(|path| {
+            playback_profile_for_media_file(path, content_type)
+                .map(|profile| profile.starts_with("webkit-compatible:"))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .or_else(|| media_files.pop())
 }
 
-fn collect_completed_media_files(path: &Path) -> Vec<PathBuf> {
+fn collect_completed_media_files(path: &Path, content_type: &str) -> Vec<PathBuf> {
     collect_media_files(path)
         .into_iter()
-        .filter(|path| !is_probably_partial_media_file(path))
+        .filter(|path| validate_downloaded_media_file(path, content_type).is_ok())
         .collect()
+}
+
+fn validate_response_media_type(response: &Response, content_type: &str) -> Result<(), String> {
+    let Some(header) = response.headers().get(CONTENT_TYPE) else {
+        return Ok(());
+    };
+    let media_type = header
+        .to_str()
+        .unwrap_or_default()
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    if media_type.is_empty() || response_media_type_matches(&media_type, content_type) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Source returned {media_type} instead of a {content_type} file. It may be an HTML page, sign-in screen, or unsupported redirect."
+    ))
+}
+
+fn response_media_type_matches(media_type: &str, content_type: &str) -> bool {
+    if matches!(
+        media_type,
+        "application/octet-stream" | "binary/octet-stream" | "application/download"
+    ) {
+        return true;
+    }
+
+    match content_type {
+        "video" => {
+            media_type.starts_with("video/")
+                || matches!(media_type, "application/mp4" | "application/quicktime")
+        }
+        "audio" => media_type.starts_with("audio/") || media_type == "application/ogg",
+        "pdf" => media_type.contains("pdf"),
+        _ => false,
+    }
+}
+
+fn validate_downloaded_media_file(path: &Path, content_type: &str) -> Result<(), String> {
+    if is_probably_partial_media_file(path) {
+        return Err(
+            "Downloaded file is an incomplete adaptive media fragment, not a playable file."
+                .to_string(),
+        );
+    }
+
+    let metadata = path.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Err("Downloaded media file is empty or missing.".to_string());
+    }
+
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .ok_or_else(|| "Downloaded media file has no supported extension.".to_string())?;
+    let extension_content_type = content_type_from_extension(&extension);
+
+    if extension_content_type != content_type {
+        return Err(format!(
+            "Downloaded file extension .{extension} does not match the expected {content_type} content type."
+        ));
+    }
+
+    let prefix = read_file_prefix(path, 512)?;
+    let looks_valid = match content_type {
+        "video" => match extension.as_str() {
+            "mp4" | "m4v" | "mov" => has_iso_bmff_signature(&prefix),
+            "webm" | "mkv" => has_ebml_signature(&prefix),
+            _ => false,
+        },
+        "audio" => match extension.as_str() {
+            "mp3" => has_mp3_signature(&prefix),
+            "m4a" => has_iso_bmff_signature(&prefix),
+            "aac" => has_aac_adts_signature(&prefix),
+            "wav" => has_wav_signature(&prefix),
+            "flac" => prefix.starts_with(b"fLaC"),
+            "ogg" => prefix.starts_with(b"OggS"),
+            _ => false,
+        },
+        "pdf" => prefix.starts_with(b"%PDF-"),
+        _ => false,
+    };
+
+    if looks_valid {
+        return Ok(());
+    }
+
+    if content_type == "pdf" {
+        Err(format!(
+            "Downloaded file does not look like a valid {content_type} file. The source may have returned HTML/XML or an unsupported container."
+        ))
+    } else if is_probably_text_payload(&prefix) {
+        Err(format!(
+            "Downloaded file looks like a text or HTML response, not a playable {content_type} file."
+        ))
+    } else if is_plausible_unrecognized_media_payload(&prefix, metadata.len()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Downloaded file does not look like a playable {content_type} file."
+        ))
+    }
+}
+
+fn playback_profile_for_media_file(path: &Path, content_type: &str) -> Result<String, String> {
+    validate_downloaded_media_file(path, content_type)?;
+
+    if let Some(profile) = ffprobe_playback_profile(path, content_type) {
+        return Ok(profile);
+    }
+
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .ok_or_else(|| "Downloaded media file has no supported extension.".to_string())?;
+    let probe = read_file_prefix(path, 4 * 1024 * 1024)?;
+
+    let profile = match content_type {
+        "video" => match extension.as_str() {
+            "mp4" | "m4v" | "mov" => {
+                if contains_ascii_marker(&probe, b"avc1") && contains_ascii_marker(&probe, b"mp4a")
+                {
+                    "webkit-compatible:h264-aac-mp4"
+                } else if contains_ascii_marker(&probe, b"avc1") {
+                    "webkit-compatible:h264-mp4"
+                } else if contains_any_ascii_marker(&probe, &[b"hvc1", b"hev1", b"av01", b"vp09"]) {
+                    "webkit-unverified:mp4-codec"
+                } else {
+                    "webkit-unverified:mp4"
+                }
+            }
+            "webm" => "webkit-unverified:webm",
+            "mkv" => "webkit-unverified:mkv",
+            _ => "webkit-unverified:video",
+        },
+        "audio" => match extension.as_str() {
+            "mp3" => "webkit-compatible:mp3",
+            "m4a" | "aac" => "webkit-compatible:aac",
+            "wav" => "webkit-compatible:wav",
+            "flac" => "webkit-unverified:flac",
+            "ogg" => "webkit-unverified:ogg",
+            _ => "webkit-unverified:audio",
+        },
+        "pdf" => "webkit-compatible:pdf",
+        _ => "webkit-unverified:unknown",
+    };
+
+    Ok(profile.to_string())
+}
+
+fn ffprobe_playback_profile(path: &Path, content_type: &str) -> Option<String> {
+    let ffprobe = find_media_tool("ffprobe")?;
+    let output = Command::new(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_name,codec_type",
+            "-of",
+            "json",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let streams = parsed.get("streams")?.as_array()?;
+    let video_codec = streams
+        .iter()
+        .find(|stream| stream.get("codec_type").and_then(json_text).as_deref() == Some("video"))
+        .and_then(|stream| stream.get("codec_name"))
+        .and_then(json_text)
+        .map(|codec| codec.to_ascii_lowercase());
+    let audio_codec = streams
+        .iter()
+        .find(|stream| stream.get("codec_type").and_then(json_text).as_deref() == Some("audio"))
+        .and_then(|stream| stream.get("codec_name"))
+        .and_then(json_text)
+        .map(|codec| codec.to_ascii_lowercase());
+
+    match content_type {
+        "video" => {
+            let video_codec = video_codec?;
+            if video_codec == "h264"
+                && audio_codec
+                    .as_deref()
+                    .map(is_webkit_audio_codec)
+                    .unwrap_or(true)
+            {
+                Some("webkit-compatible:h264-aac-mp4".to_string())
+            } else {
+                Some(format!(
+                    "webkit-unverified:video-codec-{}",
+                    safe_path_segment(&video_codec)
+                ))
+            }
+        }
+        "audio" => {
+            let audio_codec = audio_codec?;
+            if is_webkit_audio_codec(&audio_codec) {
+                Some(format!(
+                    "webkit-compatible:{}",
+                    safe_path_segment(&audio_codec)
+                ))
+            } else {
+                Some(format!(
+                    "webkit-unverified:audio-codec-{}",
+                    safe_path_segment(&audio_codec)
+                ))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn is_webkit_audio_codec(codec: &str) -> bool {
+    matches!(
+        codec,
+        "aac" | "mp3" | "mp2" | "alac" | "pcm_s16le" | "pcm_s24le" | "pcm_f32le"
+    )
+}
+
+fn read_file_prefix(path: &Path, byte_count: usize) -> Result<Vec<u8>, String> {
+    let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut buffer = vec![0_u8; byte_count];
+    let bytes_read = file.read(&mut buffer).map_err(|error| error.to_string())?;
+    buffer.truncate(bytes_read);
+    Ok(buffer)
+}
+
+fn has_iso_bmff_signature(prefix: &[u8]) -> bool {
+    prefix
+        .windows(4)
+        .position(|window| window == b"ftyp")
+        .map(|position| position >= 4 && position <= 64)
+        .unwrap_or(false)
+}
+
+fn has_ebml_signature(prefix: &[u8]) -> bool {
+    prefix.starts_with(&[0x1A, 0x45, 0xDF, 0xA3])
+}
+
+fn has_mp3_signature(prefix: &[u8]) -> bool {
+    prefix.starts_with(b"ID3")
+        || (prefix.len() >= 2 && prefix[0] == 0xFF && (prefix[1] & 0xE0) == 0xE0)
+}
+
+fn has_aac_adts_signature(prefix: &[u8]) -> bool {
+    prefix.len() >= 2 && prefix[0] == 0xFF && (prefix[1] & 0xF0) == 0xF0
+}
+
+fn has_wav_signature(prefix: &[u8]) -> bool {
+    prefix.len() >= 12 && prefix.starts_with(b"RIFF") && &prefix[8..12] == b"WAVE"
+}
+
+fn contains_any_ascii_marker<const N: usize>(bytes: &[u8], markers: &[&[u8; N]]) -> bool {
+    markers
+        .iter()
+        .any(|marker| contains_ascii_marker(bytes, marker.as_slice()))
+}
+
+fn contains_ascii_marker(bytes: &[u8], marker: &[u8]) -> bool {
+    bytes.windows(marker.len()).any(|window| window == marker)
+}
+
+fn is_probably_text_payload(prefix: &[u8]) -> bool {
+    let trimmed = trim_ascii_whitespace(prefix);
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    if matches!(trimmed[0], b'<' | b'{' | b'[') {
+        return true;
+    }
+
+    let probe_len = trimmed.len().min(64);
+    let probe = String::from_utf8_lossy(&trimmed[..probe_len]).to_ascii_lowercase();
+    probe.starts_with("not found")
+        || probe.starts_with("forbidden")
+        || probe.starts_with("unauthorized")
+        || probe.starts_with("error")
+}
+
+fn trim_ascii_whitespace(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map(|index| index + 1)
+        .unwrap_or(start);
+
+    &bytes[start..end]
+}
+
+fn is_plausible_unrecognized_media_payload(prefix: &[u8], size_bytes: u64) -> bool {
+    size_bytes >= MIN_PLAUSIBLE_MEDIA_BYTES
+        && prefix.iter().any(|byte| *byte == 0)
+        && prefix.iter().any(|byte| *byte >= 0x80)
 }
 
 fn is_probably_partial_media_file(path: &Path) -> bool {
@@ -3888,6 +4876,7 @@ fn run_migrations(connection: &Connection) -> Result<(), String> {
               id TEXT PRIMARY KEY,
               lesson_id TEXT NOT NULL REFERENCES lessons(id),
               relative_path TEXT NOT NULL,
+              thumbnail_relative_path TEXT,
               content_hash TEXT NOT NULL,
               size_bytes INTEGER NOT NULL,
               codec TEXT,
@@ -3993,6 +4982,12 @@ fn run_migrations(connection: &Connection) -> Result<(), String> {
     ensure_column(
         connection,
         "media_files",
+        "thumbnail_relative_path",
+        "ALTER TABLE media_files ADD COLUMN thumbnail_relative_path TEXT",
+    )?;
+    ensure_column(
+        connection,
+        "media_files",
         "hash_verification_state",
         "ALTER TABLE media_files ADD COLUMN hash_verification_state TEXT NOT NULL DEFAULT 'not-provided'",
     )?;
@@ -4082,6 +5077,51 @@ fn backfill_lesson_content_types(connection: &Connection) -> Result<(), String> 
                 .execute(
                     "UPDATE lessons SET content_type = ?1 WHERE id = ?2",
                     params![inference.content_type, lesson_id],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+    }
+
+    Ok(())
+}
+
+fn backfill_missing_video_thumbnails(
+    connection: &Connection,
+    data_dir: &Path,
+) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT m.id, m.relative_path
+             FROM media_files m
+             JOIN lessons l ON l.id = m.lesson_id
+             WHERE l.content_type = 'video'
+               AND (m.thumbnail_relative_path IS NULL OR m.thumbnail_relative_path = '')",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| error.to_string())?;
+    let media_files = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    for (media_file_id, relative_path) in media_files {
+        let Some(media_path) = resolve_library_media_path(data_dir, &relative_path) else {
+            continue;
+        };
+        if !media_path.is_file() {
+            continue;
+        }
+
+        if let Some(thumbnail_relative_path) =
+            generate_video_thumbnail(data_dir, &media_path, &media_file_id, "video")?
+        {
+            connection
+                .execute(
+                    "UPDATE media_files SET thumbnail_relative_path = ?1 WHERE id = ?2",
+                    params![thumbnail_relative_path, media_file_id],
                 )
                 .map_err(|error| error.to_string())?;
         }
@@ -4576,8 +5616,8 @@ fn lesson_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Lesson> {
 fn fetch_media_files(connection: &Connection) -> Result<Vec<MediaFile>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT id, lesson_id, relative_path, content_hash, size_bytes, codec,
-                    import_status, hash_verification_state
+            "SELECT id, lesson_id, relative_path, thumbnail_relative_path, content_hash,
+                    size_bytes, codec, import_status, hash_verification_state
              FROM media_files",
         )
         .map_err(|error| error.to_string())?;
@@ -4588,11 +5628,12 @@ fn fetch_media_files(connection: &Connection) -> Result<Vec<MediaFile>, String> 
                 id: row.get(0)?,
                 lesson_id: row.get(1)?,
                 relative_path: row.get(2)?,
-                content_hash: row.get(3)?,
-                size_bytes: row.get(4)?,
-                codec: row.get(5)?,
-                import_status: row.get(6)?,
-                hash_verification_state: row.get(7)?,
+                thumbnail_relative_path: row.get(3)?,
+                content_hash: row.get(4)?,
+                size_bytes: row.get(5)?,
+                codec: row.get(6)?,
+                import_status: row.get(7)?,
+                hash_verification_state: row.get(8)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -4927,7 +5968,8 @@ fn copy_media_into_library(
     source_path: &Path,
     library_dir: &Path,
 ) -> Result<(String, String, i64), String> {
-    let hash = hash_file(source_path)?;
+    let content_type = content_type_from_path(source_path);
+    validate_downloaded_media_file(source_path, &content_type)?;
     let file_name = source_path
         .file_name()
         .and_then(|value| value.to_str())
@@ -4946,13 +5988,19 @@ fn copy_media_into_library(
     let destination = library_dir.join(destination_name);
 
     fs::copy(source_path, &destination).map_err(|error| error.to_string())?;
-    let size = destination
+    let media_path = ensure_webkit_playable_media(&destination, &content_type, library_dir)?;
+    if media_path != destination {
+        let _ = fs::remove_file(&destination);
+    }
+
+    let hash = hash_file(&media_path)?;
+    let size = media_path
         .metadata()
         .map_err(|error| error.to_string())?
         .len() as i64;
-    let relative_path = destination
+    let relative_path = media_path
         .strip_prefix(library_dir.parent().unwrap_or(library_dir))
-        .unwrap_or(&destination)
+        .unwrap_or(&media_path)
         .to_string_lossy()
         .replace('\\', "/");
 
@@ -4990,7 +6038,7 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use serde_json::{json, Value};
     use std::thread;
-    use tiny_http::{Response, Server};
+    use tiny_http::{Header, Response, Server};
 
     fn test_connection() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
@@ -5973,6 +7021,52 @@ mod tests {
     }
 
     #[test]
+    fn yt_dlp_video_selector_prefers_webkit_playable_codecs() {
+        let selector = yt_dlp_video_format_selector();
+
+        assert!(selector.contains("vcodec^=avc1"));
+        assert!(selector.contains("acodec^=mp4a"));
+        assert!(!selector.contains("vcodec!=none"));
+    }
+
+    #[test]
+    fn native_player_candidates_prefer_bundled_players() {
+        let bundle_dir = PathBuf::from("/tmp/duroos-player-bundle");
+        let candidates = native_player_candidates(&[bundle_dir.clone()]);
+
+        assert_eq!(candidates[0].name, "mpv");
+        assert_eq!(
+            candidates[0].program,
+            bundle_dir.join("mpv").to_string_lossy().to_string()
+        );
+        assert!(candidates.iter().any(|candidate| {
+            candidate.name == "VLC"
+                && candidate.program == "/Applications/VLC.app/Contents/MacOS/VLC"
+        }));
+        assert!(candidates.iter().any(|candidate| {
+            candidate.name == "ffplay" && candidate.program == "/opt/homebrew/bin/ffplay"
+        }));
+    }
+
+    #[test]
+    fn native_player_command_label_preserves_arguments() {
+        let command = NativePlayerCommand {
+            name: "ffplay".to_string(),
+            program: "/opt/homebrew/bin/ffplay".to_string(),
+            args: vec![
+                "-hide_banner".to_string(),
+                "-loglevel".to_string(),
+                "warning".to_string(),
+            ],
+        };
+
+        assert_eq!(
+            native_player_command_label(&command),
+            "/opt/homebrew/bin/ffplay -hide_banner -loglevel warning"
+        );
+    }
+
+    #[test]
     fn treats_yt_dlp_fragments_as_partial_media_files() {
         assert!(is_probably_partial_media_file(Path::new(
             "Lecture_10-xGSBvoVScqE.f399.mp4"
@@ -5984,6 +7078,215 @@ mod tests {
         assert!(!is_probably_partial_media_file(Path::new(
             "Lecture_10-xGSBvoVScqE.mp4"
         )));
+    }
+
+    #[test]
+    fn rejects_html_disguised_as_video_file() {
+        let data_dir = test_temp_dir("duroos-html-video");
+        let video_path = data_dir.join("lesson.mp4");
+        fs::write(&video_path, b"<html><body>not video</body></html>").unwrap();
+
+        let error = validate_downloaded_media_file(&video_path, "video").unwrap_err();
+
+        assert!(error.contains("playable video"));
+        fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[test]
+    fn accepts_plausible_unrecognized_binary_video_payloads() {
+        let data_dir = test_temp_dir("duroos-binary-video");
+        let video_path = data_dir.join("lesson.mp4");
+        let mut payload = vec![0_u8; MIN_PLAUSIBLE_MEDIA_BYTES as usize];
+        payload[31] = 0x80;
+        fs::write(&video_path, payload).unwrap();
+
+        validate_downloaded_media_file(&video_path, "video").unwrap();
+        fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[test]
+    fn profiles_h264_aac_mp4_as_webkit_compatible() {
+        let data_dir = test_temp_dir("duroos-compatible-video");
+        let video_path = data_dir.join("lesson.mp4");
+        let mut payload = vec![0_u8; MIN_PLAUSIBLE_MEDIA_BYTES as usize];
+        payload[4..8].copy_from_slice(b"ftyp");
+        payload[128..132].copy_from_slice(b"avc1");
+        payload[256..260].copy_from_slice(b"mp4a");
+        fs::write(&video_path, payload).unwrap();
+
+        let profile = playback_profile_for_media_file(&video_path, "video").unwrap();
+
+        assert_eq!(profile, "webkit-compatible:h264-aac-mp4");
+        fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[test]
+    fn profiles_unknown_binary_video_as_unverified() {
+        let data_dir = test_temp_dir("duroos-unverified-video");
+        let video_path = data_dir.join("lesson.mp4");
+        let mut payload = vec![0_u8; MIN_PLAUSIBLE_MEDIA_BYTES as usize];
+        payload[31] = 0x80;
+        fs::write(&video_path, payload).unwrap();
+
+        let profile = playback_profile_for_media_file(&video_path, "video").unwrap();
+
+        assert_eq!(profile, "webkit-unverified:mp4");
+        fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[test]
+    fn rejects_tiny_unrecognized_binary_video_payloads() {
+        let data_dir = test_temp_dir("duroos-tiny-video");
+        let video_path = data_dir.join("lesson.mp4");
+        fs::write(&video_path, [0_u8, 0x80, 0x01]).unwrap();
+
+        let error = validate_downloaded_media_file(&video_path, "video").unwrap_err();
+
+        assert!(error.contains("playable video"));
+        fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[test]
+    fn rejects_text_html_direct_download_before_recording_media() {
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/lesson.mp4", server.server_addr());
+        let handle = thread::spawn(move || {
+            let request = server.recv().unwrap();
+            let header = Header::from_bytes(&b"Content-Type"[..], &b"text/html"[..]).unwrap();
+            request
+                .respond(Response::from_string("<html>login</html>").with_header(header))
+                .unwrap();
+        });
+        let data_dir = test_temp_dir("duroos-direct-html");
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        let error = download_direct_file(&client, &url, &data_dir, "video").unwrap_err();
+
+        assert!(error.contains("text/html"));
+        assert!(collect_media_files(&data_dir).is_empty());
+        handle.join().unwrap();
+        fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[test]
+    fn existing_completed_media_file_ignores_adaptive_fragments() {
+        let data_dir = test_temp_dir("duroos-fragments");
+        fs::write(
+            data_dir.join("Lecture_10-xGSBvoVScqE.f399.mp4"),
+            b"\0\0\0\x18ftypisom\0\0\0\0",
+        )
+        .unwrap();
+
+        assert!(existing_completed_media_file(&data_dir, "video").is_none());
+        fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[test]
+    fn existing_completed_media_file_prefers_compatible_outputs() {
+        let data_dir = test_temp_dir("duroos-compatible-output");
+        let compatible_path = data_dir.join("lesson-webkit.mp4");
+        let unverified_path = data_dir.join("lesson-original.mp4");
+        let mut compatible_payload = vec![0_u8; MIN_PLAUSIBLE_MEDIA_BYTES as usize];
+        compatible_payload[4..8].copy_from_slice(b"ftyp");
+        compatible_payload[128..132].copy_from_slice(b"avc1");
+        compatible_payload[256..260].copy_from_slice(b"mp4a");
+        fs::write(&compatible_path, compatible_payload).unwrap();
+        thread::sleep(Duration::from_millis(10));
+        let mut unverified_payload = vec![0_u8; MIN_PLAUSIBLE_MEDIA_BYTES as usize];
+        unverified_payload[31] = 0x80;
+        fs::write(&unverified_path, unverified_payload).unwrap();
+
+        let selected = existing_completed_media_file(&data_dir, "video").unwrap();
+
+        assert_eq!(selected, compatible_path);
+        fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[test]
+    fn source_download_plan_retries_invalid_existing_media_records() {
+        let connection = test_connection();
+        let data_dir = test_temp_dir("duroos-invalid-existing");
+        let media_dir = data_dir.join("library/downloads/source-test/lesson-test");
+        fs::create_dir_all(&media_dir).unwrap();
+        fs::write(media_dir.join("lesson.mp4"), b"<html>not video</html>").unwrap();
+
+        connection
+            .execute(
+                "INSERT INTO sources
+                 (id, platform, label, identifier, feed_format, feed_transport, trust_state,
+                  trusted_curator_id, auth_mode, update_schedule, capability_json, enabled,
+                  last_checked_at, last_verified_at)
+                 VALUES ('source-test', 'archive-org', 'Archive Test', 'https://archive.org/details/test',
+                  'json-feed', 'https', 'unsigned', NULL, 'none', 'Manual', ?1, 1, NULL, NULL)",
+                params![serde_json::to_string(&capability(
+                    "supported",
+                    "supported",
+                    "supported",
+                    false,
+                    "none",
+                    "stable",
+                    "Test source"
+                ))
+                .unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO teachers (id, display_name, description, source_links_json)
+                 VALUES ('teacher-test', 'Teacher', NULL, '[]')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO collections (id, title, owner_label, sort_order, lesson_count, source_ids_json)
+                 VALUES ('collection-test', 'Collection', 'Owner', 1, 1, '[\"source-test\"]')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO lessons
+                 (id, title, content_type, teacher_id, collection_id, source_id, source_url,
+                  published_at, description, thumbnail_tone, duration_seconds, media_file_id,
+                  provenance_id)
+                 VALUES ('lesson-test', 'Lesson', 'video', 'teacher-test', 'collection-test',
+                  'source-test', 'https://archive.org/download/test/lesson.mp4', NULL, NULL,
+                  'emerald', NULL, 'media-test', 'prov-test')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO media_files
+                 (id, lesson_id, relative_path, content_hash, size_bytes, codec, import_status,
+                  hash_verification_state)
+                 VALUES ('media-test', 'lesson-test',
+                  'library/downloads/source-test/lesson-test/lesson.mp4',
+                  'sha256:bad', 22, NULL, 'ready', 'not-provided')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO provenance_records
+                 (id, lesson_id, origin_url, permission_note, imported_at, adapter_name, content_hash)
+                 VALUES ('prov-test', 'lesson-test', 'https://archive.org/download/test/lesson.mp4',
+                  'Test', '2026-06-17T00:00:00Z', 'ArchiveOrgMetadataAdapter', NULL)",
+                [],
+            )
+            .unwrap();
+
+        let (lessons, skipped) =
+            source_download_plan(&connection, &data_dir, "source-test").unwrap();
+
+        assert_eq!(skipped, 0);
+        assert_eq!(lessons.len(), 1);
+        assert!(lessons[0].has_invalid_media_record);
+        fs::remove_dir_all(data_dir).ok();
     }
 
     #[test]

@@ -503,14 +503,26 @@ fn mime_type_for_path(path: &Path, content_type: &str) -> &'static str {
 
     match (content_type, extension.as_str()) {
         ("audio", "aac") => "audio/aac",
+        ("audio", "aif") | ("audio", "aiff") => "audio/aiff",
+        ("audio", "amr") => "audio/amr",
         ("audio", "flac") => "audio/flac",
         ("audio", "m4a") => "audio/mp4",
         ("audio", "mp3") => "audio/mpeg",
         ("audio", "ogg") => "audio/ogg",
+        ("audio", "opus") => "audio/opus",
+        ("audio", "wma") => "audio/x-ms-wma",
         ("audio", "wav") => "audio/wav",
+        ("video", "3g2") => "video/3gpp2",
+        ("video", "3gp") => "video/3gpp",
+        ("video", "avi") => "video/x-msvideo",
+        ("video", "flv") => "video/x-flv",
         ("video", "mkv") => "video/x-matroska",
         ("video", "mov") => "video/quicktime",
+        ("video", "m2ts") | ("video", "mts") | ("video", "ts") => "video/mp2t",
+        ("video", "mpg") | ("video", "mpeg") => "video/mpeg",
+        ("video", "vob") => "video/dvd",
         ("video", "webm") => "video/webm",
+        ("video", "wmv") => "video/x-ms-wmv",
         ("video", _) => "video/mp4",
         ("audio", _) => "audio/mpeg",
         _ => "application/octet-stream",
@@ -590,6 +602,14 @@ mod tests {
         assert_eq!(
             mime_type_for_path(Path::new("lesson.mp3"), "audio"),
             "audio/mpeg"
+        );
+        assert_eq!(
+            mime_type_for_path(Path::new("lesson.avi"), "video"),
+            "video/x-msvideo"
+        );
+        assert_eq!(
+            mime_type_for_path(Path::new("lesson.wma"), "audio"),
+            "audio/x-ms-wma"
         );
     }
 }

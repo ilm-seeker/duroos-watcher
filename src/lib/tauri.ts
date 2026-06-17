@@ -9,6 +9,7 @@ import type {
   CreatePublisherProfileRequest,
   ImportSummary,
   IngestSummary,
+  NativePlaybackResult,
   NostrChannelPreview,
   PhoneMediaScope,
   PhoneMediaSession,
@@ -45,6 +46,7 @@ export const getRuntimeDiagnostics = async (): Promise<RuntimeDiagnostics> => {
     return {
       desktopRuntimeAvailable: false,
       ytDlpAvailable: false,
+      nativePlaybackAvailable: false,
       ytDlpCookiesConfigured: false,
       messages: ["Open the desktop app to check local downloader tools."],
     };
@@ -76,6 +78,15 @@ export const resolveMediaFileUrl = async (mediaFileId: string): Promise<string> 
   }
 
   const filePath = await invoke<string>("resolve_media_file_path", { mediaFileId });
+  return convertFileSrc(filePath);
+};
+
+export const resolveMediaThumbnailUrl = async (mediaFileId: string): Promise<string> => {
+  if (!isTauriRuntime()) {
+    throw new Error("Media cover previews require the Tauri desktop runtime.");
+  }
+
+  const filePath = await invoke<string>("resolve_media_thumbnail_path", { mediaFileId });
   return convertFileSrc(filePath);
 };
 
@@ -157,6 +168,16 @@ export const downloadSourceMedia = async (sourceId: string): Promise<DownloadSou
   return invoke<DownloadSourceSummary>("download_source_media", { sourceId });
 };
 
+export const playMediaFileNative = async (
+  mediaFileId: string,
+): Promise<NativePlaybackResult> => {
+  if (!isTauriRuntime()) {
+    throw new Error("Native playback requires the Tauri desktop runtime.");
+  }
+
+  return invoke<NativePlaybackResult>("play_media_file_native", { mediaFileId });
+};
+
 export const startPhoneMediaSession = async (
   scope?: PhoneMediaScope,
 ): Promise<PhoneMediaSession> => {
@@ -216,12 +237,28 @@ export const chooseLocalMediaPaths = async (): Promise<string[]> => {
           "mov",
           "mkv",
           "webm",
+          "avi",
+          "wmv",
+          "flv",
+          "mpg",
+          "mpeg",
+          "ts",
+          "m2ts",
+          "mts",
+          "vob",
+          "3gp",
+          "3g2",
           "mp3",
           "m4a",
           "aac",
           "wav",
           "flac",
           "ogg",
+          "opus",
+          "wma",
+          "aiff",
+          "aif",
+          "amr",
           "pdf",
         ],
       },

@@ -53,11 +53,13 @@ import {
   importLocalFiles,
   isTauriRuntime,
   listPublisherProfiles,
+  playMediaFileNative,
   previewNostrChannel,
   publishTeacherChannel,
   refreshSource,
   removeTrustedCurator,
   resolveMediaFileUrl,
+  resolveMediaThumbnailUrl,
   startPhoneMediaSession,
   stopPhoneMediaSession,
   unlockPublisherProfile,
@@ -104,6 +106,7 @@ type PhoneAccessBusyAction = "start" | "stop" | null;
 const defaultRuntimeDiagnostics: RuntimeDiagnostics = {
   desktopRuntimeAvailable: isTauriRuntime(),
   ytDlpAvailable: false,
+  nativePlaybackAvailable: false,
   ytDlpCookiesConfigured: false,
   messages: ["Runtime diagnostics have not been checked yet."],
 };
@@ -249,8 +252,24 @@ const availabilityLabel = (lesson: Lesson, mediaFile?: MediaFile): string => {
     return "Needs file";
   }
 
+  if (isPlaybackUnverified(mediaFile)) {
+    return "Codec unverified";
+  }
+
+  if (isPlaybackCompatible(mediaFile)) {
+    return mediaFile.hashVerificationState === "matched"
+      ? "Verified playable file"
+      : "Playable download";
+  }
+
   return mediaFile.hashVerificationState === "matched" ? "Verified local file" : "Downloaded";
 };
+
+const isPlaybackCompatible = (mediaFile?: MediaFile): boolean =>
+  mediaFile?.codec?.startsWith("webkit-compatible:") ?? false;
+
+const isPlaybackUnverified = (mediaFile?: MediaFile): boolean =>
+  mediaFile?.codec?.startsWith("webkit-unverified:") ?? false;
 
 const availabilityTone = (
   lesson: Lesson,
@@ -258,6 +277,10 @@ const availabilityTone = (
 ): "neutral" | "positive" | "warning" => {
   if (!isFileBackedContentType(lesson.contentType)) {
     return "neutral";
+  }
+
+  if (isPlaybackUnverified(mediaFile)) {
+    return "warning";
   }
 
   return mediaFile ? "positive" : "warning";
@@ -272,6 +295,7 @@ const App = () => {
   const [isImportOpen, setIsImportOpen] = useState(false);
   const [systemNotice, setSystemNotice] = useState("");
   const [busySourceAction, setBusySourceAction] = useState<BusySourceAction>(null);
+  const [busyNativeMediaId, setBusyNativeMediaId] = useState<string | null>(null);
   const [selectedMediaUrl, setSelectedMediaUrl] = useState("");
   const [selectedMediaError, setSelectedMediaError] = useState("");
   const [runtimeDiagnostics, setRuntimeDiagnostics] = useState<RuntimeDiagnostics>(
@@ -283,6 +307,7 @@ const App = () => {
     useState<PhoneAccessBusyAction>(null);
   const [phoneAccessNotice, setPhoneAccessNotice] = useState("");
   const [publisherProfiles, setPublisherProfiles] = useState<PublisherProfile[]>([]);
+  const [mediaThumbnailUrls, setMediaThumbnailUrls] = useState<Record<string, string>>({});
 
   useEffect(() => {
     let isMounted = true;
@@ -321,6 +346,7 @@ const App = () => {
           setRuntimeDiagnostics({
             desktopRuntimeAvailable: isTauriRuntime(),
             ytDlpAvailable: false,
+            nativePlaybackAvailable: false,
             ytDlpCookiesConfigured: false,
             messages: [message],
           });
@@ -392,6 +418,44 @@ const App = () => {
     () => new Map(snapshot.mediaFiles.map((file) => [file.lessonId, file])),
     [snapshot.mediaFiles],
   );
+
+  useEffect(() => {
+    let isMounted = true;
+    const mediaFilesWithThumbnails = snapshot.mediaFiles.filter(
+      (mediaFile) => mediaFile.thumbnailRelativePath,
+    );
+
+    if (!mediaFilesWithThumbnails.length) {
+      setMediaThumbnailUrls({});
+      return () => {
+        isMounted = false;
+      };
+    }
+
+    Promise.all(
+      mediaFilesWithThumbnails.map(async (mediaFile) => {
+        try {
+          const thumbnailUrl = await resolveMediaThumbnailUrl(mediaFile.id);
+          return [mediaFile.id, thumbnailUrl] as const;
+        } catch {
+          return null;
+        }
+      }),
+    ).then((entries) => {
+      if (!isMounted) {
+        return;
+      }
+
+      setMediaThumbnailUrls(
+        Object.fromEntries(entries.filter((entry): entry is readonly [string, string] => Boolean(entry))),
+      );
+    });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [snapshot.mediaFiles]);
+
   const provenanceById = useMemo(
     () =>
       new Map(
@@ -556,16 +620,15 @@ const App = () => {
   const handleDownloadSource = async (source: Source) => {
     const missingCount = getSourceStats(source.id, snapshot.lessons, snapshot.jobs).missingFileCount;
 
-    if (missingCount === 0) {
-      setSystemNotice(`No missing video, audio, or PDF files for ${source.label}.`);
-      return;
-    }
-
     let refreshTimer: number | undefined;
 
     try {
       setBusySourceAction({ sourceId: source.id, action: "download" });
-      setSystemNotice(`Downloading ${missingCount} file-backed item(s) from ${source.label}...`);
+      setSystemNotice(
+        missingCount > 0
+          ? `Downloading ${missingCount} missing file-backed item(s) from ${source.label}...`
+          : `Checking existing downloads from ${source.label}...`,
+      );
       refreshTimer = window.setInterval(() => {
         void refreshSnapshot();
       }, 4000);
@@ -580,6 +643,19 @@ const App = () => {
         window.clearInterval(refreshTimer);
       }
       setBusySourceAction(null);
+    }
+  };
+
+  const handleNativePlayback = async (mediaFile: MediaFile) => {
+    try {
+      setBusyNativeMediaId(mediaFile.id);
+      const result = await playMediaFileNative(mediaFile.id);
+      setSystemNotice(result.messages.join(" "));
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSystemNotice(message);
+    } finally {
+      setBusyNativeMediaId(null);
     }
   };
 
@@ -699,6 +775,7 @@ const App = () => {
             collectionById={collectionById}
             sourceById={sourceById}
             mediaByLessonId={mediaByLessonId}
+            mediaThumbnailUrls={mediaThumbnailUrls}
             provenanceById={provenanceById}
             watchByLessonId={watchByLessonId}
             setSelectedLessonId={setSelectedLessonId}
@@ -710,7 +787,10 @@ const App = () => {
             phoneAccessBusyAction={phoneAccessBusyAction}
             phoneAccessNotice={phoneAccessNotice}
             busySourceAction={busySourceAction}
+            busyNativeMediaId={busyNativeMediaId}
             onDownloadSource={handleDownloadSource}
+            onNativePlayback={handleNativePlayback}
+            onMediaPlaybackError={setSelectedMediaError}
             onStartPhoneAccess={handleStartPhoneAccess}
             onStopPhoneAccess={handleStopPhoneAccess}
             onCopyPhoneLink={handleCopyPhoneLink}
@@ -947,6 +1027,7 @@ interface DashboardProps {
   collectionById: Map<string, Collection>;
   sourceById: Map<string, Source>;
   mediaByLessonId: Map<string, MediaFile>;
+  mediaThumbnailUrls: Record<string, string>;
   provenanceById: Map<string, ProvenanceRecord>;
   watchByLessonId: Map<string, WatchState>;
   setSelectedLessonId: (lessonId: string) => void;
@@ -958,7 +1039,10 @@ interface DashboardProps {
   phoneAccessBusyAction: PhoneAccessBusyAction;
   phoneAccessNotice: string;
   busySourceAction: BusySourceAction;
+  busyNativeMediaId: string | null;
   onDownloadSource: (source: Source) => void;
+  onNativePlayback: (mediaFile: MediaFile) => void;
+  onMediaPlaybackError: (message: string) => void;
   onStartPhoneAccess: () => void;
   onStopPhoneAccess: () => void;
   onCopyPhoneLink: () => void;
@@ -979,6 +1063,7 @@ const Dashboard = ({
   collectionById,
   sourceById,
   mediaByLessonId,
+  mediaThumbnailUrls,
   provenanceById,
   watchByLessonId,
   setSelectedLessonId,
@@ -990,7 +1075,10 @@ const Dashboard = ({
   phoneAccessBusyAction,
   phoneAccessNotice,
   busySourceAction,
+  busyNativeMediaId,
   onDownloadSource,
+  onNativePlayback,
+  onMediaPlaybackError,
   onStartPhoneAccess,
   onStopPhoneAccess,
   onCopyPhoneLink,
@@ -1004,6 +1092,7 @@ const Dashboard = ({
           collection={collectionById.get(selectedLesson.collectionId)}
           source={sourceById.get(selectedLesson.sourceId)}
           mediaFile={selectedMediaFile}
+          thumbnailUrl={selectedMediaFile ? mediaThumbnailUrls[selectedMediaFile.id] : undefined}
           mediaUrl={selectedMediaUrl}
           mediaError={selectedMediaError}
           provenance={provenanceById.get(selectedLesson.provenanceId)}
@@ -1012,7 +1101,11 @@ const Dashboard = ({
             watchByLessonId.get(selectedLesson.id),
           )}
           busySourceAction={busySourceAction}
+          runtimeDiagnostics={runtimeDiagnostics}
+          busyNativeMediaId={busyNativeMediaId}
           onDownloadSource={onDownloadSource}
+          onNativePlayback={onNativePlayback}
+          onMediaPlaybackError={onMediaPlaybackError}
         />
       ) : (
         isSearchActive ? (
@@ -1025,18 +1118,22 @@ const Dashboard = ({
       <SectionHeader title="Continue" meta={`${continueLessons.length} active items`} />
       <div className="lesson-row">
         {continueLessons.length ? (
-          continueLessons.map((lesson) => (
-            <LessonCard
-              key={lesson.id}
-              lesson={lesson}
-              teacher={teacherById.get(lesson.teacherId)}
-              collection={collectionById.get(lesson.collectionId)}
-              source={sourceById.get(lesson.sourceId)}
-              mediaFile={mediaByLessonId.get(lesson.id)}
-              progress={getLessonProgress(lesson, watchByLessonId.get(lesson.id))}
-              onSelect={() => setSelectedLessonId(lesson.id)}
-            />
-          ))
+          continueLessons.map((lesson) => {
+            const mediaFile = mediaByLessonId.get(lesson.id);
+            return (
+              <LessonCard
+                key={lesson.id}
+                lesson={lesson}
+                teacher={teacherById.get(lesson.teacherId)}
+                collection={collectionById.get(lesson.collectionId)}
+                source={sourceById.get(lesson.sourceId)}
+                mediaFile={mediaFile}
+                thumbnailUrl={mediaFile ? mediaThumbnailUrls[mediaFile.id] : undefined}
+                progress={getLessonProgress(lesson, watchByLessonId.get(lesson.id))}
+                onSelect={() => setSelectedLessonId(lesson.id)}
+              />
+            );
+          })
         ) : (
           <EmptyState
             icon={Play}
@@ -1056,18 +1153,22 @@ const Dashboard = ({
       />
       <div className="lesson-grid">
         {newLessons.length ? (
-          newLessons.map((lesson) => (
-            <LessonCard
-              key={lesson.id}
-              lesson={lesson}
-              teacher={teacherById.get(lesson.teacherId)}
-              collection={collectionById.get(lesson.collectionId)}
-              source={sourceById.get(lesson.sourceId)}
-              mediaFile={mediaByLessonId.get(lesson.id)}
-              progress={getLessonProgress(lesson, watchByLessonId.get(lesson.id))}
-              onSelect={() => setSelectedLessonId(lesson.id)}
-            />
-          ))
+          newLessons.map((lesson) => {
+            const mediaFile = mediaByLessonId.get(lesson.id);
+            return (
+              <LessonCard
+                key={lesson.id}
+                lesson={lesson}
+                teacher={teacherById.get(lesson.teacherId)}
+                collection={collectionById.get(lesson.collectionId)}
+                source={sourceById.get(lesson.sourceId)}
+                mediaFile={mediaFile}
+                thumbnailUrl={mediaFile ? mediaThumbnailUrls[mediaFile.id] : undefined}
+                progress={getLessonProgress(lesson, watchByLessonId.get(lesson.id))}
+                onSelect={() => setSelectedLessonId(lesson.id)}
+              />
+            );
+          })
         ) : (
           <EmptyState
             icon={Rss}
@@ -1106,17 +1207,21 @@ const Dashboard = ({
       <SectionHeader title="Library Search" meta={`${filteredLessons.length} items`} />
       <div className="library-list">
         {filteredLessons.length ? (
-          filteredLessons.map((lesson) => (
-            <LessonRow
-              key={lesson.id}
-              lesson={lesson}
-              teacher={teacherById.get(lesson.teacherId)}
-              collection={collectionById.get(lesson.collectionId)}
-              source={sourceById.get(lesson.sourceId)}
-              mediaFile={mediaByLessonId.get(lesson.id)}
-              onSelect={() => setSelectedLessonId(lesson.id)}
-            />
-          ))
+          filteredLessons.map((lesson) => {
+            const mediaFile = mediaByLessonId.get(lesson.id);
+            return (
+              <LessonRow
+                key={lesson.id}
+                lesson={lesson}
+                teacher={teacherById.get(lesson.teacherId)}
+                collection={collectionById.get(lesson.collectionId)}
+                source={sourceById.get(lesson.sourceId)}
+                mediaFile={mediaFile}
+                thumbnailUrl={mediaFile ? mediaThumbnailUrls[mediaFile.id] : undefined}
+                onSelect={() => setSelectedLessonId(lesson.id)}
+              />
+            );
+          })
         ) : (
           <EmptyState
             icon={Search}
@@ -1167,6 +1272,7 @@ interface LessonCardProps {
   collection?: Collection;
   source?: Source;
   mediaFile?: MediaFile;
+  thumbnailUrl?: string;
   progress: number;
   onSelect: () => void;
 }
@@ -1177,6 +1283,7 @@ const LessonCard = ({
   collection,
   source,
   mediaFile,
+  thumbnailUrl,
   progress,
   onSelect,
 }: LessonCardProps) => (
@@ -1185,6 +1292,7 @@ const LessonCard = ({
       tone={lesson.thumbnailTone}
       contentType={lesson.contentType}
       badge={lessonBadge(lesson)}
+      thumbnailUrl={thumbnailUrl}
     />
     <div className="lesson-card-body">
       <h3>{lesson.title}</h3>
@@ -1209,18 +1317,27 @@ const LessonThumb = ({
   tone,
   contentType,
   badge,
+  thumbnailUrl,
 }: {
   tone: Lesson["thumbnailTone"];
   contentType: Lesson["contentType"];
   badge: string;
+  thumbnailUrl?: string;
 }) => (
-  <div className={`lesson-thumb thumb-${tone}`} aria-hidden="true">
-    <div className="thumb-book">
-      {(() => {
-        const Icon = contentTypeIcon(contentType);
-        return <Icon size={28} />;
-      })()}
-    </div>
+  <div
+    className={thumbnailUrl ? `lesson-thumb thumb-${tone} lesson-thumb-has-image` : `lesson-thumb thumb-${tone}`}
+    aria-hidden="true"
+  >
+    {thumbnailUrl ? (
+      <img src={thumbnailUrl} alt="" loading="lazy" />
+    ) : (
+      <div className="thumb-book">
+        {(() => {
+          const Icon = contentTypeIcon(contentType);
+          return <Icon size={28} />;
+        })()}
+      </div>
+    )}
     <span>{badge}</span>
   </div>
 );
@@ -1239,6 +1356,7 @@ interface LessonRowProps {
   collection?: Collection;
   source?: Source;
   mediaFile?: MediaFile;
+  thumbnailUrl?: string;
   onSelect: () => void;
 }
 
@@ -1248,6 +1366,7 @@ const LessonRow = ({
   collection,
   source,
   mediaFile,
+  thumbnailUrl,
   onSelect,
 }: LessonRowProps) => (
   <button type="button" className="lesson-row-item" onClick={onSelect}>
@@ -1255,6 +1374,7 @@ const LessonRow = ({
       tone={lesson.thumbnailTone}
       contentType={lesson.contentType}
       badge={lessonBadge(lesson)}
+      thumbnailUrl={thumbnailUrl}
     />
     <div className="lesson-row-copy">
       <h3>{lesson.title}</h3>
@@ -1278,12 +1398,17 @@ interface PlayerPanelProps {
   collection?: Collection;
   source?: Source;
   mediaFile?: MediaFile;
+  thumbnailUrl?: string;
   mediaUrl: string;
   mediaError: string;
   provenance?: ProvenanceRecord;
   progress: number;
   busySourceAction: BusySourceAction;
+  runtimeDiagnostics: RuntimeDiagnostics;
+  busyNativeMediaId: string | null;
   onDownloadSource: (source: Source) => void;
+  onNativePlayback: (mediaFile: MediaFile) => void;
+  onMediaPlaybackError: (message: string) => void;
 }
 
 const PlayerPanel = ({
@@ -1292,28 +1417,41 @@ const PlayerPanel = ({
   collection,
   source,
   mediaFile,
+  thumbnailUrl,
   mediaUrl,
   mediaError,
   provenance,
   progress,
   busySourceAction,
+  runtimeDiagnostics,
+  busyNativeMediaId,
   onDownloadSource,
+  onNativePlayback,
+  onMediaPlaybackError,
 }: PlayerPanelProps) => {
-  const needsMediaFile = isFileBackedContentType(lesson.contentType) && !mediaFile;
+  const needsMediaFile =
+    isFileBackedContentType(lesson.contentType) && (!mediaFile || Boolean(mediaError));
   const isDownloading =
     Boolean(source) &&
     busySourceAction?.sourceId === source?.id &&
     busySourceAction?.action === "download";
   const downloadBlocked = source?.capability.download === "blocked";
   const canDownloadMedia = Boolean(source) && !downloadBlocked;
+  const canUseNativePlayback =
+    Boolean(mediaFile) &&
+    (lesson.contentType === "video" || lesson.contentType === "audio") &&
+    runtimeDiagnostics.nativePlaybackAvailable;
+  const isOpeningNativePlayer = mediaFile ? busyNativeMediaId === mediaFile.id : false;
 
   return (
     <section className="player-panel" aria-label="Selected lesson">
       <PlayerSurface
         lesson={lesson}
         mediaFile={mediaFile}
+        thumbnailUrl={thumbnailUrl}
         mediaUrl={mediaUrl}
         mediaError={mediaError}
+        onMediaPlaybackError={onMediaPlaybackError}
       />
       <div className="player-copy">
         <h1>{lesson.title}</h1>
@@ -1325,6 +1463,29 @@ const PlayerPanel = ({
           <StatusChip label={availabilityLabel(lesson, mediaFile)} tone={availabilityTone(lesson, mediaFile)} />
         </div>
       </div>
+      {mediaFile && (lesson.contentType === "video" || lesson.contentType === "audio") ? (
+        <div className="player-actions" aria-label="Native playback actions">
+          <button
+            type="button"
+            className="secondary-action"
+            onClick={() => onNativePlayback(mediaFile)}
+            disabled={!canUseNativePlayback || isOpeningNativePlayer}
+            title={
+              runtimeDiagnostics.nativePlaybackAvailable
+                ? `Open in ${runtimeDiagnostics.nativePlaybackPlayer ?? "native player"}.`
+                : "Native playback needs VLC, mpv, or ffplay available locally."
+            }
+          >
+            <Play size={15} />
+            <span>{isOpeningNativePlayer ? "Opening" : "Open Native Player"}</span>
+          </button>
+          <span>
+            {runtimeDiagnostics.nativePlaybackAvailable
+              ? `Uses ${runtimeDiagnostics.nativePlaybackPlayer ?? "a native player"} for broad codec playback.`
+              : "Native player unavailable on this runtime."}
+          </span>
+        </div>
+      ) : null}
       {needsMediaFile ? (
         <div className="player-actions" aria-label="Media actions">
           <button
@@ -1339,14 +1500,14 @@ const PlayerPanel = ({
             title={
               downloadBlocked
                 ? "This source type does not currently support downloads."
-                : "Download missing media files into the local library."
+                : "Download missing or invalid media files into the local library."
             }
           >
             <Download size={15} />
             <span>{isDownloading ? "Downloading" : "Download Media"}</span>
           </button>
           <span>
-            Download missing media from this source into the local library before playback.
+            Download missing or invalid media from this source into the local library before playback.
           </span>
         </div>
       ) : null}
@@ -1368,18 +1529,35 @@ const PlayerPanel = ({
 const PlayerSurface = ({
   lesson,
   mediaFile,
+  thumbnailUrl,
   mediaUrl,
   mediaError,
+  onMediaPlaybackError,
 }: {
   lesson: Lesson;
   mediaFile?: MediaFile;
+  thumbnailUrl?: string;
   mediaUrl: string;
   mediaError: string;
+  onMediaPlaybackError: (message: string) => void;
 }) => {
+  const handlePlaybackError = () => {
+    onMediaPlaybackError(
+      "Downloaded file is structurally valid, but the desktop WebView cannot decode this codec. Use a WebKit-compatible MP4 video with H.264/AAC, or a supported audio file.",
+    );
+  };
+
   if (mediaUrl && lesson.contentType === "video") {
     return (
       <div className="player-frame player-frame-live">
-        <video className="media-player" controls preload="metadata" src={mediaUrl} />
+        <video
+          className="media-player"
+          controls
+          preload="metadata"
+          src={mediaUrl}
+          poster={thumbnailUrl}
+          onError={handlePlaybackError}
+        />
       </div>
     );
   }
@@ -1390,7 +1568,13 @@ const PlayerSurface = ({
         <div className="audio-player-icon" aria-hidden="true">
           <Volume2 size={34} />
         </div>
-        <audio className="audio-player" controls preload="metadata" src={mediaUrl} />
+        <audio
+          className="audio-player"
+          controls
+          preload="metadata"
+          src={mediaUrl}
+          onError={handlePlaybackError}
+        />
       </div>
     );
   }
@@ -1404,7 +1588,14 @@ const PlayerSurface = ({
   }
 
   return (
-    <div className={`player-frame thumb-${lesson.thumbnailTone}`}>
+    <div
+      className={
+        thumbnailUrl
+          ? `player-frame thumb-${lesson.thumbnailTone} player-frame-has-image`
+          : `player-frame thumb-${lesson.thumbnailTone}`
+      }
+    >
+      {thumbnailUrl ? <img className="player-cover-image" src={thumbnailUrl} alt="" /> : null}
       <div className="play-button" aria-hidden="true">
         {(() => {
           const Icon = mediaFile && lesson.contentType === "video" ? Play : contentTypeIcon(lesson.contentType);
