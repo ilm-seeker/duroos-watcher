@@ -295,3 +295,138 @@ pub struct TrustCuratorSummary {
     pub sources_updated: i64,
     pub messages: Vec<String>,
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct NostrRelayConfig {
+    pub url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BlossomServerConfig {
+    pub url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMirrorConfig {
+    pub service: String,
+    pub url: String,
+    pub gateway_url: Option<String>,
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PublisherProfile {
+    pub id: String,
+    pub display_name: String,
+    pub curator_public_key: String,
+    pub nostr_pubkey: String,
+    pub relays: Vec<NostrRelayConfig>,
+    pub blossom_servers: Vec<BlossomServerConfig>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub vault_configured: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatePublisherProfileRequest {
+    pub display_name: String,
+    pub passphrase: String,
+    pub relays: Vec<NostrRelayConfig>,
+    pub blossom_servers: Vec<BlossomServerConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishedLessonDraft {
+    pub title: String,
+    pub content_type: String,
+    pub path: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishTeacherChannelRequest {
+    pub profile_id: String,
+    pub passphrase: String,
+    pub channel_title: String,
+    pub channel_description: Option<String>,
+    pub relays: Vec<NostrRelayConfig>,
+    pub blossom_servers: Vec<BlossomServerConfig>,
+    #[serde(default)]
+    pub archive_mirrors: Vec<ArchiveMirrorConfig>,
+    pub lessons: Vec<PublishedLessonDraft>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BlossomUploadResult {
+    pub server_url: String,
+    pub hash: String,
+    pub url: Option<String>,
+    pub uploaded: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct NostrRelayPublishResult {
+    pub relay_url: String,
+    pub accepted: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveMirrorResult {
+    pub service: String,
+    pub endpoint_url: String,
+    pub url: Option<String>,
+    pub cid: Option<String>,
+    pub archived: bool,
+    pub verified: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelPublishResult {
+    pub channel_id: String,
+    pub naddr: String,
+    pub manifest_json: String,
+    pub manifest_sha256: String,
+    pub manifest_url: String,
+    pub nostr_event_id: String,
+    pub blossom_results: Vec<BlossomUploadResult>,
+    pub archive_results: Vec<ArchiveMirrorResult>,
+    pub relay_results: Vec<NostrRelayPublishResult>,
+    pub messages: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct NostrChannelPreview {
+    pub naddr: String,
+    pub manifest_url: String,
+    pub manifest_sha256: String,
+    pub title: String,
+    pub curator_display_name: String,
+    pub curator_public_key: Option<String>,
+    pub trust_state: String,
+    pub published_at: Option<String>,
+    pub lesson_count: i64,
+    pub media_count: i64,
+    pub relay_count: i64,
+    pub blossom_server_count: i64,
+    pub archive_mirror_count: i64,
+    pub relays: Vec<String>,
+    pub blossom_servers: Vec<String>,
+    pub archive_mirrors: Vec<String>,
+    pub warnings: Vec<String>,
+    pub messages: Vec<String>,
+}

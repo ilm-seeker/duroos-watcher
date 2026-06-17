@@ -294,3 +294,113 @@ export interface PhoneMediaSession {
   items: PhoneMediaShareItem[];
   messages: string[];
 }
+
+export interface NostrRelayConfig {
+  url: string;
+}
+
+export interface BlossomServerConfig {
+  url: string;
+}
+
+export interface ArchiveMirrorConfig {
+  service: string;
+  url: string;
+  gatewayUrl?: string;
+  label?: string;
+}
+
+export interface PublisherProfile {
+  id: string;
+  displayName: string;
+  curatorPublicKey: string;
+  nostrPubkey: string;
+  relays: NostrRelayConfig[];
+  blossomServers: BlossomServerConfig[];
+  createdAt: string;
+  updatedAt: string;
+  vaultConfigured: boolean;
+}
+
+export interface CreatePublisherProfileRequest {
+  displayName: string;
+  passphrase: string;
+  relays: NostrRelayConfig[];
+  blossomServers: BlossomServerConfig[];
+}
+
+export interface PublishedLessonDraft {
+  title: string;
+  contentType: "video" | "audio" | "pdf";
+  path: string;
+  description?: string;
+}
+
+export interface PublishTeacherChannelRequest {
+  profileId: string;
+  passphrase: string;
+  channelTitle: string;
+  channelDescription?: string;
+  relays: NostrRelayConfig[];
+  blossomServers: BlossomServerConfig[];
+  archiveMirrors?: ArchiveMirrorConfig[];
+  lessons: PublishedLessonDraft[];
+}
+
+export interface BlossomUploadResult {
+  serverUrl: string;
+  hash: string;
+  url?: string;
+  uploaded: boolean;
+  message: string;
+}
+
+export interface NostrRelayPublishResult {
+  relayUrl: string;
+  accepted: boolean;
+  message: string;
+}
+
+export interface ArchiveMirrorResult {
+  service: string;
+  endpointUrl: string;
+  url?: string;
+  cid?: string;
+  archived: boolean;
+  verified: boolean;
+  message: string;
+}
+
+export interface ChannelPublishResult {
+  channelId: string;
+  naddr: string;
+  manifestJson: string;
+  manifestSha256: string;
+  manifestUrl: string;
+  nostrEventId: string;
+  blossomResults: BlossomUploadResult[];
+  archiveResults: ArchiveMirrorResult[];
+  relayResults: NostrRelayPublishResult[];
+  messages: string[];
+}
+
+export interface NostrChannelPreview {
+  naddr: string;
+  manifestUrl: string;
+  manifestSha256: string;
+  title: string;
+  curatorDisplayName: string;
+  curatorPublicKey?: string;
+  trustState: TrustState;
+  publishedAt?: string;
+  lessonCount: number;
+  mediaCount: number;
+  relayCount: number;
+  blossomServerCount: number;
+  archiveMirrorCount: number;
+  relays: string[];
+  blossomServers: string[];
+  archiveMirrors: string[];
+  warnings: string[];
+  messages: string[];
+}

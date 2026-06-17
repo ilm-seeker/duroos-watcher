@@ -36,6 +36,7 @@ import {
   Volume2,
   Wifi,
   WifiOff,
+  X,
 } from "lucide-react";
 import QRCode from "qrcode";
 import { useEffect, useMemo, useState } from "react";
@@ -43,6 +44,7 @@ import {
   addTrustedCurator,
   chooseLocalMediaPaths,
   clearSourceContent,
+  createPublisherProfile,
   downloadSourceMedia,
   getPhoneMediaSession,
   getAppSnapshot,
@@ -50,15 +52,21 @@ import {
   ingestSourceUrl,
   importLocalFiles,
   isTauriRuntime,
+  listPublisherProfiles,
+  previewNostrChannel,
+  publishTeacherChannel,
+  refreshSource,
   removeTrustedCurator,
   resolveMediaFileUrl,
   startPhoneMediaSession,
   stopPhoneMediaSession,
+  unlockPublisherProfile,
   validateCollectionManifest,
 } from "./lib/tauri";
 import type { ManifestValidationReport } from "./domain/collectionManifest";
 import type {
   AppSnapshot,
+  ArchiveMirrorConfig,
   CapabilityLevel,
   Collection,
   ContentType,
@@ -66,7 +74,10 @@ import type {
   Lesson,
   LiveSession,
   MediaFile,
+  NostrChannelPreview,
   PhoneMediaSession,
+  PublishedLessonDraft,
+  PublisherProfile,
   ProvenanceRecord,
   RuntimeDiagnostics,
   Source,
@@ -83,6 +94,7 @@ import {
   isFileBackedContentType,
   splitSourceRows,
 } from "./domain/sourceManagement";
+import { buildLibraryLessonView } from "./domain/libraryView";
 import { seedSnapshot } from "./data/seed";
 
 type ViewMode = "library" | "relays" | "sources" | "queue";
@@ -189,6 +201,11 @@ const trustTone = (trustState: TrustState): "neutral" | "positive" | "warning" |
   }
 };
 
+const isNostrChannelRef = (value: string): boolean => {
+  const trimmed = value.trim();
+  return trimmed.startsWith("naddr1") || trimmed.startsWith("nostr:naddr1");
+};
+
 const getLessonProgress = (lesson: Lesson, watchState?: WatchState): number => {
   if (!lesson.durationSeconds || !watchState) {
     return 0;
@@ -265,6 +282,7 @@ const App = () => {
   const [phoneAccessBusyAction, setPhoneAccessBusyAction] =
     useState<PhoneAccessBusyAction>(null);
   const [phoneAccessNotice, setPhoneAccessNotice] = useState("");
+  const [publisherProfiles, setPublisherProfiles] = useState<PublisherProfile[]>([]);
 
   useEffect(() => {
     let isMounted = true;
@@ -334,6 +352,19 @@ const App = () => {
     };
   }, []);
 
+  const refreshPublisherProfiles = async () => {
+    try {
+      setPublisherProfiles(await listPublisherProfiles());
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSystemNotice(message);
+    }
+  };
+
+  useEffect(() => {
+    void refreshPublisherProfiles();
+  }, []);
+
   const refreshSnapshot = async (fallbackNotice?: string) => {
     try {
       const nextSnapshot = await getAppSnapshot();
@@ -373,33 +404,35 @@ const App = () => {
     [snapshot.watchState],
   );
 
-  const filteredLessons = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
-
-    if (!normalizedQuery) {
-      return snapshot.lessons;
-    }
-
-    return snapshot.lessons.filter((lesson) => {
-      const teacher = teacherById.get(lesson.teacherId);
-      const collection = collectionById.get(lesson.collectionId);
-      const source = sourceById.get(lesson.sourceId);
-
-      return [
-        lesson.title,
-        lesson.description,
-        lesson.sourceUrl,
-        teacher?.displayName,
-        collection?.title,
-        source?.label,
-      ].some((value) => value?.toLowerCase().includes(normalizedQuery));
-    });
-  }, [collectionById, query, snapshot.lessons, sourceById, teacherById]);
-
-  const selectedLesson =
-    filteredLessons.find((lesson) => lesson.id === selectedLessonId) ??
-    snapshot.lessons.find((lesson) => lesson.id === selectedLessonId) ??
-    snapshot.lessons[0];
+  const {
+    isSearchActive,
+    filteredLessons,
+    selectedLesson,
+    continueLessons,
+    newLessons,
+  } = useMemo(
+    () =>
+      buildLibraryLessonView({
+        query,
+        selectedLessonId,
+        lessons: snapshot.lessons,
+        teachers: snapshot.teachers,
+        collections: snapshot.collections,
+        sources: snapshot.sources,
+        mediaFiles: snapshot.mediaFiles,
+        watchState: snapshot.watchState,
+      }),
+    [
+      query,
+      selectedLessonId,
+      snapshot.collections,
+      snapshot.lessons,
+      snapshot.mediaFiles,
+      snapshot.sources,
+      snapshot.teachers,
+      snapshot.watchState,
+    ],
+  );
   const selectedMediaFile = selectedLesson ? mediaByLessonId.get(selectedLesson.id) : undefined;
 
   useEffect(() => {
@@ -433,18 +466,6 @@ const App = () => {
       isMounted = false;
     };
   }, [selectedLesson, selectedMediaFile]);
-
-  const continueLessons = snapshot.lessons
-    .filter((lesson) => {
-      const progress = watchByLessonId.get(lesson.id);
-      return progress && !progress.completed;
-    })
-    .slice(0, 4);
-
-  const newLessons = snapshot.lessons
-    .filter((lesson) => !mediaByLessonId.has(lesson.id))
-    .concat(snapshot.lessons.filter((lesson) => mediaByLessonId.has(lesson.id)).slice(0, 2))
-    .slice(0, 4);
 
   const phoneEligibleMediaCount = snapshot.lessons.filter((lesson) => {
     const mediaFile = mediaByLessonId.get(lesson.id);
@@ -618,10 +639,10 @@ const App = () => {
       const summaries = [];
 
       for (const source of refreshableSources) {
-        const result = await ingestSourceUrl(source.identifier);
-        summaries.push(
-          `${source.label}: ${result.imported} added, ${result.skipped} duplicate(s), ${result.failed} failed.`,
-        );
+        const result = await refreshSource(source.id);
+        const message = result.messages.join(" ");
+        const counts = `${result.imported} added, ${result.skipped} skipped, ${result.failed} failed.`;
+        summaries.push(`${source.label}: ${counts}${message ? ` ${message}` : ""}`);
       }
 
       const notice = summaries.join(" ");
@@ -668,6 +689,8 @@ const App = () => {
             filteredLessons={filteredLessons}
             continueLessons={continueLessons}
             newLessons={newLessons}
+            isSearchActive={isSearchActive}
+            query={query}
             selectedLesson={selectedLesson}
             selectedMediaFile={selectedMediaFile}
             selectedMediaUrl={selectedMediaUrl}
@@ -680,6 +703,7 @@ const App = () => {
             watchByLessonId={watchByLessonId}
             setSelectedLessonId={setSelectedLessonId}
             onOpenImport={() => setIsImportOpen(true)}
+            onClearSearch={() => setQuery("")}
             runtimeDiagnostics={runtimeDiagnostics}
             phoneSession={phoneSession}
             phoneEligibleMediaCount={phoneEligibleMediaCount}
@@ -698,6 +722,9 @@ const App = () => {
             relays={snapshot.teacherRelays}
             liveSessions={snapshot.liveSessions}
             teachers={teacherById}
+            publisherProfiles={publisherProfiles}
+            onPublisherProfilesChanged={refreshPublisherProfiles}
+            onPublisherResult={setSystemNotice}
           />
         ) : null}
 
@@ -884,8 +911,7 @@ const TopBar = ({
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search videos, audio, PDFs, posts, teachers, sources"
-            aria-label="Search library"
+            aria-label="Search library by title, teacher, source, or URL"
           />
         </div>
       </div>
@@ -911,6 +937,8 @@ interface DashboardProps {
   filteredLessons: Lesson[];
   continueLessons: Lesson[];
   newLessons: Lesson[];
+  isSearchActive: boolean;
+  query: string;
   selectedLesson?: Lesson;
   selectedMediaFile?: MediaFile;
   selectedMediaUrl: string;
@@ -923,6 +951,7 @@ interface DashboardProps {
   watchByLessonId: Map<string, WatchState>;
   setSelectedLessonId: (lessonId: string) => void;
   onOpenImport: () => void;
+  onClearSearch: () => void;
   runtimeDiagnostics: RuntimeDiagnostics;
   phoneSession: PhoneMediaSession | null;
   phoneEligibleMediaCount: number;
@@ -940,6 +969,8 @@ const Dashboard = ({
   filteredLessons,
   continueLessons,
   newLessons,
+  isSearchActive,
+  query,
   selectedLesson,
   selectedMediaFile,
   selectedMediaUrl,
@@ -952,6 +983,7 @@ const Dashboard = ({
   watchByLessonId,
   setSelectedLessonId,
   onOpenImport,
+  onClearSearch,
   runtimeDiagnostics,
   phoneSession,
   phoneEligibleMediaCount,
@@ -983,7 +1015,11 @@ const Dashboard = ({
           onDownloadSource={onDownloadSource}
         />
       ) : (
-        <PlayerEmptyPanel onOpenImport={onOpenImport} runtimeDiagnostics={runtimeDiagnostics} />
+        isSearchActive ? (
+          <SearchEmptyPanel query={query} onClearSearch={onClearSearch} />
+        ) : (
+          <PlayerEmptyPanel onOpenImport={onOpenImport} runtimeDiagnostics={runtimeDiagnostics} />
+        )
       )}
 
       <SectionHeader title="Continue" meta={`${continueLessons.length} active items`} />
@@ -1004,13 +1040,20 @@ const Dashboard = ({
         ) : (
           <EmptyState
             icon={Play}
-            title="No active study items"
-            detail="Start any imported video, audio, PDF, or post and it will appear here."
+            title={isSearchActive ? "No matching active items" : "No active study items"}
+            detail={
+              isSearchActive
+                ? "No in-progress lessons match this search."
+                : "Start any imported video, audio, PDF, or post and it will appear here."
+            }
           />
         )}
       </div>
 
-      <SectionHeader title="Feed Inbox" meta="Subscribed source updates" />
+      <SectionHeader
+        title="Feed Inbox"
+        meta={isSearchActive ? "Matching source updates" : "Subscribed source updates"}
+      />
       <div className="lesson-grid">
         {newLessons.length ? (
           newLessons.map((lesson) => (
@@ -1028,8 +1071,12 @@ const Dashboard = ({
         ) : (
           <EmptyState
             icon={Rss}
-            title="No feed items"
-            detail="Use Import to add local media, a public feed, Archive item, or direct video URL."
+            title={isSearchActive ? "No matching feed items" : "No feed items"}
+            detail={
+              isSearchActive
+                ? "No source updates match this search."
+                : "Use Import to add local media, a public feed, Archive item, or direct video URL."
+            }
           />
         )}
       </div>
@@ -1073,8 +1120,12 @@ const Dashboard = ({
         ) : (
           <EmptyState
             icon={Search}
-            title="No study items imported"
-            detail="Import video, audio, PDF files, teacher posts, source feeds, or direct video URLs."
+            title={isSearchActive ? "No matching study items" : "No study items imported"}
+            detail={
+              isSearchActive
+                ? "Clear the search or try a teacher, title, source, or URL."
+                : "Import video, audio, PDF files, teacher posts, source feeds, or direct video URLs."
+            }
           />
         )}
       </div>
@@ -1410,6 +1461,37 @@ const PlayerEmptyPanel = ({
     </section>
   );
 };
+
+const SearchEmptyPanel = ({
+  query,
+  onClearSearch,
+}: {
+  query: string;
+  onClearSearch: () => void;
+}) => (
+  <section className="player-panel player-empty-panel" aria-label="Search results">
+    <div className="player-frame player-frame-live player-empty-surface">
+      <div className="empty-player-icons" aria-hidden="true">
+        <Search size={30} />
+      </div>
+      <span className="player-frame-message">
+        No library items match "{query.trim()}".
+      </span>
+    </div>
+    <div className="player-copy">
+      <h1>No matching study items</h1>
+      <p>Search checks lesson titles, descriptions, URLs, teachers, collections, and sources.</p>
+      <div className="player-tags">
+        <StatusChip label="Search active" tone="warning" />
+        <StatusChip label="0 matches" tone="neutral" />
+      </div>
+    </div>
+    <button type="button" className="secondary-action player-import-action" onClick={onClearSearch}>
+      <X size={17} />
+      <span>Clear Search</span>
+    </button>
+  </section>
+);
 
 interface PhoneAccessPanelProps {
   session: PhoneMediaSession | null;
@@ -1782,10 +1864,16 @@ const RelaysView = ({
   relays,
   liveSessions,
   teachers,
+  publisherProfiles,
+  onPublisherProfilesChanged,
+  onPublisherResult,
 }: {
   relays: TeacherRelay[];
   liveSessions: LiveSession[];
   teachers: Map<string, Teacher>;
+  publisherProfiles: PublisherProfile[];
+  onPublisherProfilesChanged: () => Promise<void>;
+  onPublisherResult: (notice: string) => void;
 }) => (
   <div className="wide-page">
     <div className="page-heading">
@@ -1796,11 +1884,16 @@ const RelaysView = ({
           and downloadable media enclosures.
         </p>
       </div>
-      <StatusChip label="Teacher upload tools later" tone="neutral" />
+      <StatusChip label="Federated publisher" tone="positive" />
     </div>
 
     <div className="relay-layout">
       <section className="relay-main">
+        <TeacherPublisherPanel
+          profiles={publisherProfiles}
+          onProfilesChanged={onPublisherProfilesChanged}
+          onResult={onPublisherResult}
+        />
         <SectionHeader title="Subscribed Feeds" meta={`${relays.length} relays`} />
         <div className="relay-grid">
           {relays.map((relay) => (
@@ -1847,6 +1940,534 @@ const RelaysView = ({
     </div>
   </div>
 );
+
+const TeacherPublisherPanel = ({
+  profiles,
+  onProfilesChanged,
+  onResult,
+}: {
+  profiles: PublisherProfile[];
+  onProfilesChanged: () => Promise<void>;
+  onResult: (notice: string) => void;
+}) => {
+  const [profileId, setProfileId] = useState(profiles[0]?.id ?? "");
+  const [displayName, setDisplayName] = useState("");
+  const [passphrase, setPassphrase] = useState("");
+  const [relayText, setRelayText] = useState("");
+  const [blossomText, setBlossomText] = useState("");
+  const [archiveText, setArchiveText] = useState("");
+  const [ipfsApiUrl, setIpfsApiUrl] = useState("");
+  const [ipfsGatewayUrl, setIpfsGatewayUrl] = useState("");
+  const [channelTitle, setChannelTitle] = useState("");
+  const [channelDescription, setChannelDescription] = useState("");
+  const [lessonDrafts, setLessonDrafts] = useState<PublishedLessonDraft[]>([]);
+  const [publishResult, setPublishResult] = useState("");
+  const [shareQrDataUrl, setShareQrDataUrl] = useState("");
+  const [panelNotice, setPanelNotice] = useState("");
+  const [isWorking, setIsWorking] = useState(false);
+  const selectedProfile = profiles.find((profile) => profile.id === profileId);
+
+  useEffect(() => {
+    if (!profileId && profiles[0]) {
+      setProfileId(profiles[0].id);
+    }
+  }, [profileId, profiles]);
+
+  useEffect(() => {
+    if (!selectedProfile) {
+      return;
+    }
+
+    setDisplayName(selectedProfile.displayName);
+    setRelayText(selectedProfile.relays.map((relay) => relay.url).join("\n"));
+    setBlossomText(selectedProfile.blossomServers.map((server) => server.url).join("\n"));
+  }, [selectedProfile]);
+
+  const relays = endpointLines(relayText).map((url) => ({ url }));
+  const blossomServers = endpointLines(blossomText).map((url) => ({ url }));
+  const archiveMirrors: ArchiveMirrorConfig[] = [
+    ...endpointLines(archiveText).map((url) => ({
+      service: "https",
+      url,
+      label: "Public archive mirror",
+    })),
+    ...(ipfsApiUrl.trim()
+      ? [
+          {
+            service: "ipfs-http-api",
+            url: ipfsApiUrl.trim(),
+            gatewayUrl: ipfsGatewayUrl.trim() || undefined,
+            label: "Local IPFS manifest pin",
+          },
+        ]
+      : []),
+  ];
+  const publishReadiness = [
+    {
+      label: selectedProfile ? "Profile" : "Profile missing",
+      tone: selectedProfile ? "positive" : "warning",
+    },
+    {
+      label: selectedProfile?.vaultConfigured ? "Vault saved" : "Vault missing",
+      tone: selectedProfile?.vaultConfigured ? "positive" : "warning",
+    },
+    {
+      label: passphrase.length >= 8 ? "Passphrase" : "Passphrase needed",
+      tone: passphrase.length >= 8 ? "positive" : "warning",
+    },
+    {
+      label: relays.length ? `${relays.length} relay${relays.length === 1 ? "" : "s"}` : "Relay needed",
+      tone: relays.length ? "positive" : "warning",
+    },
+    {
+      label: blossomServers.length
+        ? `${blossomServers.length} Blossom server${blossomServers.length === 1 ? "" : "s"}`
+        : "Storage needed",
+      tone: blossomServers.length ? "positive" : "warning",
+    },
+    {
+      label: lessonDrafts.length
+        ? `${lessonDrafts.length} file${lessonDrafts.length === 1 ? "" : "s"}`
+        : "Media needed",
+      tone: lessonDrafts.length ? "positive" : "warning",
+    },
+    {
+      label: archiveMirrors.length
+        ? `${archiveMirrors.length} archive mirror${archiveMirrors.length === 1 ? "" : "s"}`
+        : "Archive optional",
+      tone: archiveMirrors.length ? "positive" : "neutral",
+    },
+  ] satisfies Array<{ label: string; tone: "neutral" | "positive" | "warning" }>;
+  const publishBlockedReason = !selectedProfile
+    ? "Create or select a publisher profile."
+    : passphrase.length < 8
+      ? "Enter the vault passphrase."
+      : relays.length === 0
+        ? "Add at least one Nostr relay."
+        : blossomServers.length === 0
+          ? "Add at least one Blossom server."
+          : ipfsApiUrl.trim() && !ipfsGatewayUrl.trim()
+            ? "Add the IPFS gateway URL for local IPFS archival."
+            : lessonDrafts.length === 0
+              ? "Select media to publish."
+              : "";
+
+  useEffect(() => {
+    let isMounted = true;
+
+    if (!publishResult) {
+      setShareQrDataUrl("");
+      return () => {
+        isMounted = false;
+      };
+    }
+
+    QRCode.toDataURL(publishResult, {
+      errorCorrectionLevel: "M",
+      margin: 1,
+      width: 148,
+      color: {
+        dark: "#13251f",
+        light: "#ffffff",
+      },
+    })
+      .then((url) => {
+        if (isMounted) {
+          setShareQrDataUrl(url);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setShareQrDataUrl("");
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [publishResult]);
+
+  const createProfile = async () => {
+    setIsWorking(true);
+    setPanelNotice("");
+
+    try {
+      const profile = await createPublisherProfile({
+        displayName,
+        passphrase,
+        relays,
+        blossomServers,
+      });
+      setProfileId(profile.id);
+      setPanelNotice(`Publisher profile ready for ${profile.displayName}.`);
+      await onProfilesChanged();
+    } catch (error: unknown) {
+      setPanelNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const unlockProfile = async () => {
+    if (!selectedProfile) {
+      setPanelNotice("Create or select a publisher profile first.");
+      return;
+    }
+
+    setIsWorking(true);
+    setPanelNotice("");
+
+    try {
+      const profile = await unlockPublisherProfile(selectedProfile.id, passphrase);
+      setPanelNotice(`Vault unlocked for ${profile.displayName}.`);
+    } catch (error: unknown) {
+      setPanelNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const selectMedia = async () => {
+    setIsWorking(true);
+    setPanelNotice("");
+
+    try {
+      const paths = await chooseLocalMediaPaths();
+      if (!paths.length) {
+        setPanelNotice("No publishable media selected.");
+        return;
+      }
+      setLessonDrafts(
+        paths.map((path) => ({
+          path,
+          title: titleFromPath(path),
+          contentType: contentTypeFromPublishPath(path),
+        })),
+      );
+    } catch (error: unknown) {
+      setPanelNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const updateDraft = (
+    index: number,
+    patch: Partial<PublishedLessonDraft>,
+  ) => {
+    setLessonDrafts((current) =>
+      current.map((draft, draftIndex) =>
+        draftIndex === index ? { ...draft, ...patch } : draft,
+      ),
+    );
+  };
+
+  const publishChannel = async () => {
+    if (!selectedProfile) {
+      setPanelNotice("Create or select a publisher profile first.");
+      return;
+    }
+
+    setIsWorking(true);
+    setPanelNotice("");
+    setPublishResult("");
+
+    try {
+      const result = await publishTeacherChannel({
+        profileId: selectedProfile.id,
+        passphrase,
+        channelTitle,
+        channelDescription,
+        relays,
+        blossomServers,
+        archiveMirrors,
+        lessons: lessonDrafts,
+      });
+      setPublishResult(result.naddr);
+      setPanelNotice(result.messages.join(" "));
+      onResult(`Published ${result.channelId}; ${result.manifestSha256}.`);
+      await onProfilesChanged();
+    } catch (error: unknown) {
+      setPanelNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const copyChannelLink = async () => {
+    if (!publishResult) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(publishResult);
+      setPanelNotice("Channel link copied.");
+    } catch {
+      setPanelNotice("Copy failed. Select and copy the channel link manually.");
+    }
+  };
+
+  return (
+    <section className="publisher-panel">
+      <div className="publisher-panel-header">
+        <SectionHeader title="Teacher Publisher" meta={`${profiles.length} profiles`} />
+        <StatusChip label="No central catalog" tone="neutral" />
+      </div>
+
+      <div className="publisher-grid">
+        <div className="publisher-column">
+          <label className="field">
+            <span>Publisher profile</span>
+            <select
+              value={profileId}
+              onChange={(event) => setProfileId(event.target.value)}
+            >
+              <option value="">New profile</option>
+              {profiles.map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.displayName}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span>Teacher display name</span>
+            <input
+              value={displayName}
+              onChange={(event) => setDisplayName(event.target.value)}
+            />
+            <span className="field-hint">Scholar or institute name.</span>
+          </label>
+          <label className="field">
+            <span>Vault passphrase</span>
+            <input
+              type="password"
+              value={passphrase}
+              onChange={(event) => setPassphrase(event.target.value)}
+            />
+            <span className="field-hint">Required for signing.</span>
+          </label>
+          <div className="publisher-actions">
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={createProfile}
+              disabled={isWorking}
+            >
+              <KeyRound size={16} />
+              <span>Create Profile</span>
+            </button>
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={unlockProfile}
+              disabled={isWorking || !selectedProfile}
+            >
+              <Lock size={16} />
+              <span>Unlock</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="publisher-column">
+          <label className="field">
+            <span>Nostr relays</span>
+            <textarea
+              value={relayText}
+              onChange={(event) => setRelayText(event.target.value)}
+            />
+            <span className="field-hint">One relay per line, for example wss://relay.example.</span>
+          </label>
+          <label className="field">
+            <span>Blossom servers</span>
+            <textarea
+              value={blossomText}
+              onChange={(event) => setBlossomText(event.target.value)}
+            />
+            <span className="field-hint">One storage server per line, for example https://blossom.example.</span>
+          </label>
+          <label className="field">
+            <span>Archive manifest mirrors</span>
+            <textarea
+              value={archiveText}
+              onChange={(event) => setArchiveText(event.target.value)}
+            />
+            <span className="field-hint">Optional public mirror URLs, one per line.</span>
+          </label>
+          <div className="archive-ipfs-grid">
+            <label className="field">
+              <span>Local IPFS API</span>
+              <input
+                value={ipfsApiUrl}
+                onChange={(event) => setIpfsApiUrl(event.target.value)}
+              />
+              <span className="field-hint">Local API URL, for example http://127.0.0.1:5001.</span>
+            </label>
+            <label className="field">
+              <span>IPFS gateway</span>
+              <input
+                value={ipfsGatewayUrl}
+                onChange={(event) => setIpfsGatewayUrl(event.target.value)}
+              />
+              <span className="field-hint">Gateway used to verify the pinned manifest.</span>
+            </label>
+          </div>
+          <p className="publisher-inline-note">
+            Archive mirrors are public and may be hard to remove. Only hash-matched manifest
+            copies are announced.
+          </p>
+        </div>
+      </div>
+
+      <div className="publisher-grid">
+        <div className="publisher-column">
+          <label className="field">
+            <span>Channel title</span>
+            <input
+              value={channelTitle}
+              onChange={(event) => setChannelTitle(event.target.value)}
+            />
+            <span className="field-hint">Learners see this as the channel name.</span>
+          </label>
+          <label className="field">
+            <span>Channel note</span>
+            <textarea
+              value={channelDescription}
+              onChange={(event) => setChannelDescription(event.target.value)}
+            />
+            <span className="field-hint">Optional source or permission note.</span>
+          </label>
+          <div className="publisher-actions">
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={selectMedia}
+              disabled={isWorking}
+            >
+              <FolderOpen size={16} />
+              <span>Select Media</span>
+            </button>
+            <button
+              type="button"
+              className="primary-action"
+              onClick={publishChannel}
+              disabled={isWorking || Boolean(publishBlockedReason)}
+              title={publishBlockedReason || "Publish the signed channel update."}
+            >
+              <UploadCloud size={16} />
+              <span>{isWorking ? "Working" : "Publish Channel"}</span>
+            </button>
+          </div>
+          <div className="publisher-readiness" aria-label="Publish readiness">
+            {publishReadiness.map((item) => (
+              <StatusChip key={item.label} label={item.label} tone={item.tone} />
+            ))}
+          </div>
+          {publishBlockedReason ? (
+            <p className="publisher-inline-note">{publishBlockedReason}</p>
+          ) : null}
+        </div>
+
+        <div className="publisher-column">
+          <SectionHeader title="Publish Queue" meta={`${lessonDrafts.length} files`} />
+          <div className="publish-draft-list">
+            {lessonDrafts.length ? (
+              lessonDrafts.map((draft, index) => (
+                <div className="publish-draft-row" key={`${draft.path}-${index}`}>
+                  <input
+                    value={draft.title}
+                    onChange={(event) => updateDraft(index, { title: event.target.value })}
+                    aria-label="Lesson title"
+                  />
+                  <select
+                    value={draft.contentType}
+                    onChange={(event) =>
+                      updateDraft(index, {
+                        contentType: event.target.value as PublishedLessonDraft["contentType"],
+                      })
+                    }
+                    aria-label="Content type"
+                  >
+                    <option value="video">Video</option>
+                    <option value="audio">Audio</option>
+                    <option value="pdf">PDF</option>
+                  </select>
+                  <code>{fileNameFromPath(draft.path)}</code>
+                </div>
+              ))
+            ) : (
+              <EmptyState
+                icon={UploadCloud}
+                title="No files selected"
+                detail="Select video, audio, or PDF lessons to publish."
+              />
+            )}
+          </div>
+        </div>
+      </div>
+
+      {publishResult ? (
+        <div className="publisher-result">
+          <div className="share-qr-frame">
+            {shareQrDataUrl ? (
+              <img src={shareQrDataUrl} alt="Teacher channel QR code" />
+            ) : (
+              <QrCode size={34} aria-hidden="true" />
+            )}
+          </div>
+          <div className="publisher-share-copy">
+            <div>
+              <strong>Share channel link</strong>
+              <span>Learners paste this naddr into Import Content.</span>
+            </div>
+            <code>{publishResult}</code>
+          </div>
+          <button type="button" className="secondary-action" onClick={copyChannelLink}>
+            <Copy size={16} />
+            <span>Copy Link</span>
+          </button>
+        </div>
+      ) : null}
+
+      {panelNotice ? (
+        <p className="publisher-notice" role="status">
+          {panelNotice}
+        </p>
+      ) : null}
+    </section>
+  );
+};
+
+const endpointLines = (value: string): string[] =>
+  value
+    .split(/[\n,]/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+const fileNameFromPath = (path: string): string =>
+  path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+
+const titleFromPath = (path: string): string =>
+  fileNameFromPath(path)
+    .replace(/\.[^.]+$/, "")
+    .replace(/[_-]+/g, " ")
+    .trim() || "Untitled lesson";
+
+const contentTypeFromPublishPath = (
+  path: string,
+): PublishedLessonDraft["contentType"] => {
+  const extension = path.split(".").pop()?.toLowerCase();
+
+  if (extension === "pdf") {
+    return "pdf";
+  }
+
+  if (["mp3", "m4a", "aac", "wav", "flac", "ogg"].includes(extension ?? "")) {
+    return "audio";
+  }
+
+  return "video";
+};
 
 const LiveSessionRow = ({
   session,
@@ -2227,6 +2848,7 @@ const ImportDrawer = ({
   ) => Promise<TrustedCurator>;
 }) => {
   const [sourceUrl, setSourceUrl] = useState("");
+  const [channelPreview, setChannelPreview] = useState<NostrChannelPreview | null>(null);
   const [manifestJson, setManifestJson] = useState("");
   const [validationMessage, setValidationMessage] = useState("");
   const [manifestReport, setManifestReport] = useState<ManifestValidationReport | null>(null);
@@ -2246,6 +2868,11 @@ const ImportDrawer = ({
       manifestReport.trustState === "signed-untrusted" &&
       !validatedCuratorTrusted,
   );
+  const sourceIsNostrChannel = isNostrChannelRef(sourceUrl);
+
+  useEffect(() => {
+    setChannelPreview(null);
+  }, [sourceUrl]);
 
   const runLocalImport = async () => {
     setIsWorking(true);
@@ -2294,6 +2921,42 @@ const ImportDrawer = ({
       const result = await ingestSourceUrl(trimmedUrl);
       onResult(
         `${result.discovered} discovered, ${result.imported} added, ${result.skipped} skipped, ${result.failed} failed. ${result.messages.join(" ")}`,
+      );
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      setValidationMessage(message);
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const runChannelPreview = async () => {
+    const trimmedUrl = sourceUrl.trim();
+
+    if (!trimmedUrl) {
+      setValidationMessage("Paste a Nostr channel link first.");
+      return;
+    }
+
+    if (!sourceIsNostrChannel) {
+      setValidationMessage("Channel preview expects an naddr or nostr:naddr link.");
+      return;
+    }
+
+    if (!isOnlineMode) {
+      setValidationMessage("Switch to online fetch mode before previewing a channel.");
+      return;
+    }
+
+    setIsWorking(true);
+    setValidationMessage("");
+    setChannelPreview(null);
+
+    try {
+      const preview = await previewNostrChannel(trimmedUrl);
+      setChannelPreview(preview);
+      setValidationMessage(
+        `${preview.title} verified. ${preview.lessonCount} lesson(s), ${preview.mediaCount} media file(s).`,
       );
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2406,7 +3069,7 @@ const ImportDrawer = ({
           <ImportOption
             icon={UploadCloud}
             title="Curator Feed"
-            detail="Follow signed Duroos manifests when teachers or curators publish them."
+            detail="Follow signed Duroos manifests or shared Nostr channel links."
           />
           <ImportOption
             icon={FileArchive}
@@ -2420,17 +3083,21 @@ const ImportDrawer = ({
           <input
             value={sourceUrl}
             onChange={(event) => setSourceUrl(event.target.value)}
-            placeholder="Archive item, RSS feed, t.me channel, YouTube, Rumble, Odysee, X, or relay URL"
           />
+          <span className="field-hint">Archive item, RSS feed, t.me channel, video URL, manifest URL, or naddr.</span>
         </label>
+
+        {sourceIsNostrChannel ? (
+          <ChannelPreviewPanel preview={channelPreview} isLoading={isWorking} />
+        ) : null}
 
         <div className="ingest-hint">
           <Rss size={17} />
           <span>
             Public Telegram channels are tried through the no-login t.me/s preview. Private
             channels, invite-only groups, and restricted media still need a local Telegram session
-            or manual export. Archive.org item URLs, feeds, and direct video URLs can become
-            reviewable library rows. If X or Rumble blocks anonymous fetches, add
+            or manual export. Archive.org item URLs, feeds, direct video URLs, and shared Nostr
+            channel links can become reviewable library rows. If X or Rumble blocks anonymous fetches, add
             yt-dlp-cookies.txt in app data or import the downloaded file manually. Duplicate source
             URLs and matching hashes are skipped. Offline mode blocks remote subscription fetches.
           </span>
@@ -2453,8 +3120,25 @@ const ImportDrawer = ({
             disabled={isWorking || !isOnlineMode}
           >
             <Archive size={17} />
-            <span>{isWorking ? "Working" : "Subscribe / Ingest"}</span>
+            <span>
+              {isWorking
+                ? "Working"
+                : sourceIsNostrChannel
+                  ? "Import Channel"
+                  : "Subscribe / Ingest"}
+            </span>
           </button>
+          {sourceIsNostrChannel ? (
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={runChannelPreview}
+              disabled={isWorking || !isOnlineMode}
+            >
+              <ShieldCheck size={17} />
+              <span>Preview Channel</span>
+            </button>
+          ) : null}
         </div>
 
         <label className="field">
@@ -2466,8 +3150,8 @@ const ImportDrawer = ({
               setManifestJson(event.target.value);
               setManifestReport(null);
             }}
-            placeholder='{"schemaVersion":2,"exportedAt":"...","curator":{...},"collection":{...},"lessons":[...]}'
           />
+          <span className="field-hint">Paste raw Duroos manifest JSON for validation.</span>
         </label>
         <button type="button" className="secondary-action" onClick={runManifestValidation}>
           <ShieldCheck size={17} />
@@ -2507,9 +3191,9 @@ const ImportDrawer = ({
         <div className="transport-reference-note">
           <RadioTower size={17} />
           <span>
-            Nostr is modeled for future discovery and study-circle references only. IPFS CIDs and
-            BitTorrent magnets can validate as manifest references, but this app downloads only
-            HTTP or enclosure URLs.
+            Nostr channel links resolve signed Duroos manifests from configured relay hints.
+            Blossom, HTTP, and enclosure URLs remain review-first downloads; IPFS CIDs and
+            BitTorrent magnets validate only as manifest references.
           </span>
         </div>
 
@@ -2520,24 +3204,24 @@ const ImportDrawer = ({
             <input
               value={manualDisplayName}
               onChange={(event) => setManualDisplayName(event.target.value)}
-              placeholder="Curator or teacher name"
             />
+            <span className="field-hint">Curator or teacher name.</span>
           </label>
           <label className="field">
             <span>Ed25519 public key</span>
             <input
               value={manualPublicKey}
               onChange={(event) => setManualPublicKey(event.target.value)}
-              placeholder="Hex or base64 public key"
             />
+            <span className="field-hint">Hex or base64 public key.</span>
           </label>
           <label className="field">
             <span>Trust note</span>
             <input
               value={manualTrustNote}
               onChange={(event) => setManualTrustNote(event.target.value)}
-              placeholder="Where you verified this key"
             />
+            <span className="field-hint">Where you verified this key.</span>
           </label>
           <button
             type="button"
@@ -2554,6 +3238,58 @@ const ImportDrawer = ({
     </div>
   );
 };
+
+const ChannelPreviewPanel = ({
+  preview,
+  isLoading,
+}: {
+  preview: NostrChannelPreview | null;
+  isLoading: boolean;
+}) => (
+  <div className="channel-preview-panel">
+    <div className="channel-preview-heading">
+      <div>
+        <strong>{preview?.title ?? "Nostr channel preview"}</strong>
+        <span>
+          {preview
+            ? `${preview.curatorDisplayName} · ${formatDate(preview.publishedAt)}`
+            : isLoading
+              ? "Resolving relay pointer and validating manifest."
+              : "Preview before importing to verify the teacher, trust state, and media count."}
+        </span>
+      </div>
+      <StatusChip
+        label={preview ? trustLabel(preview.trustState) : "Not previewed"}
+        tone={preview ? trustTone(preview.trustState) : "neutral"}
+      />
+    </div>
+    <div className="channel-preview-stats">
+      <span>{preview ? `${preview.lessonCount} lessons` : "Lessons unknown"}</span>
+      <span>{preview ? `${preview.mediaCount} media refs` : "Media unknown"}</span>
+      <span>{preview ? `${preview.relayCount} relays` : "Relays unknown"}</span>
+      <span>
+        {preview ? `${preview.blossomServerCount} Blossom servers` : "Storage unknown"}
+      </span>
+      <span>{preview ? `${preview.archiveMirrorCount} archive mirrors` : "Archive unknown"}</span>
+    </div>
+    {preview ? (
+      <>
+        <code>{preview.manifestSha256}</code>
+        <div className="channel-preview-endpoints">
+          {preview.relays.slice(0, 2).map((relay) => (
+            <span key={relay}>{relay}</span>
+          ))}
+          {preview.blossomServers.slice(0, 2).map((server) => (
+            <span key={server}>{server}</span>
+          ))}
+          {preview.archiveMirrors.slice(0, 2).map((mirror) => (
+            <span key={mirror}>{mirror}</span>
+          ))}
+        </div>
+      </>
+    ) : null}
+  </div>
+);
 
 const ImportOption = ({
   icon: Icon,

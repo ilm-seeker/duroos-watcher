@@ -2,11 +2,13 @@ mod db;
 mod manifest;
 mod models;
 mod phone_access;
+mod publisher;
 
 use models::{
-    AppSnapshot, ClearSourceSummary, DownloadSourceSummary, ImportSummary, IngestSummary, Lesson,
-    ManifestValidationReport, PhoneMediaScope, PhoneMediaSession, RuntimeDiagnostics,
-    TrustCuratorSummary, TrustedCurator,
+    AppSnapshot, ChannelPublishResult, ClearSourceSummary, CreatePublisherProfileRequest,
+    DownloadSourceSummary, ImportSummary, IngestSummary, Lesson, ManifestValidationReport,
+    NostrChannelPreview, PhoneMediaScope, PhoneMediaSession, PublishTeacherChannelRequest,
+    PublisherProfile, RuntimeDiagnostics, TrustCuratorSummary, TrustedCurator,
 };
 use phone_access::PhoneAccessState;
 
@@ -40,6 +42,11 @@ fn import_local_files(app: tauri::AppHandle, paths: Vec<String>) -> Result<Impor
 #[tauri::command]
 fn ingest_source_url(app: tauri::AppHandle, source_url: String) -> Result<IngestSummary, String> {
     db::ingest_source_url(&app, source_url)
+}
+
+#[tauri::command]
+fn refresh_source(app: tauri::AppHandle, source_id: String) -> Result<IngestSummary, String> {
+    db::refresh_source(&app, source_id)
 }
 
 #[tauri::command]
@@ -112,6 +119,52 @@ fn remove_trusted_curator(
     db::remove_trusted_curator(&mut connection, curator_id)
 }
 
+#[tauri::command]
+fn list_publisher_profiles(app: tauri::AppHandle) -> Result<Vec<PublisherProfile>, String> {
+    publisher::list_publisher_profiles(&app)
+}
+
+#[tauri::command]
+fn create_publisher_profile(
+    app: tauri::AppHandle,
+    request: CreatePublisherProfileRequest,
+) -> Result<PublisherProfile, String> {
+    publisher::create_publisher_profile(&app, request)
+}
+
+#[tauri::command]
+fn unlock_publisher_profile(
+    app: tauri::AppHandle,
+    profile_id: String,
+    passphrase: String,
+) -> Result<PublisherProfile, String> {
+    publisher::unlock_publisher_profile(&app, profile_id, passphrase)
+}
+
+#[tauri::command]
+fn publish_teacher_channel(
+    app: tauri::AppHandle,
+    request: PublishTeacherChannelRequest,
+) -> Result<ChannelPublishResult, String> {
+    publisher::publish_teacher_channel(&app, request)
+}
+
+#[tauri::command]
+fn ingest_nostr_channel(
+    app: tauri::AppHandle,
+    channel_ref: String,
+) -> Result<IngestSummary, String> {
+    publisher::ingest_nostr_channel(&app, channel_ref)
+}
+
+#[tauri::command]
+fn preview_nostr_channel(
+    app: tauri::AppHandle,
+    channel_ref: String,
+) -> Result<NostrChannelPreview, String> {
+    publisher::preview_nostr_channel(&app, channel_ref)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -121,10 +174,9 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle();
             db::initialize(handle).map_err(|error| -> Box<dyn std::error::Error> {
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("database initialization failed: {error}"),
-                ))
+                Box::new(std::io::Error::other(format!(
+                    "database initialization failed: {error}"
+                )))
             })?;
             Ok(())
         })
@@ -135,6 +187,7 @@ pub fn run() {
             resolve_media_file_path,
             import_local_files,
             ingest_source_url,
+            refresh_source,
             clear_source_content,
             download_source_media,
             start_phone_media_session,
@@ -142,7 +195,13 @@ pub fn run() {
             stop_phone_media_session,
             validate_collection_manifest,
             add_trusted_curator,
-            remove_trusted_curator
+            remove_trusted_curator,
+            list_publisher_profiles,
+            create_publisher_profile,
+            unlock_publisher_profile,
+            publish_teacher_channel,
+            ingest_nostr_channel,
+            preview_nostr_channel
         ])
         .run(tauri::generate_context!())
         .expect("error while running Duroos Watcher");

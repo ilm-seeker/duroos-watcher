@@ -6,6 +6,7 @@ use crate::{
         ProvenanceRecord, RuntimeDiagnostics, Source, SourceCapability, Teacher, TeacherRelay,
         TrustCuratorSummary, TrustedCurator, WatchState,
     },
+    publisher,
 };
 use chrono::Utc;
 use reqwest::blocking::Client;
@@ -101,12 +102,31 @@ struct SourceContext {
 }
 
 #[derive(Debug)]
+struct RefreshableSource {
+    id: String,
+    platform: String,
+    label: String,
+    identifier: String,
+}
+
+#[derive(Debug)]
 struct DownloadLesson {
     id: String,
     title: String,
     content_type: String,
     source_url: String,
     expected_content_hash: Option<String>,
+}
+
+#[derive(Debug)]
+struct JobUpdate<'a> {
+    id: &'a str,
+    kind: &'a str,
+    state: &'a str,
+    source_id: Option<&'a str>,
+    lesson_id: Option<&'a str>,
+    label: &'a str,
+    detail: &'a str,
 }
 
 #[derive(Debug, Clone)]
@@ -598,16 +618,34 @@ pub fn ingest_source_url(app: &AppHandle, source_url: String) -> Result<IngestSu
     }
 
     if is_nostr_reference(&normalized_input) {
-        let detail = "Nostr relay discovery is planned for study circles and curator discovery, but it is not the media distribution layer in v1.".to_string();
-        record_standalone_job(&mut connection, &normalized_input, "unsupported", &detail)?;
-        return Ok(IngestSummary {
-            source_url: normalized_input,
-            discovered: 0,
-            imported: 0,
-            skipped: 0,
-            failed: 1,
-            messages: vec![detail],
-        });
+        match publisher::resolve_nostr_channel_manifest_url(&normalized_input) {
+            Ok(resolved) => {
+                let mut summary = ingest_source_url(app, resolved.manifest_url)?;
+                summary.source_url = normalized_input;
+                summary.messages.insert(
+                    0,
+                    format!(
+                        "Resolved Nostr channel {} to signed manifest {} across {} advertised manifest mirror(s).",
+                        resolved.naddr,
+                        resolved.manifest_sha256,
+                        resolved.manifest_urls.len()
+                    ),
+                );
+                return Ok(summary);
+            }
+            Err(error) => {
+                let detail = format!("Could not resolve Nostr channel: {error}");
+                record_standalone_job(&mut connection, &normalized_input, "unsupported", &detail)?;
+                return Ok(IngestSummary {
+                    source_url: normalized_input,
+                    discovered: 0,
+                    imported: 0,
+                    skipped: 0,
+                    failed: 1,
+                    messages: vec![detail],
+                });
+            }
+        }
     }
 
     let feed_url = normalize_feed_url(&normalized_input);
@@ -628,6 +666,44 @@ pub fn ingest_source_url(app: &AppHandle, source_url: String) -> Result<IngestSu
     }
 }
 
+pub fn refresh_source(app: &AppHandle, source_id: String) -> Result<IngestSummary, String> {
+    let source_id = source_id.trim();
+
+    if source_id.is_empty() {
+        return Err("Source id is required.".to_string());
+    }
+
+    let mut connection = open_connection(app)?;
+    let source = refreshable_source(&connection, source_id)?
+        .ok_or_else(|| "Source was not found.".to_string())?;
+
+    if !(source.identifier.starts_with("http://") || source.identifier.starts_with("https://")) {
+        let detail = format!("{} is not a refreshable remote source.", source.label);
+        record_source_refresh_job(&connection, &source.id, &source.label, "skipped", &detail)?;
+        mark_source_checked(&connection, &source.id)?;
+        return Ok(IngestSummary {
+            source_url: source.identifier,
+            discovered: 0,
+            imported: 0,
+            skipped: 0,
+            failed: 0,
+            messages: vec![detail],
+        });
+    }
+
+    let client = Client::builder()
+        .user_agent(INGEST_USER_AGENT)
+        .timeout(Duration::from_secs(25))
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    if source.platform == "youtube" {
+        return refresh_youtube_source(&mut connection, &client, &source);
+    }
+
+    ingest_source_url(app, source.identifier)
+}
+
 fn feed_ingest_error_detail(source_url: &str, error: &str) -> String {
     if is_probably_telegram_invite(source_url) {
         return "Private Telegram links cannot be scraped without a Telegram session. Export media manually or connect a local session when that adapter is added.".to_string();
@@ -640,7 +716,7 @@ fn feed_ingest_error_detail(source_url: &str, error: &str) -> String {
     }
 
     format!(
-        "{error} Supported no-login inputs today: Archive.org item URLs, custom RSS/Atom feeds, public t.me channel URLs, YouTube channel_id feeds, YouTube playlist feeds, and direct YouTube/Rumble/Odysee video URLs."
+        "{error} Supported no-login inputs today: Archive.org item URLs, custom RSS/Atom feeds, public t.me channel URLs, YouTube channel_id feeds, YouTube playlist feeds, direct YouTube/Rumble/Odysee video URLs, and Nostr naddr channel links."
     )
 }
 
@@ -871,13 +947,15 @@ pub fn download_source_media(
         );
         upsert_job(
             &connection,
-            &source_job_id,
-            "download",
-            "skipped",
-            Some(&source_id),
-            None,
-            &format!("Download media: {source_label}"),
-            &detail,
+            JobUpdate {
+                id: &source_job_id,
+                kind: "download",
+                state: "skipped",
+                source_id: Some(&source_id),
+                lesson_id: None,
+                label: &format!("Download media: {source_label}"),
+                detail: &detail,
+            },
         )?;
 
         return Ok(DownloadSourceSummary {
@@ -893,13 +971,15 @@ pub fn download_source_media(
 
     upsert_job(
         &connection,
-        &source_job_id,
-        "download",
-        "running",
-        Some(&source_id),
-        None,
-        &format!("Download media: {source_label}"),
-        &format!("Starting download of {attempted} missing file-backed item(s)."),
+        JobUpdate {
+            id: &source_job_id,
+            kind: "download",
+            state: "running",
+            source_id: Some(&source_id),
+            lesson_id: None,
+            label: &format!("Download media: {source_label}"),
+            detail: &format!("Starting download of {attempted} missing file-backed item(s)."),
+        },
     )?;
 
     let mut yt_dlp = None;
@@ -918,13 +998,15 @@ pub fn download_source_media(
 
         upsert_job(
             &connection,
-            &lesson_job_id,
-            "download",
-            "running",
-            Some(&source_id),
-            Some(&lesson.id),
-            &format!("Download: {}", lesson.title),
-            &format!("Item {position} of {attempted} from {source_label}."),
+            JobUpdate {
+                id: &lesson_job_id,
+                kind: "download",
+                state: "running",
+                source_id: Some(&source_id),
+                lesson_id: Some(&lesson.id),
+                label: &format!("Download: {}", lesson.title),
+                detail: &format!("Item {position} of {attempted} from {source_label}."),
+            },
         )?;
 
         let media_result = existing_completed_media_file(&lesson_dir)
@@ -955,13 +1037,15 @@ pub fn download_source_media(
                 downloaded += 1;
                 upsert_job(
                     &connection,
-                    &lesson_job_id,
-                    "download",
-                    "downloaded",
-                    Some(&source_id),
-                    Some(&lesson.id),
-                    &format!("Download: {}", lesson.title),
-                    &format!("Saved {}", media_path.display()),
+                    JobUpdate {
+                        id: &lesson_job_id,
+                        kind: "download",
+                        state: "downloaded",
+                        source_id: Some(&source_id),
+                        lesson_id: Some(&lesson.id),
+                        label: &format!("Download: {}", lesson.title),
+                        detail: &format!("Saved {}", media_path.display()),
+                    },
                 )?;
             }
             Err(error) => {
@@ -969,13 +1053,15 @@ pub fn download_source_media(
                 messages.push(format!("{}: {error}", lesson.title));
                 upsert_job(
                     &connection,
-                    &lesson_job_id,
-                    "download",
-                    "failed",
-                    Some(&source_id),
-                    Some(&lesson.id),
-                    &format!("Download: {}", lesson.title),
-                    &error,
+                    JobUpdate {
+                        id: &lesson_job_id,
+                        kind: "download",
+                        state: "failed",
+                        source_id: Some(&source_id),
+                        lesson_id: Some(&lesson.id),
+                        label: &format!("Download: {}", lesson.title),
+                        detail: &error,
+                    },
                 )?;
             }
         }
@@ -983,15 +1069,17 @@ pub fn download_source_media(
         let remaining = attempted - downloaded - failed;
         upsert_job(
             &connection,
-            &source_job_id,
-            "download",
-            "running",
-            Some(&source_id),
-            None,
-            &format!("Download media: {source_label}"),
-            &format!(
-                "{downloaded} downloaded, {failed} failed, {skipped} skipped; {remaining} remaining."
-            ),
+            JobUpdate {
+                id: &source_job_id,
+                kind: "download",
+                state: "running",
+                source_id: Some(&source_id),
+                lesson_id: None,
+                label: &format!("Download media: {source_label}"),
+                detail: &format!(
+                    "{downloaded} downloaded, {failed} failed, {skipped} skipped; {remaining} remaining."
+                ),
+            },
         )?;
     }
 
@@ -1001,13 +1089,15 @@ pub fn download_source_media(
     );
     upsert_job(
         &connection,
-        &source_job_id,
-        "download",
-        job_state,
-        Some(&source_id),
-        None,
-        &format!("Download media: {source_label}"),
-        &detail,
+        JobUpdate {
+            id: &source_job_id,
+            kind: "download",
+            state: job_state,
+            source_id: Some(&source_id),
+            lesson_id: None,
+            label: &format!("Download media: {source_label}"),
+            detail: &detail,
+        },
     )?;
 
     messages.insert(
@@ -1382,7 +1472,7 @@ fn ingest_feed_url(
         source_id: format!("source-{platform}-{source_suffix}"),
         platform: platform.clone(),
         source_label: source_label.clone(),
-        source_identifier: feed_url.to_string(),
+        source_identifier: original_url.to_string(),
         feed_format: parsed_feed.feed_format.clone(),
         feed_transport: "https".to_string(),
         trust_state: parsed_feed.trust_state.clone(),
@@ -1424,6 +1514,112 @@ fn ingest_feed_url(
         context,
         parsed_feed.lessons,
         "Feed ingest",
+    )
+}
+
+fn refresh_youtube_source(
+    connection: &mut Connection,
+    client: &Client,
+    source: &RefreshableSource,
+) -> Result<IngestSummary, String> {
+    let feed_url = normalize_feed_url(&source.identifier);
+
+    match ingest_feed_url(connection, client, &source.identifier, &feed_url) {
+        Ok(summary) => Ok(summary),
+        Err(error) => {
+            let existing_count = count_source_lessons(connection, &source.id)?;
+            let detail = if existing_count > 0 {
+                format!(
+                    "YouTube did not return a refreshable RSS feed for {}. Kept {} existing item(s). {}",
+                    source.label,
+                    existing_count,
+                    feed_ingest_error_detail(&source.identifier, &error)
+                )
+            } else {
+                feed_ingest_error_detail(&source.identifier, &error)
+            };
+            let state = if existing_count > 0 {
+                "skipped"
+            } else {
+                "unsupported"
+            };
+
+            record_source_refresh_job(connection, &source.id, &source.label, state, &detail)?;
+            mark_source_checked(connection, &source.id)?;
+
+            Ok(IngestSummary {
+                source_url: source.identifier.clone(),
+                discovered: 0,
+                imported: 0,
+                skipped: 0,
+                failed: if existing_count > 0 { 0 } else { 1 },
+                messages: vec![detail],
+            })
+        }
+    }
+}
+
+fn refreshable_source(
+    connection: &Connection,
+    source_id: &str,
+) -> Result<Option<RefreshableSource>, String> {
+    connection
+        .query_row(
+            "SELECT id, platform, label, identifier
+             FROM sources
+             WHERE id = ?1",
+            params![source_id],
+            |row| {
+                Ok(RefreshableSource {
+                    id: row.get(0)?,
+                    platform: row.get(1)?,
+                    label: row.get(2)?,
+                    identifier: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
+fn count_source_lessons(connection: &Connection, source_id: &str) -> Result<i64, String> {
+    connection
+        .query_row(
+            "SELECT COUNT(*) FROM lessons WHERE source_id = ?1",
+            params![source_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())
+}
+
+fn mark_source_checked(connection: &Connection, source_id: &str) -> Result<(), String> {
+    connection
+        .execute(
+            "UPDATE sources SET last_checked_at = ?1 WHERE id = ?2",
+            params![Utc::now().to_rfc3339(), source_id],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn record_source_refresh_job(
+    connection: &Connection,
+    source_id: &str,
+    source_label: &str,
+    state: &str,
+    detail: &str,
+) -> Result<(), String> {
+    upsert_job(
+        connection,
+        JobUpdate {
+            id: &format!("job-refresh-source-{}", stable_suffix(source_id)),
+            kind: "metadata",
+            state,
+            source_id: Some(source_id),
+            lesson_id: None,
+            label: &format!("Refresh: {source_label}"),
+            detail,
+        },
     )
 }
 
@@ -1655,8 +1851,7 @@ fn json_feed_lesson(item: &serde_json::Value) -> Option<DiscoveredLesson> {
         .or_else(|| item_object.get("content_text"))
         .or_else(|| item_object.get("content_html"))
         .and_then(serde_json::Value::as_str)
-        .map(normalize_source_text)
-        .flatten()
+        .and_then(normalize_source_text)
         .map(|description| clip_text(&description, 900));
     let title = item_object
         .get("title")
@@ -2227,16 +2422,7 @@ fn record_standalone_job(
         .map_err(|error| error.to_string())
 }
 
-fn upsert_job(
-    connection: &Connection,
-    id: &str,
-    kind: &str,
-    state: &str,
-    source_id: Option<&str>,
-    lesson_id: Option<&str>,
-    label: &str,
-    detail: &str,
-) -> Result<(), String> {
+fn upsert_job(connection: &Connection, job: JobUpdate<'_>) -> Result<(), String> {
     connection
         .execute(
             "INSERT INTO jobs
@@ -2251,13 +2437,13 @@ fn upsert_job(
                detail = excluded.detail,
                updated_at = excluded.updated_at",
             params![
-                id,
-                kind,
-                state,
-                source_id,
-                lesson_id,
-                label,
-                detail,
+                job.id,
+                job.kind,
+                job.state,
+                job.source_id,
+                job.lesson_id,
+                job.label,
+                job.detail,
                 Utc::now().to_rfc3339()
             ],
         )
@@ -2576,13 +2762,16 @@ fn feed_title(document: &roxmltree::Document<'_>) -> Option<String> {
 }
 
 fn xml_feed_format(document: &roxmltree::Document<'_>) -> String {
-    document
+    if document
         .root_element()
         .tag_name()
         .name()
         .eq_ignore_ascii_case("feed")
-        .then(|| "atom".to_string())
-        .unwrap_or_else(|| "rss".to_string())
+    {
+        "atom".to_string()
+    } else {
+        "rss".to_string()
+    }
 }
 
 fn child_text(node: roxmltree::Node<'_, '_>, child_name: &str) -> Option<String> {
@@ -2871,7 +3060,9 @@ fn is_probably_telegram_invite(source_url: &str) -> bool {
 }
 
 fn is_nostr_reference(source_url: &str) -> bool {
-    source_url.starts_with("nostr:") || source_url.starts_with("nostr+")
+    source_url.starts_with("naddr1")
+        || source_url.starts_with("nostr:")
+        || source_url.starts_with("nostr+")
 }
 
 fn platform_for_feed(source_url: &str) -> String {
@@ -3034,7 +3225,7 @@ fn direct_source_title(client: &Client, source_url: &str) -> String {
                 .ok()
                 .and_then(|url| {
                     url.path_segments()
-                        .and_then(|segments| segments.filter(|segment| !segment.is_empty()).last())
+                        .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
                         .map(|segment| segment.replace(['-', '_'], " "))
                 })
                 .filter(|title| !title.is_empty())
@@ -3640,6 +3831,18 @@ fn run_migrations(connection: &Connection) -> Result<(), String> {
               public_key TEXT NOT NULL UNIQUE,
               trust_note TEXT,
               added_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS publisher_profiles (
+              id TEXT PRIMARY KEY,
+              display_name TEXT NOT NULL,
+              curator_public_key TEXT NOT NULL,
+              nostr_pubkey TEXT NOT NULL,
+              relays_json TEXT NOT NULL,
+              blossom_servers_json TEXT NOT NULL,
+              vault_path TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS live_sessions (
@@ -4786,6 +4989,8 @@ mod tests {
     use base64::{engine::general_purpose, Engine as _};
     use ed25519_dalek::{Signer, SigningKey};
     use serde_json::{json, Value};
+    use std::thread;
+    use tiny_http::{Response, Server};
 
     fn test_connection() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
@@ -5054,6 +5259,8 @@ mod tests {
 
     #[test]
     fn nostr_references_remain_modeled_only() {
+        assert!(is_nostr_reference("naddr1example"));
+        assert!(is_nostr_reference("nostr:naddr1example"));
         assert!(is_nostr_reference("nostr:npub1example"));
         assert!(is_nostr_reference("nostr+ws://relay.example"));
     }
@@ -5124,9 +5331,103 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_youtube_refresh_keeps_existing_source_items() {
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let feed_url = format!(
+            "http://{}/feeds/videos.xml?playlist_id=PL123",
+            server.server_addr()
+        );
+        let server_thread = thread::spawn(move || {
+            let request = server.recv().unwrap();
+            request
+                .respond(Response::from_string("missing").with_status_code(404))
+                .unwrap();
+        });
+        let mut connection = test_connection();
+        connection
+            .execute(
+                "INSERT INTO sources
+                 (id, platform, label, identifier, feed_format, feed_transport, trust_state,
+                  trusted_curator_id, auth_mode, update_schedule, capability_json, enabled,
+                  last_checked_at, last_verified_at)
+                 VALUES ('source-youtube-test', 'youtube', 'YouTube: Test Playlist', ?1,
+                  'atom', 'https', 'unsigned', NULL, 'none', 'Manual + daily check', ?2, 1,
+                  NULL, NULL)",
+                params![
+                    &feed_url,
+                    serde_json::to_string(&capability(
+                        "supported",
+                        "limited",
+                        "limited",
+                        false,
+                        "none",
+                        "best-effort",
+                        "Test source"
+                    ))
+                    .unwrap()
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO teachers (id, display_name, description, source_links_json)
+                 VALUES ('teacher-youtube-test', 'Test Teacher', NULL, '[]')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO collections (id, title, owner_label, sort_order, lesson_count, source_ids_json)
+                 VALUES ('collection-youtube-test', 'Test Playlist', 'Subscribed feed', 500, 1,
+                  '[\"source-youtube-test\"]')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO lessons
+                 (id, title, content_type, teacher_id, collection_id, source_id, source_url,
+                  published_at, description, thumbnail_tone, duration_seconds, media_file_id,
+                  provenance_id)
+                 VALUES ('lesson-youtube-test', 'Existing lesson', 'video', 'teacher-youtube-test',
+                  'collection-youtube-test', 'source-youtube-test',
+                  'https://www.youtube.com/watch?v=abc123', NULL, NULL, 'emerald', NULL, NULL,
+                  'prov-youtube-test')",
+                [],
+            )
+            .unwrap();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let source = RefreshableSource {
+            id: "source-youtube-test".to_string(),
+            platform: "youtube".to_string(),
+            label: "YouTube: Test Playlist".to_string(),
+            identifier: feed_url,
+        };
+
+        let summary = refresh_youtube_source(&mut connection, &client, &source).unwrap();
+        server_thread.join().unwrap();
+        let (state, source_id, detail): (String, String, String) = connection
+            .query_row(
+                "SELECT state, source_id, detail FROM jobs WHERE label = 'Refresh: YouTube: Test Playlist'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(summary.failed, 0);
+        assert_eq!(state, "skipped");
+        assert_eq!(source_id, "source-youtube-test");
+        assert!(detail.contains("Kept 1 existing item"));
+    }
+
+    #[test]
     fn routes_supported_source_inputs_to_expected_ingest_paths() {
         assert!(parse_telegram_source("https://t.me/public_channel").is_some());
         assert!(parse_archive_org_identifier("https://archive.org/details/class-series").is_some());
+        assert!(is_nostr_reference("naddr1example"));
         assert!(is_nostr_reference("nostr:npub1example"));
         assert_eq!(
             platform_for_feed("https://example.org/feed.xml"),

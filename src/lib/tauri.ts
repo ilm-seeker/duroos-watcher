@@ -5,10 +5,15 @@ import type {
   AppSnapshot,
   ClearSourceSummary,
   DownloadSourceSummary,
+  ChannelPublishResult,
+  CreatePublisherProfileRequest,
   ImportSummary,
   IngestSummary,
+  NostrChannelPreview,
   PhoneMediaScope,
   PhoneMediaSession,
+  PublishTeacherChannelRequest,
+  PublisherProfile,
   TrustedCurator,
   TrustCuratorSummary,
   RuntimeDiagnostics,
@@ -100,6 +105,21 @@ export const ingestSourceUrl = async (sourceUrl: string): Promise<IngestSummary>
   }
 
   return invoke<IngestSummary>("ingest_source_url", { sourceUrl });
+};
+
+export const refreshSource = async (sourceId: string): Promise<IngestSummary> => {
+  if (!isTauriRuntime()) {
+    return {
+      sourceUrl: sourceId,
+      discovered: 0,
+      imported: 0,
+      skipped: 1,
+      failed: 0,
+      messages: ["Source refresh requires the Tauri desktop runtime."],
+    };
+  }
+
+  return invoke<IngestSummary>("refresh_source", { sourceId });
 };
 
 export const clearSourceContent = async (
@@ -257,4 +277,53 @@ export const removeTrustedCurator = async (
   }
 
   return invoke<TrustCuratorSummary>("remove_trusted_curator", { curatorId });
+};
+
+export const listPublisherProfiles = async (): Promise<PublisherProfile[]> => {
+  if (!isTauriRuntime()) {
+    return [];
+  }
+
+  return invoke<PublisherProfile[]>("list_publisher_profiles");
+};
+
+export const createPublisherProfile = async (
+  request: CreatePublisherProfileRequest,
+): Promise<PublisherProfile> => {
+  if (!isTauriRuntime()) {
+    throw new Error("Teacher publisher profiles require the Tauri desktop runtime.");
+  }
+
+  return invoke<PublisherProfile>("create_publisher_profile", { request });
+};
+
+export const unlockPublisherProfile = async (
+  profileId: string,
+  passphrase: string,
+): Promise<PublisherProfile> => {
+  if (!isTauriRuntime()) {
+    throw new Error("Teacher publisher vaults require the Tauri desktop runtime.");
+  }
+
+  return invoke<PublisherProfile>("unlock_publisher_profile", { profileId, passphrase });
+};
+
+export const publishTeacherChannel = async (
+  request: PublishTeacherChannelRequest,
+): Promise<ChannelPublishResult> => {
+  if (!isTauriRuntime()) {
+    throw new Error("Federated teacher publishing requires the Tauri desktop runtime.");
+  }
+
+  return invoke<ChannelPublishResult>("publish_teacher_channel", { request });
+};
+
+export const previewNostrChannel = async (
+  channelRef: string,
+): Promise<NostrChannelPreview> => {
+  if (!isTauriRuntime()) {
+    throw new Error("Nostr channel previews require the Tauri desktop runtime.");
+  }
+
+  return invoke<NostrChannelPreview>("preview_nostr_channel", { channelRef });
 };

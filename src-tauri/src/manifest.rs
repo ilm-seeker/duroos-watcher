@@ -5,21 +5,27 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 const CURRENT_SCHEMA_VERSION: i64 = 2;
-const FORBIDDEN_KEY_PARTS: &[&str] = &[
+const FORBIDDEN_KEY_TOKENS: &[&str] = &[
     "credential",
+    "credentials",
     "token",
     "cookie",
+    "cookies",
     "session",
-    "telegramsession",
-    "apikey",
     "secret",
     "password",
-    "privatekey",
-    "localpath",
-    "absolutepath",
     "command",
     "script",
     "hook",
+];
+const FORBIDDEN_NORMALIZED_KEYS: &[&str] = &[
+    "accesstoken",
+    "refreshtoken",
+    "telegramsession",
+    "apikey",
+    "privatekey",
+    "localpath",
+    "absolutepath",
 ];
 
 pub fn validate_collection_manifest(manifest_json: &str) -> ManifestValidationReport {
@@ -66,6 +72,10 @@ pub fn validate_collection_manifest(manifest_json: &str) -> ManifestValidationRe
 
     if schema_version == Some(CURRENT_SCHEMA_VERSION) {
         validate_curator(root.get("curator"), &mut errors);
+    }
+
+    if let Some(publication) = root.get("publication") {
+        validate_publication(publication, &mut errors);
     }
 
     match root.get("collection").and_then(Value::as_object) {
@@ -121,6 +131,62 @@ fn validate_curator(value: Option<&Value>, errors: &mut Vec<String>) {
         .unwrap_or_default();
     if decode_key_or_signature(public_key, 32).is_err() {
         errors.push("curator.publicKey must be an Ed25519 public key".to_string());
+    }
+
+    if let Some(nostr_pubkey) = curator.get("nostrPubkey").and_then(Value::as_str) {
+        if !looks_like_hex_bytes(nostr_pubkey, 32) {
+            errors.push("curator.nostrPubkey must be a 32-byte hex Nostr public key".to_string());
+        }
+    }
+}
+
+fn validate_publication(value: &Value, errors: &mut Vec<String>) {
+    let Some(publication) = value.as_object() else {
+        errors.push("publication must be an object".to_string());
+        return;
+    };
+
+    if publication
+        .get("transport")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        != "nostr"
+    {
+        errors.push("publication.transport must be nostr".to_string());
+    }
+
+    require_string(publication.get("naddr"), "publication.naddr", errors);
+    require_string(
+        publication.get("manifestSha256"),
+        "publication.manifestSha256",
+        errors,
+    );
+    require_string(
+        publication.get("publishedAt"),
+        "publication.publishedAt",
+        errors,
+    );
+
+    if !publication
+        .get("relays")
+        .and_then(Value::as_array)
+        .is_some_and(|relays| !relays.is_empty() && relays.iter().all(is_safe_ws_url))
+    {
+        errors.push("publication.relays must contain websocket relay URLs".to_string());
+    }
+
+    if !publication
+        .get("blossomServers")
+        .and_then(Value::as_array)
+        .is_some_and(|servers| !servers.is_empty() && servers.iter().all(is_safe_http_value))
+    {
+        errors.push("publication.blossomServers must contain http or https URLs".to_string());
+    }
+
+    if let Some(hash) = publication.get("manifestSha256").and_then(Value::as_str) {
+        if !looks_like_sha256(hash) {
+            errors.push("publication.manifestSha256 must be a sha256 hash".to_string());
+        }
     }
 }
 
@@ -251,6 +317,30 @@ fn validate_retrieval_refs(prefix: &str, value: &Value, errors: &mut Vec<String>
                 if !is_safe_http_url(url) {
                     errors.push(format!("{ref_prefix}.url must be an http or https URL"));
                 }
+
+                if let Some(service) = object.get("service").and_then(Value::as_str) {
+                    if service != "blossom" {
+                        errors.push(format!("{ref_prefix}.service is not supported"));
+                    }
+                }
+
+                if let Some(hash) = object.get("sha256").and_then(Value::as_str) {
+                    if !looks_like_sha256(hash) {
+                        errors.push(format!("{ref_prefix}.sha256 must be a sha256 hash"));
+                    }
+                }
+
+                if let Some(size_bytes) = object.get("sizeBytes").and_then(Value::as_i64) {
+                    if size_bytes <= 0 {
+                        errors.push(format!("{ref_prefix}.sizeBytes must be positive"));
+                    }
+                }
+
+                if let Some(mime_type) = object.get("mimeType").and_then(Value::as_str) {
+                    if mime_type.trim().is_empty() || mime_type.contains(['\r', '\n']) {
+                        errors.push(format!("{ref_prefix}.mimeType must be a MIME type"));
+                    }
+                }
             }
             "ipfs-cid" => {
                 let cid = object
@@ -359,7 +449,7 @@ fn verify_manifest_signature(value: &Value) -> SignatureCheck {
     }
 }
 
-fn signed_payload(value: &Value) -> Result<String, String> {
+pub(crate) fn signed_payload(value: &Value) -> Result<String, String> {
     let mut payload = value.clone();
     let Some(object) = payload.as_object_mut() else {
         return Err("Manifest root must be an object".to_string());
@@ -458,11 +548,7 @@ fn walk_for_unsafe_values(value: &Value, path: &str, errors: &mut Vec<String>) {
         Value::Object(map) => {
             for (key, nested) in map {
                 let nested_path = format!("{path}.{key}");
-                let normalized_key = key.to_lowercase();
-                if FORBIDDEN_KEY_PARTS
-                    .iter()
-                    .any(|part| normalized_key.contains(part))
-                {
+                if is_forbidden_manifest_key(key) {
                     errors.push(format!(
                         "{nested_path} is not allowed in shared collection manifests"
                     ));
@@ -477,6 +563,50 @@ fn walk_for_unsafe_values(value: &Value, path: &str, errors: &mut Vec<String>) {
         }
         _ => {}
     }
+}
+
+fn is_forbidden_manifest_key(key: &str) -> bool {
+    let tokens = manifest_key_tokens(key);
+    let normalized = tokens.join("");
+    FORBIDDEN_NORMALIZED_KEYS
+        .iter()
+        .any(|forbidden| normalized == *forbidden)
+        || tokens.iter().any(|token| {
+            FORBIDDEN_KEY_TOKENS
+                .iter()
+                .any(|forbidden| token == forbidden)
+        })
+}
+
+fn manifest_key_tokens(key: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut previous_was_lower_or_digit = false;
+
+    for character in key.chars() {
+        if !character.is_ascii_alphanumeric() {
+            if !current.is_empty() {
+                tokens.push(current.to_ascii_lowercase());
+                current.clear();
+            }
+            previous_was_lower_or_digit = false;
+            continue;
+        }
+
+        if character.is_ascii_uppercase() && previous_was_lower_or_digit && !current.is_empty() {
+            tokens.push(current.to_ascii_lowercase());
+            current.clear();
+        }
+
+        current.push(character);
+        previous_was_lower_or_digit = character.is_ascii_lowercase() || character.is_ascii_digit();
+    }
+
+    if !current.is_empty() {
+        tokens.push(current.to_ascii_lowercase());
+    }
+
+    tokens
 }
 
 fn is_encoded_crypto_field(path: &str) -> bool {
@@ -495,6 +625,16 @@ fn is_safe_http_url(value: &str) -> bool {
     value.starts_with("https://") || value.starts_with("http://")
 }
 
+fn is_safe_http_value(value: &Value) -> bool {
+    value.as_str().is_some_and(is_safe_http_url)
+}
+
+fn is_safe_ws_url(value: &Value) -> bool {
+    value
+        .as_str()
+        .is_some_and(|url| url.starts_with("wss://") || url.starts_with("ws://"))
+}
+
 fn is_absolute_or_file_path(value: &str) -> bool {
     value.starts_with('/')
         || value.starts_with("~/")
@@ -505,6 +645,10 @@ fn is_absolute_or_file_path(value: &str) -> bool {
 fn looks_like_sha256(value: &str) -> bool {
     let hash = value.strip_prefix("sha256:").unwrap_or(value);
     hash.len() == 64 && hash.chars().all(|character| character.is_ascii_hexdigit())
+}
+
+fn looks_like_hex_bytes(value: &str, byte_len: usize) -> bool {
+    value.len() == byte_len * 2 && value.chars().all(|character| character.is_ascii_hexdigit())
 }
 
 fn looks_like_ipfs_cid(value: &str) -> bool {
@@ -646,6 +790,128 @@ mod tests {
         assert!(errors.contains("telegramSession"));
         assert!(errors.contains("originUrl"));
         assert!(errors.contains("retrievalRefs"));
+    }
+
+    #[test]
+    fn accepts_description_without_treating_it_as_script() {
+        let manifest = json!({
+            "schemaVersion": 2,
+            "exportedAt": "2026-06-16T05:00:00Z",
+            "curator": {
+                "id": "curator",
+                "displayName": "Curator",
+                "publicKey": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            },
+            "collection": {
+                "title": "Safe descriptions",
+                "ownerLabel": "Curator",
+                "description": "Weekly lessons from the teacher."
+            },
+            "lessons": [
+                {
+                    "title": "Opening lesson",
+                    "description": "Recorded class notes.",
+                    "contentType": "video",
+                    "sourceRefs": [{"platform": "youtube", "originUrl": "https://youtube.com/watch?v=abc123"}],
+                    "contentHashes": [],
+                    "provenance": {"adapterName": "DuroosManifestAdapter"}
+                }
+            ]
+        });
+
+        let report = validate_collection_manifest(&manifest.to_string());
+
+        assert!(report.valid, "{:?}", report.errors);
+    }
+
+    #[test]
+    fn accepts_nostr_publication_and_blossom_refs() {
+        let manifest = json!({
+            "schemaVersion": 2,
+            "exportedAt": "2026-06-16T05:00:00Z",
+            "curator": {
+                "id": "curator",
+                "displayName": "Curator",
+                "publicKey": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "nostrPubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "publication": {
+                "transport": "nostr",
+                "naddr": "naddr1example",
+                "relays": ["wss://relay.example"],
+                "blossomServers": ["https://blossom.example"],
+                "manifestSha256": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "publishedAt": "2026-06-16T05:00:00Z"
+            },
+            "collection": {
+                "title": "Federated collection",
+                "ownerLabel": "Curator"
+            },
+            "lessons": [
+                {
+                    "title": "Blossom lesson",
+                    "contentType": "video",
+                    "sourceRefs": [{"platform": "blossom", "originUrl": "https://blossom.example/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.mp4"}],
+                    "retrievalRefs": [{
+                        "kind": "direct-url",
+                        "url": "https://blossom.example/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.mp4",
+                        "service": "blossom",
+                        "sha256": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                        "sizeBytes": 2048,
+                        "mimeType": "video/mp4",
+                        "mediaType": "video/mp4"
+                    }],
+                    "contentHashes": ["sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"],
+                    "provenance": {"adapterName": "DuroosFederatedPublisher"}
+                }
+            ]
+        });
+
+        let report = validate_collection_manifest(&manifest.to_string());
+
+        assert!(report.valid, "{:?}", report.errors);
+    }
+
+    #[test]
+    fn rejects_invalid_nostr_publication() {
+        let manifest = json!({
+            "schemaVersion": 2,
+            "exportedAt": "2026-06-16T05:00:00Z",
+            "curator": {
+                "id": "curator",
+                "displayName": "Curator",
+                "publicKey": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "nostrPubkey": "not-a-key"
+            },
+            "publication": {
+                "transport": "nostr",
+                "naddr": "naddr1example",
+                "relays": ["https://relay.example"],
+                "blossomServers": ["file:///tmp/blossom"],
+                "manifestSha256": "sha256:not-a-hash",
+                "publishedAt": "2026-06-16T05:00:00Z"
+            },
+            "collection": {
+                "title": "Federated collection",
+                "ownerLabel": "Curator"
+            },
+            "lessons": [
+                {
+                    "title": "Blossom lesson",
+                    "sourceRefs": [{"platform": "blossom", "originUrl": "https://blossom.example/file.mp4"}],
+                    "contentHashes": [],
+                    "provenance": {"adapterName": "DuroosFederatedPublisher"}
+                }
+            ]
+        });
+
+        let report = validate_collection_manifest(&manifest.to_string());
+        let errors = report.errors.join(" ");
+
+        assert!(!report.valid);
+        assert!(errors.contains("nostrPubkey"));
+        assert!(errors.contains("publication.relays"));
+        assert!(errors.contains("publication.blossomServers"));
     }
 
     #[test]

@@ -9,6 +9,7 @@ Duroos Watcher is a local-first desktop study library for educational content yo
 - Source adapter registry for Local Files, Telegram, RSS/Atom feeds, Archive.org, YouTube, X, Rumble, Odysee, and curator relays with truthful capability labels.
 - User-selected feed subscriptions for dashboard-style updates from custom RSS, Atom, and JSON Feed feeds.
 - Curator relay subscriptions for signed Duroos manifests with source refs, sha256 hashes, and downloadable media enclosures.
+- Federated teacher publishing from the desktop app through user-configured Nostr relays and Blossom media servers.
 - Live lesson tracking for provider-hosted sessions that can become downloadable archive entries after teacher approval.
 - Public Telegram channel preview ingest without sign-in when Telegram exposes a `t.me/s` page.
 - RSS/Atom/JSON Feed ingest for videos, audio enclosures, PDFs, and post/message entries.
@@ -30,14 +31,17 @@ Duroos Watcher is a local-first desktop study library for educational content yo
 Duroos Watcher does not use blockchain in v1. The useful primitives are signed metadata, local storage, source provenance, and optional open feed transports.
 
 - **Local-first shell:** no accounts, no telemetry, no central Duroos server, no automatic sharing of subscriptions, watch state, manifests, or media.
-- **Public curator channels:** users subscribe to RSS, Atom, JSON Feed, or Duroos manifest URLs chosen by the user.
-- **Signed manifests:** Duroos v2 manifests include curator identity, source refs, optional retrieval refs, sha256 hashes, and Ed25519 signatures. A valid signature proves tamper resistance for that public key, not automatic trust.
+- **Public curator channels:** users subscribe to RSS, Atom, JSON Feed, Duroos manifest URLs, or shared Nostr `naddr` channel links chosen by the user.
+- **Signed manifests:** Duroos v2 manifests include curator identity, optional Nostr pubkey binding, source refs, optional retrieval refs, sha256 hashes, and Ed25519 signatures. A valid signature proves tamper resistance for that public key, not automatic trust.
 - **Review-first media:** users download locally before viewing. Auto-download and redistribution are not enabled by default.
-- **Future layers:** Nostr is reserved for optional relay discovery and study-circle messages. IPFS CID and BitTorrent magnet refs are accepted only as explicit manifest retrieval references for content the curator marks as redistributable; they are not default media transports.
+- **Federated publishing:** teacher publisher profiles keep signing keys in a passphrase-encrypted local vault. Nostr relays carry signed channel announcements with all successful manifest mirror URLs, and Blossom servers store hash-addressed media and manifest blobs. Optional archive mirrors can pin the signed manifest through a teacher-configured local IPFS HTTP API or teacher-supplied public gateway URLs; Duroos announces only archive copies that SHA-256 match the signed manifest. Duroos does not ship production default relays, storage servers, archive gateways, accounts, or a central catalog.
+- **Future layers:** IPFS CID and BitTorrent magnet refs are accepted only as explicit manifest retrieval references for content the curator marks as redistributable; they are not default media transports.
 
 ## Curator Relays And Live Lessons
 
 Teachers and curators are modeled as feed owners. A curator relay can publish uploaded classes, source provenance, media hashes, and enclosure URLs that subscribers review before downloading into their local library. The relay design is intentionally feed-like so it can work without platform accounts by default.
+
+Teachers can also publish directly from the desktop app by creating a publisher profile, configuring their own Nostr relays and Blossom servers, selecting local video/audio/PDF lessons, and sharing the resulting `naddr` channel link. They may also add public archive manifest mirrors, including a local IPFS API plus explicit gateway URL, for durability; archive failures do not publish unsafe links. Learners paste the channel link into Import while online; Duroos resolves the latest channel announcement, tries the advertised manifest mirrors until one hash-verifies, fetches the signed manifest, and keeps media downloads review-first.
 
 Live lessons are provider-specific:
 
