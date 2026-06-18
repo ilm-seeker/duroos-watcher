@@ -12,6 +12,7 @@
 - Local app-only macOS verification: `npm run tauri:build:app`.
 - Full local packaging: `npm run tauri:build:full`.
 - Release blocker preflight: `npm run release:preflight`.
+- Configure GitHub signing inputs from local environment variables: `npm run release:configure-signing`.
 - Production release packaging: tag push through `.github/workflows/release.yml`.
 - Production evidence gate: `npm run release:production-gate`.
 
@@ -58,6 +59,20 @@ the release workflow imports the base64-encoded PFX from `WINDOWS_CERTIFICATE`, 
 NSIS/MSI outputs from the certificate store. `WINDOWS_CERTIFICATE_THUMBPRINT` must be the 40-character
 SHA-1 thumbprint of the imported certificate, and `WINDOWS_TIMESTAMP_URL` must be an HTTPS timestamp
 server URL.
+
+To write the required GitHub inputs without placing secret values in shell history, export the real
+values in a secure local shell and run:
+
+```sh
+npm run release:configure-signing -- --dry-run
+npm run release:configure-signing
+npm run release:preflight
+```
+
+`release:configure-signing` reads the exact secret and variable names listed above from environment
+variables, validates that the Apple and Windows certificates are base64 payloads, validates the
+Windows thumbprint and timestamp URL, writes GitHub Actions secrets/variables with `gh`, and then
+verifies that GitHub reports the expected names. It does not print secret values.
 
 ## Production Evidence Required
 
