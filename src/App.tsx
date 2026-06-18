@@ -72,6 +72,7 @@ import {
   validateCollectionManifest,
 } from "./lib/tauri";
 import type { ManifestValidationReport } from "./domain/collectionManifest";
+import { displayJobDetail } from "./domain/jobDisplay";
 import type {
   AppSnapshot,
   ArchiveMirrorConfig,
@@ -113,6 +114,8 @@ import {
 import { seedSnapshot } from "./data/seed";
 
 type ViewMode = "library" | "relays" | "sources" | "queue";
+type ImportMode = "local" | "source" | "feed" | "manifest" | "keys";
+type QueueFilter = "all" | "active" | "needs-attention" | "downloaded";
 type BusySourceAction = { sourceId: string; action: "clear" | "download" } | null;
 type PhoneAccessBusyAction = "start" | "stop" | null;
 type MediaStorageBusyAction = "audit" | "cleanup" | null;
@@ -237,6 +240,43 @@ const isNostrChannelRef = (value: string): boolean => {
   return trimmed.startsWith("naddr1") || trimmed.startsWith("nostr:naddr1");
 };
 
+const normalizeSearch = (value: string): string => value.trim().toLowerCase();
+
+const includesQuery = (query: string, values: Array<string | undefined>): boolean => {
+  if (!query) {
+    return true;
+  }
+
+  return values.some((value) => value?.toLowerCase().includes(query));
+};
+
+const searchConfigForView = (
+  viewMode: ViewMode,
+): { ariaLabel: string; placeholder: string } => {
+  switch (viewMode) {
+    case "library":
+      return {
+        ariaLabel: "Search library by title, teacher, source, or URL",
+        placeholder: "Search lessons, teachers, sources, or URLs",
+      };
+    case "relays":
+      return {
+        ariaLabel: "Search feeds, publisher support, and live lessons",
+        placeholder: "Search feeds, relays, live lessons",
+      };
+    case "sources":
+      return {
+        ariaLabel: "Search source types, added sources, or curator keys",
+        placeholder: "Search platforms, sources, keys",
+      };
+    case "queue":
+      return {
+        ariaLabel: "Search update queue by job, state, source, or detail",
+        placeholder: "Search jobs, states, sources, details",
+      };
+  }
+};
+
 const getLessonProgress = (lesson: Lesson, watchState?: WatchState): number => {
   if (!lesson.durationSeconds || !watchState) {
     return 0;
@@ -325,6 +365,7 @@ const App = () => {
   const [viewMode, setViewMode] = useState<ViewMode>("library");
   const [isOnlineMode, setIsOnlineMode] = useState(false);
   const [isImportOpen, setIsImportOpen] = useState(false);
+  const [initialImportMode, setInitialImportMode] = useState<ImportMode>("local");
   const [systemNotice, setSystemNotice] = useState("");
   const [busySourceAction, setBusySourceAction] = useState<BusySourceAction>(null);
   const [busyNativeMediaId, setBusyNativeMediaId] = useState<string | null>(null);
@@ -722,6 +763,11 @@ const App = () => {
     void refreshSnapshot(notice);
   };
 
+  const openImport = (mode: ImportMode = "local") => {
+    setInitialImportMode(mode);
+    setIsImportOpen(true);
+  };
+
   const handleClearSource = async (source: Source) => {
     const lessonCount = snapshot.lessons.filter((lesson) => lesson.sourceId === source.id).length;
     const jobCount = snapshot.jobs.filter((job) => job.sourceId === source.id).length;
@@ -920,7 +966,7 @@ const App = () => {
           isOnlineMode={isOnlineMode}
           setIsOnlineMode={setIsOnlineMode}
           runtimeDiagnostics={runtimeDiagnostics}
-          openImport={() => setIsImportOpen(true)}
+          openImport={() => openImport("local")}
         />
         {systemNotice ? (
           <div className="notice-bar" role="status">
@@ -962,7 +1008,7 @@ const App = () => {
             provenanceById={provenanceById}
             watchByLessonId={watchByLessonId}
             setSelectedLessonId={setSelectedLessonId}
-            onOpenImport={() => setIsImportOpen(true)}
+            onOpenImport={openImport}
             onClearSearch={() => setQuery("")}
             runtimeDiagnostics={runtimeDiagnostics}
             phoneSession={phoneSession}
@@ -991,6 +1037,7 @@ const App = () => {
             relays={snapshot.teacherRelays}
             liveSessions={snapshot.liveSessions}
             teachers={teacherById}
+            query={query}
             publisherProfiles={publisherProfiles}
             onPublisherProfilesChanged={refreshPublisherProfiles}
             onPublisherResult={setSystemNotice}
@@ -1004,6 +1051,7 @@ const App = () => {
             jobs={snapshot.jobs}
             runtimeDiagnostics={runtimeDiagnostics}
             trustedCurators={snapshot.trustedCurators}
+            query={query}
             mediaStorageAudit={mediaStorageAudit}
             mediaStorageBusyAction={mediaStorageBusyAction}
             busySourceAction={busySourceAction}
@@ -1019,6 +1067,7 @@ const App = () => {
           <QueueView
             jobs={snapshot.jobs}
             sources={sourceById}
+            query={query}
             isRefreshingSources={isRefreshingSources}
             onRefreshEnabledSources={handleRefreshEnabledSources}
           />
@@ -1028,7 +1077,9 @@ const App = () => {
       {isImportOpen ? (
         <ImportDrawer
           isOnlineMode={isOnlineMode}
+          initialMode={initialImportMode}
           trustedCurators={snapshot.trustedCurators}
+          onEnableFetching={() => setIsOnlineMode(true)}
           close={() => setIsImportOpen(false)}
           onResult={handleImportResult}
           onTrustCurator={handleAddTrustedCurator}
@@ -1049,7 +1100,7 @@ const Sidebar = ({
 }: SidebarProps) => {
   const navItems: { mode: ViewMode; label: string; icon: typeof Library }[] = [
     { mode: "library", label: "Library", icon: Library },
-    { mode: "relays", label: "Curator Relays", icon: Rss },
+    { mode: "relays", label: "Feeds & Publishing", icon: Rss },
     { mode: "sources", label: "Sources", icon: Database },
     { mode: "queue", label: "Update Queue", icon: History },
   ];
@@ -1125,6 +1176,7 @@ const TopBar = ({
   const missingFileCount = fileBackedLessons.filter((lesson) => !lesson.mediaFileId).length;
   const runningJobs = snapshot.jobs.filter((job) => job.state === "queued" || job.state === "running");
   const title = viewTitle(viewMode);
+  const searchConfig = searchConfigForView(viewMode);
 
   const downloader = downloaderStatus(runtimeDiagnostics);
   const runtimeLabel = isTauriRuntime() ? "Desktop runtime" : "Browser preview";
@@ -1195,7 +1247,8 @@ const TopBar = ({
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            aria-label="Search library by title, teacher, source, or URL"
+            aria-label={searchConfig.ariaLabel}
+            placeholder={searchConfig.placeholder}
           />
         </div>
       </div>
@@ -1208,7 +1261,7 @@ const viewTitle = (viewMode: ViewMode): string => {
     case "library":
       return "Media Library";
     case "relays":
-      return "Teacher Relays";
+      return "Feeds & Publishing";
     case "sources":
       return "Source Control";
     case "queue":
@@ -1245,7 +1298,7 @@ interface DashboardProps {
   provenanceById: Map<string, ProvenanceRecord>;
   watchByLessonId: Map<string, WatchState>;
   setSelectedLessonId: (lessonId: string) => void;
-  onOpenImport: () => void;
+  onOpenImport: (mode?: ImportMode) => void;
   onClearSearch: () => void;
   runtimeDiagnostics: RuntimeDiagnostics;
   phoneSession: PhoneMediaSession | null;
@@ -1327,7 +1380,18 @@ const Dashboard = ({
   onStartPhoneAccess,
   onStopPhoneAccess,
   onCopyPhoneLink,
-}: DashboardProps) => (
+}: DashboardProps) => {
+  if (snapshot.lessons.length === 0 && !isSearchActive) {
+    return (
+      <FirstRunDashboard
+        sources={snapshot.sources}
+        runtimeDiagnostics={runtimeDiagnostics}
+        onOpenImport={onOpenImport}
+      />
+    );
+  }
+
+  return (
   <div className="dashboard-grid">
     <section className="content-column">
       <SmartLibraryControls
@@ -1534,7 +1598,76 @@ const Dashboard = ({
       <QueueCompact jobs={snapshot.jobs} />
     </aside>
   </div>
-);
+  );
+};
+
+const FirstRunDashboard = ({
+  sources,
+  runtimeDiagnostics,
+  onOpenImport,
+}: {
+  sources: Source[];
+  runtimeDiagnostics: RuntimeDiagnostics;
+  onOpenImport: (mode?: ImportMode) => void;
+}) => {
+  const downloader = downloaderStatus(runtimeDiagnostics);
+
+  return (
+    <div className="first-run-layout">
+      <section className="first-run-panel" aria-label="First import">
+        <div className="first-run-copy">
+          <StatusChip label="Local-first" tone="positive" />
+          <h2>Build your local study library</h2>
+          <p>
+            Import lessons you are allowed to save, or follow a teacher feed. Duroos stores your
+            library locally and keeps remote fetching under your control.
+          </p>
+        </div>
+        <div className="first-run-actions" aria-label="Choose first import path">
+          <button type="button" className="primary-action" onClick={() => onOpenImport("local")}>
+            <FolderOpen size={17} />
+            <span>Add Local Files</span>
+          </button>
+          <button type="button" className="secondary-action" onClick={() => onOpenImport("source")}>
+            <Globe2 size={17} />
+            <span>Add Source URL</span>
+          </button>
+          <button type="button" className="secondary-action" onClick={() => onOpenImport("feed")}>
+            <Rss size={17} />
+            <span>Follow Teacher Feed</span>
+          </button>
+        </div>
+        <div className="first-run-trust-row">
+          <StatusChip label="No account" tone="positive" />
+          <StatusChip label="No telemetry" tone="positive" />
+          <StatusChip label="Review-first downloads" tone="positive" />
+          <StatusChip label={downloader.label} tone={downloader.tone} />
+        </div>
+      </section>
+
+      <aside className="first-run-side">
+        <section className="side-panel first-run-privacy">
+          <SectionHeader title="Privacy Defaults" meta="always on" />
+          <div className="publish-steps">
+            <div>
+              <ShieldCheck size={17} />
+              <span>No Duroos account is created.</span>
+            </div>
+            <div>
+              <HardDrive size={17} />
+              <span>Media and watch state stay in the local app library.</span>
+            </div>
+            <div>
+              <WifiOff size={17} />
+              <span>Remote fetching stays off until you enable it.</span>
+            </div>
+          </div>
+        </section>
+        <SourceReadinessPanel sources={sources} runtimeDiagnostics={runtimeDiagnostics} />
+      </aside>
+    </div>
+  );
+};
 
 const SmartLibraryControls = ({
   scopes,
@@ -2315,6 +2448,13 @@ const PhoneAccessPanel = ({
   const isActive = Boolean(session?.active && playlistUrl);
   const startDisabled =
     !desktopRuntimeAvailable || busyAction !== null || eligibleMediaCount === 0;
+  const startDisabledReason = !desktopRuntimeAvailable
+    ? "Open the desktop app to share media on your local network."
+    : eligibleMediaCount === 0
+      ? "Import or download a ready audio/video file before using phone sharing."
+      : busyAction !== null
+        ? "Phone sharing is already changing state."
+        : "";
 
   useEffect(() => {
     const preferredEndpoint =
@@ -2447,6 +2587,9 @@ const PhoneAccessPanel = ({
             <Smartphone size={17} />
             <span>{busyAction === "start" ? "Starting" : "Start Phone Access"}</span>
           </button>
+          {startDisabledReason ? (
+            <p className="action-reason">{startDisabledReason}</p>
+          ) : null}
         </div>
       )}
 
@@ -2499,21 +2642,12 @@ const SourceReadinessPanel = ({
     <section className="side-panel source-readiness-panel">
       <SectionHeader title="Sources" meta={groups ? `${groups.length} active` : "v1 pulls"} />
       <div className="source-readiness-list">
-        {orderedSources.slice(0, 7).map((source) => {
+        {orderedSources.length ? orderedSources.slice(0, 7).map((source) => {
           const readiness = sourceReadiness(source, runtimeDiagnostics);
           const group = groupBySourceId.get(source.id);
 
-          return (
-            <button
-              type="button"
-              className={
-                selectedSourceId === source.id
-                  ? "source-readiness-row source-readiness-row-active"
-                  : "source-readiness-row"
-              }
-              key={source.id}
-              onClick={() => onSelectSource?.(selectedSourceId === source.id ? "all" : source.id)}
-            >
+          const rowContent = (
+            <>
               <div className="round-icon">
                 <SourceIcon platform={source.platform} />
               </div>
@@ -2525,9 +2659,30 @@ const SourceReadinessPanel = ({
                 </span>
               </div>
               <StatusChip label={readiness.label} tone={readiness.tone} />
-            </button>
+            </>
           );
-        })}
+
+          return onSelectSource ? (
+            <button
+              type="button"
+              className={
+                selectedSourceId === source.id
+                  ? "source-readiness-row source-readiness-row-button source-readiness-row-active"
+                  : "source-readiness-row source-readiness-row-button"
+              }
+              key={source.id}
+              onClick={() => onSelectSource(selectedSourceId === source.id ? "all" : source.id)}
+            >
+              {rowContent}
+            </button>
+          ) : (
+            <div className="source-readiness-row source-readiness-row-static" key={source.id}>
+              {rowContent}
+            </div>
+          );
+        }) : (
+          <p className="panel-empty">No source statuses match the current search.</p>
+        )}
       </div>
     </section>
   );
@@ -2798,6 +2953,7 @@ const RelaysView = ({
   relays,
   liveSessions,
   teachers,
+  query,
   publisherProfiles,
   onPublisherProfilesChanged,
   onPublisherResult,
@@ -2805,39 +2961,81 @@ const RelaysView = ({
   relays: TeacherRelay[];
   liveSessions: LiveSession[];
   teachers: Map<string, Teacher>;
+  query: string;
   publisherProfiles: PublisherProfile[];
   onPublisherProfilesChanged: () => Promise<void>;
   onPublisherResult: (notice: string) => void;
-}) => (
-  <div className="wide-page">
-    <div className="page-heading">
-      <div>
-        <h2>Curator Relays</h2>
-        <p>
-          Teacher and curator-owned feeds publish uploaded classes, signed manifests, live archives,
-          and downloadable media enclosures.
-        </p>
+}) => {
+  const relayQuery = normalizeSearch(query);
+  const visibleRelays = relays.filter((relay) => {
+    const teacher = teachers.get(relay.teacherId);
+    return includesQuery(relayQuery, [
+      relay.title,
+      relay.feedUrl,
+      relay.feedFormat,
+      relay.feedTransport,
+      relay.trustState,
+      relay.visibility,
+      relay.trustPolicy,
+      relay.description,
+      teacher?.displayName,
+    ]);
+  });
+  const visibleLiveSessions = liveSessions.filter((session) => {
+    const teacher = teachers.get(session.teacherId);
+    return includesQuery(relayQuery, [
+      session.title,
+      session.provider,
+      session.providerUrl,
+      session.status,
+      session.recordingPolicy,
+      teacher?.displayName,
+    ]);
+  });
+
+  return (
+    <div className="wide-page">
+      <div className="page-heading">
+        <div>
+          <h2>Feeds & Publishing</h2>
+          <p>
+            Follow teacher-owned signed feeds, or publish a local signed channel without a central
+            catalog.
+          </p>
+        </div>
+        <StatusChip label="Federated publisher" tone="positive" />
       </div>
-      <StatusChip label="Federated publisher" tone="positive" />
-    </div>
 
     <div className="relay-layout">
       <section className="relay-main">
+        <SectionHeader title="Follow Teacher Feeds" meta={`${visibleRelays.length} subscriptions`} />
+        <div className="relay-grid">
+          {visibleRelays.length ? (
+            visibleRelays.map((relay) => (
+              <RelayCard
+                key={relay.id}
+                relay={relay}
+                teacher={teachers.get(relay.teacherId)}
+              />
+            ))
+          ) : (
+            <EmptyState
+              icon={Rss}
+              title={relayQuery ? "No matching feeds" : "No subscribed feeds"}
+              detail={
+                relayQuery
+                  ? "Clear search or try a teacher, feed URL, or trust state."
+                  : "Use Import to follow a signed teacher feed or curator manifest."
+              }
+            />
+          )}
+        </div>
+
         <TeacherPublisherPanel
           profiles={publisherProfiles}
           onProfilesChanged={onPublisherProfilesChanged}
           onResult={onPublisherResult}
         />
-        <SectionHeader title="Subscribed Feeds" meta={`${relays.length} relays`} />
-        <div className="relay-grid">
-          {relays.map((relay) => (
-            <RelayCard
-              key={relay.id}
-              relay={relay}
-              teacher={teachers.get(relay.teacherId)}
-            />
-          ))}
-        </div>
       </section>
 
       <aside className="relay-aside">
@@ -2862,18 +3060,31 @@ const RelaysView = ({
       </aside>
     </div>
 
-    <SectionHeader title="Live Lesson Capture" meta={`${liveSessions.length} sessions`} />
+    <SectionHeader title="Live Lesson Capture" meta={`${visibleLiveSessions.length} sessions`} />
     <div className="live-session-list">
-      {liveSessions.map((session) => (
-        <LiveSessionRow
-          key={session.id}
-          session={session}
-          teacher={teachers.get(session.teacherId)}
+      {visibleLiveSessions.length ? (
+        visibleLiveSessions.map((session) => (
+          <LiveSessionRow
+            key={session.id}
+            session={session}
+            teacher={teachers.get(session.teacherId)}
+          />
+        ))
+      ) : (
+        <EmptyState
+          icon={RadioTower}
+          title={relayQuery ? "No matching live lessons" : "No live lessons tracked"}
+          detail={
+            relayQuery
+              ? "Clear search or try a provider, title, teacher, or status."
+              : "Live capture stays manual until a teacher feed or provider setup is configured."
+          }
         />
-      ))}
+      )}
     </div>
   </div>
-);
+  );
+};
 
 const TeacherPublisherPanel = ({
   profiles,
@@ -2996,6 +3207,42 @@ const TeacherPublisherPanel = ({
         : blossomServers.length === 0
           ? "Add at least one Blossom server."
           : "";
+  const publisherSteps = [
+    {
+      title: "Profile",
+      detail: selectedProfile
+        ? `Using ${selectedProfile.displayName}.`
+        : "Create or select the local signing profile.",
+      complete: Boolean(selectedProfile),
+    },
+    {
+      title: "Unlock",
+      detail: passphrase.length >= 8 ? "Passphrase ready." : "Enter the local vault passphrase.",
+      complete: passphrase.length >= 8,
+    },
+    {
+      title: "Endpoints",
+      detail:
+        relays.length && blossomServers.length
+          ? `${relays.length} relay(s), ${blossomServers.length} storage server(s).`
+          : "Add at least one relay and one Blossom server.",
+      complete: relays.length > 0 && blossomServers.length > 0,
+    },
+    {
+      title: "Media",
+      detail: lessonDrafts.length
+        ? `${lessonDrafts.length} publishable file(s) selected.`
+        : "Select video, audio, or PDF files.",
+      complete: lessonDrafts.length > 0,
+    },
+    {
+      title: "Review",
+      detail: archiveMirrors.length
+        ? "Archive mirrors will be announced only after hash match."
+        : "Archive mirrors are optional and can stay empty.",
+      complete: true,
+    },
+  ];
 
   useEffect(() => {
     let isMounted = true;
@@ -3181,7 +3428,7 @@ const TeacherPublisherPanel = ({
   return (
     <section className="publisher-panel">
       <div className="publisher-panel-header">
-        <SectionHeader title="Teacher Publisher" meta={`${profiles.length} profiles`} />
+        <SectionHeader title="Publish Teacher Channel" meta={`${profiles.length} profiles`} />
         <StatusChip label="No central catalog" tone="neutral" />
       </div>
       {panelNotice ? (
@@ -3189,9 +3436,11 @@ const TeacherPublisherPanel = ({
           {panelNotice}
         </p>
       ) : null}
+      <PublisherSetupChecklist steps={publisherSteps} />
 
       <div className="publisher-grid">
         <div className="publisher-column">
+          <SectionHeader title="1. Profile" meta="local key" />
           <label className="field">
             <span>Publisher profile</span>
             <select
@@ -3246,6 +3495,7 @@ const TeacherPublisherPanel = ({
         </div>
 
         <div className="publisher-column">
+          <SectionHeader title="2. Relays & Storage" meta="test first" />
           <label className="field">
             <span>Nostr relays</span>
             <textarea
@@ -3319,6 +3569,7 @@ const TeacherPublisherPanel = ({
 
       <div className="publisher-grid">
         <div className="publisher-column">
+          <SectionHeader title="3. Channel" meta="learner-facing" />
           <label className="field">
             <span>Channel title</span>
             <input
@@ -3367,7 +3618,7 @@ const TeacherPublisherPanel = ({
         </div>
 
         <div className="publisher-column">
-          <SectionHeader title="Publish Queue" meta={`${lessonDrafts.length} files`} />
+          <SectionHeader title="4. Publish Queue" meta={`${lessonDrafts.length} files`} />
           <div className="publish-draft-list">
             {lessonDrafts.length ? (
               lessonDrafts.map((draft, index) => (
@@ -3430,6 +3681,27 @@ const TeacherPublisherPanel = ({
     </section>
   );
 };
+
+const PublisherSetupChecklist = ({
+  steps,
+}: {
+  steps: Array<{ title: string; detail: string; complete: boolean }>;
+}) => (
+  <div className="publisher-step-list" aria-label="Publisher setup steps">
+    {steps.map((step, index) => (
+      <div
+        className={step.complete ? "publisher-step publisher-step-complete" : "publisher-step"}
+        key={step.title}
+      >
+        <span>{index + 1}</span>
+        <div>
+          <strong>{step.title}</strong>
+          <p>{step.detail}</p>
+        </div>
+      </div>
+    ))}
+  </div>
+);
 
 const endpointLines = (value: string): string[] =>
   value
@@ -3617,15 +3889,19 @@ const QueueCompact = ({ jobs }: { jobs: Job[] }) => (
     <SectionHeader title="Updates" meta={`${jobs.length} jobs`} />
     <div className="compact-list">
       {jobs.length ? (
-        jobs.slice(0, 3).map((job) => (
-          <div className="compact-row" key={job.id}>
-            <JobIcon state={job.state} />
-            <div>
-              <strong>{job.label}</strong>
-              <span>{job.detail}</span>
+        jobs.slice(0, 3).map((job) => {
+          const detail = displayJobDetail(job.detail, job.state);
+
+          return (
+            <div className="compact-row" key={job.id}>
+              <JobIcon state={job.state} />
+              <div>
+                <strong>{job.label}</strong>
+                <span>{detail.summary}</span>
+              </div>
             </div>
-          </div>
-        ))
+          );
+        })
       ) : (
         <p className="panel-empty">No import or refresh jobs yet.</p>
       )}
@@ -3639,6 +3915,7 @@ const SourcesView = ({
   jobs,
   runtimeDiagnostics,
   trustedCurators,
+  query,
   mediaStorageAudit,
   mediaStorageBusyAction,
   busySourceAction,
@@ -3653,6 +3930,7 @@ const SourcesView = ({
   jobs: Job[];
   runtimeDiagnostics: RuntimeDiagnostics;
   trustedCurators: TrustedCurator[];
+  query: string;
   mediaStorageAudit: MediaStorageAudit | null;
   mediaStorageBusyAction: MediaStorageBusyAction;
   busySourceAction: BusySourceAction;
@@ -3662,7 +3940,28 @@ const SourcesView = ({
   onAuditMediaStorage: () => void;
   onCleanupMediaStorage: () => void;
 }) => {
-  const { capabilitySources, addedSources } = splitSourceRows(sources);
+  const sourceQuery = normalizeSearch(query);
+  const visibleSources = sources.filter((source) =>
+    includesQuery(sourceQuery, [
+      source.label,
+      source.identifier,
+      source.platform,
+      source.feedFormat,
+      source.feedTransport,
+      source.trustState,
+      source.authMode,
+      source.capability.note,
+      source.capability.reliability,
+    ]),
+  );
+  const visibleTrustedCurators = trustedCurators.filter((curator) =>
+    includesQuery(sourceQuery, [
+      curator.displayName,
+      curator.publicKey,
+      curator.trustNote,
+    ]),
+  );
+  const { capabilitySources, addedSources } = splitSourceRows(visibleSources);
 
   return (
     <div className="wide-page">
@@ -3674,7 +3973,7 @@ const SourcesView = ({
         <StatusChip label="No credentials in exports" tone="positive" />
       </div>
 
-      <SourceReadinessPanel sources={sources} runtimeDiagnostics={runtimeDiagnostics} />
+      <SourceReadinessPanel sources={visibleSources} runtimeDiagnostics={runtimeDiagnostics} />
 
       <StorageHygienePanel
         audit={mediaStorageAudit}
@@ -3734,6 +4033,13 @@ const SourcesView = ({
               const isClearing =
                 busySourceAction?.sourceId === source.id && busySourceAction.action === "clear";
               const downloadBlocked = source.capability.download === "blocked";
+              const downloadDisabledReason = downloadBlocked
+                ? "This source type does not currently support downloads."
+                : stats.missingFileCount === 0
+                  ? "All file-backed media from this source is already downloaded."
+                  : isClearing
+                    ? "Wait until source cleanup finishes."
+                    : "";
 
               return (
                 <div className="managed-source-row" key={source.id}>
@@ -3773,9 +4079,7 @@ const SourcesView = ({
                         stats.missingFileCount === 0
                       }
                       title={
-                        downloadBlocked
-                          ? "This source type does not currently support downloads."
-                          : "Download missing media files into the local library."
+                        downloadDisabledReason || "Download missing media files into the local library."
                       }
                     >
                       <Download size={15} />
@@ -3791,6 +4095,9 @@ const SourcesView = ({
                       <Trash2 size={15} />
                       <span>{isClearing ? "Clearing" : "Clear Source"}</span>
                     </button>
+                    {downloadDisabledReason ? (
+                      <p className="managed-source-disabled-note">{downloadDisabledReason}</p>
+                    ) : null}
                   </div>
                 </div>
               );
@@ -3806,10 +4113,10 @@ const SourcesView = ({
       </section>
 
       <section className="trusted-curators">
-        <SectionHeader title="Trusted Curator Keys" meta={`${trustedCurators.length} stored`} />
-        {trustedCurators.length ? (
+        <SectionHeader title="Trusted Curator Keys" meta={`${visibleTrustedCurators.length} stored`} />
+        {visibleTrustedCurators.length ? (
           <div className="trusted-curator-list">
-            {trustedCurators.map((curator) => (
+            {visibleTrustedCurators.map((curator) => (
               <div className="trusted-curator-row" key={curator.id}>
                 <div className="matrix-source">
                   <KeyRound size={18} />
@@ -3848,62 +4155,183 @@ const SourcesView = ({
   );
 };
 
+const queueFilterMatches = (filter: QueueFilter, job: Job): boolean => {
+  switch (filter) {
+    case "all":
+      return true;
+    case "active":
+      return job.state === "queued" || job.state === "running" || job.state === "live";
+    case "needs-attention":
+      return (
+        job.state === "needs-permission" ||
+        job.state === "failed-auth" ||
+        job.state === "unsupported" ||
+        job.state === "failed"
+      );
+    case "downloaded":
+      return job.state === "downloaded" || job.state === "found" || job.state === "archived";
+  }
+};
+
+const queueFilterLabel = (filter: QueueFilter): string => {
+  switch (filter) {
+    case "all":
+      return "All";
+    case "active":
+      return "Active";
+    case "needs-attention":
+      return "Needs Attention";
+    case "downloaded":
+      return "Downloaded";
+  }
+};
+
 const QueueView = ({
   jobs,
   sources,
+  query,
   isRefreshingSources,
   onRefreshEnabledSources,
 }: {
   jobs: Job[];
   sources: Map<string, Source>;
+  query: string;
   isRefreshingSources: boolean;
   onRefreshEnabledSources: () => void;
-}) => (
-  <div className="wide-page">
-    <div className="page-heading">
-      <div>
-        <h2>Update Queue</h2>
-        <p>Refreshes and downloads are tracked by source with current status and repair context.</p>
-      </div>
-      <button
-        type="button"
-        className="secondary-action"
-        onClick={onRefreshEnabledSources}
-        disabled={isRefreshingSources}
-      >
-        <RefreshCcw size={17} />
-        <span>{isRefreshingSources ? "Refreshing" : "Refresh Enabled Sources"}</span>
-      </button>
-    </div>
-    <div className="job-list">
-      {jobs.map((job) => (
-        <div className="job-row" key={job.id}>
-          <JobIcon state={job.state} />
-          <div className="job-copy">
-            <div>
-              <h2>{job.label}</h2>
-              <StatusChip label={job.state.replace(/-/g, " ")} tone={jobTone(job.state)} />
-            </div>
-            <p>{job.detail}</p>
-            <span>
-              {sources.get(job.sourceId ?? "")?.label ?? "System"} · {formatDate(job.updatedAt)}
-            </span>
-          </div>
+}) => {
+  const [activeFilter, setActiveFilter] = useState<QueueFilter>("all");
+  const queueQuery = normalizeSearch(query);
+  const visibleJobs = jobs.filter((job) => {
+    const sourceLabel = sources.get(job.sourceId ?? "")?.label ?? "System";
+    return (
+      queueFilterMatches(activeFilter, job) &&
+      includesQuery(queueQuery, [
+        job.label,
+        job.detail,
+        job.state,
+        job.kind,
+        sourceLabel,
+        formatDate(job.updatedAt),
+      ])
+    );
+  });
+
+  return (
+    <div className="wide-page">
+      <div className="page-heading">
+        <div>
+          <h2>Update Queue</h2>
+          <p>Refreshes and downloads are visible, reversible, and source-aware.</p>
         </div>
-      ))}
+        <button
+          type="button"
+          className="secondary-action"
+          onClick={onRefreshEnabledSources}
+          disabled={isRefreshingSources}
+        >
+          <RefreshCcw size={17} />
+          <span>{isRefreshingSources ? "Refreshing" : "Refresh Enabled Sources"}</span>
+        </button>
+      </div>
+
+      <div className="queue-filter-row" aria-label="Update queue filters">
+        {(["all", "active", "needs-attention", "downloaded"] as QueueFilter[]).map((filter) => {
+          const count = jobs.filter((job) => queueFilterMatches(filter, job)).length;
+          return (
+            <button
+              key={filter}
+              type="button"
+              className={filter === activeFilter ? "scope-chip scope-chip-active" : "scope-chip"}
+              onClick={() => setActiveFilter(filter)}
+              aria-pressed={filter === activeFilter}
+            >
+              <span>{queueFilterLabel(filter)}</span>
+              <strong>{count}</strong>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="job-list">
+        {visibleJobs.length ? (
+          visibleJobs.map((job) => {
+            const detail = displayJobDetail(job.detail, job.state);
+            return (
+              <div className="job-row" key={job.id}>
+                <JobIcon state={job.state} />
+                <div className="job-copy">
+                  <div>
+                    <h2>{job.label}</h2>
+                    <StatusChip label={job.state.replace(/-/g, " ")} tone={jobTone(job.state)} />
+                  </div>
+                  <p>{detail.summary}</p>
+                  {detail.technicalDetail ? (
+                    <details className="job-detail-disclosure">
+                      <summary>{detail.technicalLabel}</summary>
+                      <code>{detail.technicalDetail}</code>
+                    </details>
+                  ) : null}
+                  <span>
+                    {sources.get(job.sourceId ?? "")?.label ?? "System"} · {formatDate(job.updatedAt)}
+                  </span>
+                </div>
+              </div>
+            );
+          })
+        ) : (
+          <EmptyState
+            icon={History}
+            title={queueQuery ? "No matching jobs" : "No queue items"}
+            detail={
+              queueQuery
+                ? "Clear search or try a source, state, job title, or date."
+                : "Import, refresh, and download work will appear here."
+            }
+          />
+        )}
+      </div>
     </div>
-  </div>
-);
+  );
+};
+
+function importModeConfig(mode: ImportMode): { description: string } {
+  switch (mode) {
+    case "local":
+      return {
+        description: "Copy video, audio, or PDF files into the local app library.",
+      };
+    case "source":
+      return {
+        description: "Add a public source URL and keep remote fetching under your control.",
+      };
+    case "feed":
+      return {
+        description: "Preview and follow signed teacher feeds or shared channel links.",
+      };
+    case "manifest":
+      return {
+        description: "Validate a Duroos manifest before importing, sharing, or trusting it.",
+      };
+    case "keys":
+      return {
+        description: "Manually save curator keys only after outside verification.",
+      };
+  }
+}
 
 const ImportDrawer = ({
   isOnlineMode,
+  initialMode,
   trustedCurators,
+  onEnableFetching,
   close,
   onResult,
   onTrustCurator,
 }: {
   isOnlineMode: boolean;
+  initialMode: ImportMode;
   trustedCurators: TrustedCurator[];
+  onEnableFetching: () => void;
   close: () => void;
   onResult: (notice: string) => void;
   onTrustCurator: (
@@ -3912,6 +4340,7 @@ const ImportDrawer = ({
     trustNote?: string,
   ) => Promise<TrustedCurator>;
 }) => {
+  const [mode, setMode] = useState<ImportMode>(initialMode);
   const [sourceUrl, setSourceUrl] = useState("");
   const [channelPreview, setChannelPreview] = useState<NostrChannelPreview | null>(null);
   const [manifestJson, setManifestJson] = useState("");
@@ -3921,6 +4350,8 @@ const ImportDrawer = ({
   const [manualPublicKey, setManualPublicKey] = useState("");
   const [manualTrustNote, setManualTrustNote] = useState("");
   const [isWorking, setIsWorking] = useState(false);
+  const drawerRef = useRef<HTMLElement | null>(null);
+  const titleRef = useRef<HTMLHeadingElement | null>(null);
   const validatedCurator = manifestReport?.valid ? manifestReport.curator : undefined;
   const validatedCuratorTrusted = Boolean(
     validatedCurator &&
@@ -3934,20 +4365,75 @@ const ImportDrawer = ({
       !validatedCuratorTrusted,
   );
   const sourceIsNostrChannel = isNostrChannelRef(sourceUrl);
+  const modeConfig = importModeConfig(mode);
+
+  useEffect(() => {
+    setMode(initialMode);
+  }, [initialMode]);
+
+  useEffect(() => {
+    const previousActiveElement =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    titleRef.current?.focus();
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close();
+        return;
+      }
+
+      if (event.key !== "Tab") {
+        return;
+      }
+
+      const drawer = drawerRef.current;
+      if (!drawer) {
+        return;
+      }
+
+      const focusable = Array.from(
+        drawer.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((element) => element.offsetParent !== null || element === titleRef.current);
+
+      if (focusable.length === 0) {
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      previousActiveElement?.focus();
+    };
+  }, [close]);
 
   useEffect(() => {
     setChannelPreview(null);
   }, [sourceUrl]);
 
   const runLocalImport = async () => {
-    setIsWorking(true);
-    const paths = await chooseLocalMediaPaths();
-
     if (!isTauriRuntime()) {
       onResult("Local file picking requires the Tauri desktop runtime.");
-      setIsWorking(false);
       return;
     }
+
+    setIsWorking(true);
+    const paths = await chooseLocalMediaPaths();
 
     if (paths.length === 0) {
       setValidationMessage("No video, audio, or PDF files selected.");
@@ -4104,216 +4590,289 @@ const ImportDrawer = ({
 
   return (
     <div className="drawer-backdrop" role="presentation">
-      <aside className="import-drawer" aria-label="Import content">
+      <aside
+        className="import-drawer"
+        ref={drawerRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="import-drawer-title"
+      >
         <div className="drawer-header">
           <div>
-            <h1>Import Content</h1>
-            <p>Add local media, public feeds, Archive items, direct video URLs, or Duroos manifests.</p>
+            <h1 id="import-drawer-title" ref={titleRef} tabIndex={-1}>
+              Import Content
+            </h1>
+            <p>{modeConfig.description}</p>
           </div>
           <button type="button" className="icon-button" onClick={close} aria-label="Close import">
             ×
           </button>
         </div>
 
-        <div className="import-options">
+        <div className="import-options" role="tablist" aria-label="Import mode">
           <ImportOption
             icon={FolderOpen}
             title="Add Local Files"
             detail="Copy selected video, audio, or PDF files into the app library."
+            isActive={mode === "local"}
+            onSelect={() => setMode("local")}
           />
           <ImportOption
             icon={Globe2}
-            title="Subscribe or Ingest"
+            title="Source URL"
             detail="Read Archive items, feeds, public Telegram previews, and direct YouTube/Rumble/Odysee URLs."
+            isActive={mode === "source"}
+            onSelect={() => setMode("source")}
           />
           <ImportOption
-            icon={KeyRound}
-            title="Private Source Limits"
-            detail="X/Rumble can retry with app-local yt-dlp cookies; private Telegram still needs a later session adapter."
-          />
-          <ImportOption
-            icon={UploadCloud}
-            title="Curator Feed"
+            icon={Rss}
+            title="Teacher Feed"
             detail="Follow signed Duroos manifests or shared Nostr channel links."
+            isActive={mode === "feed"}
+            onSelect={() => setMode("feed")}
           />
           <ImportOption
             icon={FileArchive}
-            title="Import Collection"
+            title="Manifest"
             detail="Validate a Duroos v2 manifest before importing or sharing."
+            isActive={mode === "manifest"}
+            onSelect={() => setMode("manifest")}
+          />
+          <ImportOption
+            icon={KeyRound}
+            title="Trusted Keys"
+            detail="Save a curator key after outside verification."
+            isActive={mode === "keys"}
+            onSelect={() => setMode("keys")}
           />
         </div>
 
-        <label className="field">
-          <span>Source URL or identifier</span>
-          <input
-            value={sourceUrl}
-            onChange={(event) => setSourceUrl(event.target.value)}
-          />
-          <span className="field-hint">Archive item, RSS feed, t.me channel, video URL, manifest URL, or naddr.</span>
-        </label>
-
-        {sourceIsNostrChannel ? (
-          <ChannelPreviewPanel preview={channelPreview} isLoading={isWorking} />
-        ) : null}
-
-        <div className="ingest-hint">
-          <Rss size={17} />
-          <span>
-            Public Telegram channels are tried through the no-login t.me/s preview. Private
-            channels, invite-only groups, and restricted media still need a local Telegram session
-            or manual export. Archive.org item URLs, feeds, direct video URLs, and shared Nostr
-            channel links can become reviewable library rows. If X or Rumble blocks anonymous fetches, add
-            yt-dlp-cookies.txt in app data or import the downloaded file manually. Duplicate source
-            URLs and matching hashes are skipped. Offline mode blocks remote subscription fetches.
-          </span>
-        </div>
-
-        <div className="drawer-actions">
-          <button
-            type="button"
-            className="secondary-action"
-            onClick={runLocalImport}
-            disabled={isWorking}
-          >
-            <Download size={17} />
-            <span>Import Local Files</span>
-          </button>
-          <button
-            type="button"
-            className="primary-action"
-            onClick={runSourceIngest}
-            disabled={isWorking || !isOnlineMode}
-            title={
-              isOnlineMode
-                ? "Fetch or subscribe to the entered source."
-                : "Switch to online fetch mode before using remote subscriptions or ingest."
-            }
-          >
-            <Archive size={17} />
-            <span>
-              {isWorking
-                ? "Working"
-                : sourceIsNostrChannel
-                  ? "Import Channel"
-                  : "Subscribe / Ingest"}
-            </span>
-          </button>
-          {sourceIsNostrChannel ? (
-            <button
-              type="button"
-            className="secondary-action"
-            onClick={runChannelPreview}
-            disabled={isWorking || !isOnlineMode}
-            title={
-              isOnlineMode
-                ? "Resolve relay hints and validate the channel manifest."
-                : "Switch to online fetch mode before previewing a channel."
-            }
-          >
-            <ShieldCheck size={17} />
-            <span>Preview Channel</span>
-          </button>
-          ) : null}
-        </div>
-        {!isOnlineMode ? (
-          <p className="offline-inline-note" role="status">
-            Offline mode keeps remote fetches disabled. Local file import and pasted manifest
-            validation still work.
-          </p>
-        ) : null}
-
-        <label className="field">
-          <span>Collection manifest</span>
-          <textarea
-            className="manifest-box"
-            value={manifestJson}
-            onChange={(event) => {
-              setManifestJson(event.target.value);
-              setManifestReport(null);
-            }}
-          />
-          <span className="field-hint">Paste raw Duroos manifest JSON for validation.</span>
-        </label>
-        <button type="button" className="secondary-action" onClick={runManifestValidation}>
-          <ShieldCheck size={17} />
-          <span>Validate Manifest</span>
-        </button>
-        {validatedCurator ? (
-          <div className="curator-trust-panel">
-            <div>
-              <strong>{validatedCurator.displayName}</strong>
-              <StatusChip
-                label={
-                  validatedCuratorTrusted
-                    ? "Trusted key"
-                    : trustLabel(manifestReport?.trustState ?? "unsigned")
-                }
-                tone={validatedCuratorTrusted ? "positive" : "warning"}
-              />
+        {mode === "local" ? (
+          <div className="import-mode-panel">
+            <div className="ingest-hint">
+              <HardDrive size={17} />
+              <span>
+                Local imports copy selected video, audio, or PDF files into the app library.
+                Duplicate files are skipped by content hash when possible.
+              </span>
             </div>
-            <code>{validatedCurator.publicKey}</code>
-            <button
-              type="button"
-              className="primary-action"
-              onClick={trustValidatedCurator}
-              disabled={isWorking || !canTrustValidatedCurator}
-              title={
-                validatedCuratorTrusted
-                  ? "This curator key is already trusted."
-                  : "Trust this key only after confirming the curator identity outside the manifest."
-              }
-            >
-              <KeyRound size={17} />
-              <span>{validatedCuratorTrusted ? "Already Trusted" : "Trust Curator"}</span>
-            </button>
+            <div className="drawer-actions">
+              <button
+                type="button"
+                className="primary-action"
+                onClick={runLocalImport}
+                disabled={isWorking}
+              >
+                <Download size={17} />
+                <span>{isWorking ? "Working" : "Import Local Files"}</span>
+              </button>
+            </div>
           </div>
         ) : null}
 
-        <div className="transport-reference-note">
-          <RadioTower size={17} />
-          <span>
-            Nostr channel links resolve signed Duroos manifests from configured relay hints.
-            Blossom, HTTP, and enclosure URLs remain review-first downloads; IPFS CIDs and
-            BitTorrent magnets validate only as manifest references.
-          </span>
-        </div>
+        {mode === "source" || mode === "feed" ? (
+          <div className="import-mode-panel">
+            <label className="field">
+              <span>
+                {mode === "feed" ? "Teacher feed or channel link" : "Source URL or identifier"}
+              </span>
+              <input
+                value={sourceUrl}
+                onChange={(event) => setSourceUrl(event.target.value)}
+                placeholder={
+                  mode === "feed"
+                    ? "naddr1... or https://teacher.example/manifest.json"
+                    : "https://archive.org/details/..."
+                }
+              />
+              <span className="field-hint">
+                {mode === "feed"
+                  ? "Paste a signed manifest URL, teacher feed, or shared Nostr naddr."
+                  : "Archive item, RSS feed, t.me channel, video URL, or public source URL."}
+              </span>
+            </label>
 
-        <div className="manual-trust-panel">
-          <SectionHeader title="Manual Curator Key" meta="fallback" />
-          <label className="field">
-            <span>Display name</span>
-            <input
-              value={manualDisplayName}
-              onChange={(event) => setManualDisplayName(event.target.value)}
-            />
-            <span className="field-hint">Curator or teacher name.</span>
-          </label>
-          <label className="field">
-            <span>Ed25519 public key</span>
-            <input
-              value={manualPublicKey}
-              onChange={(event) => setManualPublicKey(event.target.value)}
-            />
-            <span className="field-hint">Hex or base64 public key.</span>
-          </label>
-          <label className="field">
-            <span>Trust note</span>
-            <input
-              value={manualTrustNote}
-              onChange={(event) => setManualTrustNote(event.target.value)}
-            />
-            <span className="field-hint">Where you verified this key.</span>
-          </label>
-          <button
-            type="button"
-            className="secondary-action"
-            onClick={trustManualCurator}
-            disabled={isWorking}
-          >
-            <KeyRound size={17} />
-            <span>Save Trusted Key</span>
-          </button>
-        </div>
+            <div className="source-example-list" aria-label="Accepted examples">
+              {(mode === "feed"
+                ? ["naddr1...", "https://teacher.example/duroos.json", "https://example.com/feed.xml"]
+                : [
+                    "https://archive.org/details/...",
+                    "https://example.com/feed.xml",
+                    "https://t.me/channel",
+                    "https://youtube.com/watch?v=...",
+                  ]
+              ).map((example) => (
+                <code key={example}>{example}</code>
+              ))}
+            </div>
+
+            {mode === "feed" || sourceIsNostrChannel ? (
+              <ChannelPreviewPanel preview={channelPreview} isLoading={isWorking} />
+            ) : null}
+
+            <div className="ingest-hint">
+              {mode === "feed" ? <ShieldCheck size={17} /> : <Rss size={17} />}
+              <span>
+                {mode === "feed"
+                  ? "Preview signed teacher feeds before importing. Trust a curator key only after confirming the identity outside the manifest."
+                  : "Public feeds and public Telegram previews can become reviewable library rows. X/Rumble may need app-local yt-dlp cookies or manual import."}
+              </span>
+            </div>
+
+            <div className="drawer-actions">
+              <button
+                type="button"
+                className="primary-action"
+                onClick={runSourceIngest}
+                disabled={isWorking || !isOnlineMode}
+                title={
+                  isOnlineMode
+                    ? "Fetch or subscribe to the entered source."
+                    : "Switch to online fetch mode before using remote subscriptions or ingest."
+                }
+              >
+                <Archive size={17} />
+                <span>
+                  {isWorking
+                    ? "Working"
+                    : mode === "feed" || sourceIsNostrChannel
+                      ? "Import Feed"
+                      : "Subscribe / Ingest"}
+                </span>
+              </button>
+              {mode === "feed" || sourceIsNostrChannel ? (
+                <button
+                  type="button"
+                  className="secondary-action"
+                  onClick={runChannelPreview}
+                  disabled={isWorking || !isOnlineMode}
+                  title={
+                    isOnlineMode
+                      ? "Resolve relay hints and validate the channel manifest."
+                      : "Switch to online fetch mode before previewing a channel."
+                  }
+                >
+                  <ShieldCheck size={17} />
+                  <span>Preview Feed</span>
+                </button>
+              ) : null}
+              {!isOnlineMode ? (
+                <button type="button" className="secondary-action" onClick={onEnableFetching}>
+                  <Wifi size={17} />
+                  <span>Enable Fetching</span>
+                </button>
+              ) : null}
+            </div>
+            {!isOnlineMode ? (
+              <p className="offline-inline-note" role="status">
+                Offline mode keeps remote fetches disabled. Local file import and pasted manifest
+                validation still work.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {mode === "manifest" ? (
+          <div className="import-mode-panel">
+            <label className="field">
+              <span>Collection manifest</span>
+              <textarea
+                className="manifest-box"
+                value={manifestJson}
+                onChange={(event) => {
+                  setManifestJson(event.target.value);
+                  setManifestReport(null);
+                }}
+              />
+              <span className="field-hint">Paste raw Duroos manifest JSON for validation.</span>
+            </label>
+            <button type="button" className="secondary-action" onClick={runManifestValidation}>
+              <ShieldCheck size={17} />
+              <span>Validate Manifest</span>
+            </button>
+            {validatedCurator ? (
+              <div className="curator-trust-panel">
+                <div>
+                  <strong>{validatedCurator.displayName}</strong>
+                  <StatusChip
+                    label={
+                      validatedCuratorTrusted
+                        ? "Trusted key"
+                        : trustLabel(manifestReport?.trustState ?? "unsigned")
+                    }
+                    tone={validatedCuratorTrusted ? "positive" : "warning"}
+                  />
+                </div>
+                <code>{validatedCurator.publicKey}</code>
+                <button
+                  type="button"
+                  className="primary-action"
+                  onClick={trustValidatedCurator}
+                  disabled={isWorking || !canTrustValidatedCurator}
+                  title={
+                    validatedCuratorTrusted
+                      ? "This curator key is already trusted."
+                      : "Trust this key only after confirming the curator identity outside the manifest."
+                  }
+                >
+                  <KeyRound size={17} />
+                  <span>{validatedCuratorTrusted ? "Already Trusted" : "Trust Curator"}</span>
+                </button>
+              </div>
+            ) : null}
+
+            <div className="transport-reference-note">
+              <RadioTower size={17} />
+              <span>
+                Nostr channel links resolve signed Duroos manifests from configured relay hints.
+                Blossom, HTTP, and enclosure URLs remain review-first downloads; IPFS CIDs and
+                BitTorrent magnets validate only as manifest references.
+              </span>
+            </div>
+          </div>
+        ) : null}
+
+        {mode === "keys" ? (
+          <div className="manual-trust-panel">
+            <SectionHeader title="Manual Curator Key" meta="advanced" />
+            <p className="publisher-inline-note">
+              Save a key only after verifying the teacher or curator through another channel.
+            </p>
+            <label className="field">
+              <span>Display name</span>
+              <input
+                value={manualDisplayName}
+                onChange={(event) => setManualDisplayName(event.target.value)}
+              />
+              <span className="field-hint">Curator or teacher name.</span>
+            </label>
+            <label className="field">
+              <span>Ed25519 public key</span>
+              <input
+                value={manualPublicKey}
+                onChange={(event) => setManualPublicKey(event.target.value)}
+              />
+              <span className="field-hint">Hex or base64 public key.</span>
+            </label>
+            <label className="field">
+              <span>Trust note</span>
+              <input
+                value={manualTrustNote}
+                onChange={(event) => setManualTrustNote(event.target.value)}
+              />
+              <span className="field-hint">Where you verified this key.</span>
+            </label>
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={trustManualCurator}
+              disabled={isWorking}
+            >
+              <KeyRound size={17} />
+              <span>Save Trusted Key</span>
+            </button>
+          </div>
+        ) : null}
         {validationMessage ? <p className="validation-message">{validationMessage}</p> : null}
       </aside>
     </div>
@@ -4376,18 +4935,28 @@ const ImportOption = ({
   icon: Icon,
   title,
   detail,
+  isActive,
+  onSelect,
 }: {
   icon: typeof FolderOpen;
   title: string;
   detail: string;
+  isActive: boolean;
+  onSelect: () => void;
 }) => (
-  <div className="import-option">
+  <button
+    type="button"
+    className={isActive ? "import-option import-option-active" : "import-option"}
+    onClick={onSelect}
+    role="tab"
+    aria-selected={isActive}
+  >
     <Icon size={19} />
     <div>
       <strong>{title}</strong>
       <span>{detail}</span>
     </div>
-  </div>
+  </button>
 );
 
 const EmptyState = ({
