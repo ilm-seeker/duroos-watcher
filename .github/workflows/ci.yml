@@ -24,10 +24,10 @@ jobs:
         if: runner.os == 'Linux'
         timeout-minutes: 15
         run: |
-          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
-            sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources
-          fi
-          sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          sudo find /etc/apt -maxdepth 2 -type f \( -name "*.sources" -o -name "*.list" -o -name "sources.list" \) -print0 \
+            | sudo xargs -0 sed -i \
+              -e 's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' \
+              -e 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g'
           sudo env DEBIAN_FRONTEND=noninteractive apt-get update \
             -o Acquire::Retries=3 \
             -o Acquire::ForceIPv4=true \
