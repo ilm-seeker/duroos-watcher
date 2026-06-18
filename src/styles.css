@@ -512,8 +512,7 @@ button:focus-visible {
   font-weight: 800;
   transition:
     background 140ms ease,
-    border-color 140ms ease,
-    box-shadow 140ms ease;
+    border-color 140ms ease;
 }
 
 .scope-chip strong {
@@ -521,16 +520,17 @@ button:focus-visible {
   font-size: 11px;
 }
 
-.scope-chip-active,
 .filter-chip:hover,
 .scope-chip:hover {
-  border-color: rgba(12, 122, 91, 0.28);
-  background: var(--emerald-soft);
-  color: var(--emerald);
+  border-color: var(--line-strong);
+  background: var(--surface-muted);
+  color: var(--ink);
 }
 
 .scope-chip-active {
-  box-shadow: inset 3px 0 0 var(--emerald);
+  border-color: var(--line-strong);
+  background: var(--surface-muted);
+  color: var(--ink);
 }
 
 .lesson-row,

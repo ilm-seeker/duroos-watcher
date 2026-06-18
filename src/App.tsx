@@ -526,6 +526,9 @@ const App = () => {
     ],
   );
   const selectedMediaFile = selectedLesson ? mediaByLessonId.get(selectedLesson.id) : undefined;
+  const selectedMediaLessonId = selectedLesson?.id ?? "";
+  const selectedMediaContentType = selectedLesson?.contentType;
+  const selectedMediaFileId = selectedMediaFile?.id ?? "";
 
   useEffect(() => {
     let isMounted = true;
@@ -533,13 +536,13 @@ const App = () => {
     setSelectedMediaUrl("");
     setSelectedMediaError("");
 
-    if (!selectedLesson || !selectedMediaFile || selectedLesson.contentType === "post") {
+    if (!selectedMediaLessonId || !selectedMediaFileId || selectedMediaContentType === "post") {
       return () => {
         isMounted = false;
       };
     }
 
-    resolveMediaFileUrl(selectedMediaFile.id)
+    resolveMediaFileUrl(selectedMediaFileId)
       .then((url) => {
         if (isMounted) {
           setSelectedMediaUrl(url);
@@ -557,7 +560,7 @@ const App = () => {
     return () => {
       isMounted = false;
     };
-  }, [selectedLesson, selectedMediaFile]);
+  }, [selectedMediaContentType, selectedMediaFileId, selectedMediaLessonId]);
 
   const phoneEligibleMediaCount = snapshot.lessons.filter((lesson) => {
     const mediaFile = mediaByLessonId.get(lesson.id);
@@ -2012,7 +2015,7 @@ const PlayerSurface = ({
       element.currentTime = progressSeconds;
       lastSavedSecondRef.current = progressSeconds;
     }
-    if (duration) {
+    if (duration && duration !== lesson.durationSeconds) {
       onSaveWatchState(lesson.id, progressSeconds, duration, false);
     }
   };
