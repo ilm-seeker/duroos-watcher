@@ -11,6 +11,7 @@
 - Fetch target media tools: `npm run media-tools:fetch -- --target=<target-triple>`.
 - Local app-only macOS verification: `npm run tauri:build:app`.
 - Full local packaging: `npm run tauri:build:full`.
+- Release blocker preflight: `npm run release:preflight`.
 - Production release packaging: tag push through `.github/workflows/release.yml`.
 - Production evidence gate: `npm run release:production-gate`.
 
@@ -39,6 +40,20 @@ Run these on macOS, Windows, and Linux before production labeling:
 - Release-key custody for Tauri signing if updater distribution is enabled later.
 - Verified extraction report from `npm run media-tools:fetch` plus license carry-forward for every packaged entry in `src-tauri/binaries/media-tools.manifest.json`.
 - Final release notes that state third-party endpoint presets are editable, public, and not operated by Duroos.
+
+Run `npm run release:preflight` before pushing a release tag. It checks repo-side release rules,
+GitHub alert state, expected signing secret names, release/tag presence, the Windows signing wiring
+gap, and the production evidence file. It is expected to fail until the external signing credentials,
+tag release, artifact audit, and manual QA evidence are present.
+
+Expected GitHub secret names for production preflight:
+`TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, `APPLE_CERTIFICATE`,
+`APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`,
+`APPLE_TEAM_ID`, `WINDOWS_CERTIFICATE`, and `WINDOWS_CERTIFICATE_PASSWORD`.
+
+Expected GitHub variable names for Windows signing preflight:
+`WINDOWS_CERTIFICATE_THUMBPRINT` and `WINDOWS_TIMESTAMP_URL`. These are not enough by themselves;
+the release workflow or Tauri config must still be wired to a verified Windows signing path.
 
 ## Production Evidence Required
 

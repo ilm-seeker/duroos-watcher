@@ -11,6 +11,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "media-tools:fetch": "node scripts/fetch-media-tools.mjs",
+    "release:preflight": "node scripts/release-preflight.mjs",
     "release:check": "node scripts/release-check.mjs",
     "release:audit-artifacts": "node scripts/audit-release-artifacts.mjs",
     "release:production-gate": "node scripts/production-release-gate.mjs",

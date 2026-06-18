@@ -141,6 +141,8 @@ The repo prepares cross-platform builds for macOS app/DMG, Windows NSIS/MSI, and
 
 Use `npm run tauri:build:app` for local macOS app-only build verification. Use `npm run tauri:build:full` or the tag release workflow for full package generation; local full macOS packaging can still hit the DMG Finder/AppleScript packaging hang and is not production proof by itself.
 
+Run `npm run release:preflight` before pushing a release tag to list missing signing credentials, open GitHub alerts, release/evidence gaps, and Windows signing workflow gaps.
+
 Unsigned artifacts, unnotarized builds, and builds without pinned bundled media-tool checksums are alpha/testing artifacts only.
 
 ## Content Policy
