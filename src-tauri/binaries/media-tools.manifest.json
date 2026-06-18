@@ -54,7 +54,7 @@
       "version": "@ffmpeg-installer/darwin-arm64@4.1.5",
       "sourceUrl": "https://registry.npmjs.org/@ffmpeg-installer/darwin-arm64/-/darwin-arm64-4.1.5.tgz",
       "sha256": "8a4306e64ed3ba3cb5e51093266c8c72f65314bec146c899a50426f21aaa0f44",
-      "license": "FFmpeg upstream license",
+      "license": "https://git.ffmpeg.org/gitweb/ffmpeg.git/blob_plain/HEAD:/LICENSE.md",
       "integrity": "sha512-hYqTiP63mXz7wSQfuqfFwfLOfwwFChUedeCVKkBtl/cliaTM7/ePI9bVzfZ2c+dWu3TqCwLDRWNSJ5pqZl8otA=="
     },
     {

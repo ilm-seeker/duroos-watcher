@@ -8,6 +8,7 @@
 
 ## Build Commands
 
+- Fetch target media tools: `npm run media-tools:fetch -- --target=<target-triple>`.
 - Local app-only macOS verification: `npm run tauri:build:app`.
 - Full local packaging: `npm run tauri:build:full`.
 - Production release packaging: tag push through `.github/workflows/release.yml`.
@@ -35,13 +36,14 @@ Run these on macOS, Windows, and Linux before production labeling:
 - Apple Developer signing identity and notarization credentials.
 - Windows code-signing certificate.
 - Release-key custody for Tauri signing if updater distribution is enabled later.
-- Verified extraction and license carry-forward for every entry in `src-tauri/binaries/media-tools.manifest.json`.
+- Verified extraction report from `npm run media-tools:fetch` plus license carry-forward for every packaged entry in `src-tauri/binaries/media-tools.manifest.json`.
 - Final release notes that state third-party endpoint presets are editable, public, and not operated by Duroos.
 
 ## Production Evidence Required
 
 - Successful GitHub Actions CI matrix run on macOS, Windows, and Ubuntu for the exact release commit.
 - Successful tag release workflow with artifact audit uploads for each platform.
+- `media-tools-report.json` for each target whose package includes bundled media tools.
 - macOS signed and notarized app/DMG evidence.
 - Windows signed installer evidence.
 - Linux AppImage/deb install and launch evidence.

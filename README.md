@@ -88,6 +88,16 @@ yt-dlp --version
 On Windows and Linux, use the package manager or pinned binary source you will use for release
 builds, then verify `yt-dlp --version` from the same shell that launches Tauri.
 
+Release media tools are pinned in `src-tauri/binaries/media-tools.manifest.json`. To fetch and
+verify the pinned tools for a packaging target, run:
+
+```bash
+npm run media-tools:fetch -- --target=aarch64-apple-darwin
+```
+
+The generated `src-tauri/binaries/vendor/<target>/media-tools-report.json` is release evidence and
+must match the manifest before those binaries are copied into a production artifact.
+
 Archive.org item URLs such as `https://archive.org/details/<identifier>` are expanded through
 `https://archive.org/metadata/<identifier>`, then supported files are downloaded from direct
 `archive.org/download` links.
