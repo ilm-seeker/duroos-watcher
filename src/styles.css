@@ -1975,21 +1975,32 @@ button.compact-row-active {
 
 .publisher-progress-card {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 14px;
-  align-items: center;
-  border: 1px solid rgba(47, 102, 144, 0.24);
-  border-left: 4px solid var(--blue);
+  grid-template-columns: minmax(230px, 1fr) minmax(220px, 0.9fr);
+  gap: 12px;
+  align-items: stretch;
+  border: 1px solid var(--line);
   border-radius: var(--radius);
-  background: var(--blue-soft);
-  color: #214e71;
-  padding: 13px 14px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 12px;
 }
 
-.publisher-progress-card div {
+.publisher-progress-main,
+.publisher-progress-next {
   display: grid;
-  gap: 4px;
+  align-content: center;
+  gap: 8px;
   min-width: 0;
+}
+
+.publisher-progress-main {
+  border-right: 1px solid var(--line);
+  padding-right: 12px;
+}
+
+.publisher-progress-copy {
+  display: grid;
+  gap: 3px;
 }
 
 .publisher-progress-card span {
@@ -1999,8 +2010,16 @@ button.compact-row-active {
   text-transform: uppercase;
 }
 
+.publisher-progress-copy span {
+  color: var(--emerald);
+}
+
+.publisher-progress-next span {
+  color: var(--muted);
+}
+
 .publisher-progress-card strong {
-  color: #173c58;
+  color: var(--ink);
   font-size: 15px;
   font-weight: 900;
   line-height: 1.2;
@@ -2008,20 +2027,24 @@ button.compact-row-active {
 
 .publisher-progress-card p {
   margin: 0;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 650;
   line-height: 1.45;
 }
 
-.publisher-progress-count {
-  display: inline-flex;
-  min-width: 46px;
-  min-height: 46px;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid rgba(47, 102, 144, 0.22);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.62);
+.publisher-progress-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-muted);
+}
+
+.publisher-progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--emerald);
 }
 
 .publisher-step-list {
@@ -3247,8 +3270,14 @@ button.compact-row-active {
     grid-template-columns: 1fr;
   }
 
-  .feed-follow-panel > .secondary-action,
-  .publisher-progress-count {
+  .publisher-progress-main {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    padding-right: 0;
+    padding-bottom: 12px;
+  }
+
+  .feed-follow-panel > .secondary-action {
     justify-self: start;
   }
 

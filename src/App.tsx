@@ -3824,6 +3824,9 @@ const TeacherPublisherPanel = ({
   const requiredPublisherSteps = publisherSteps.filter((step) => !step.optional);
   const completedRequiredPublisherSteps = requiredPublisherSteps.filter((step) => step.complete);
   const nextRequiredPublisherStep = requiredPublisherSteps.find((step) => !step.complete);
+  const publisherProgressPercent = Math.round(
+    (completedRequiredPublisherSteps.length / requiredPublisherSteps.length) * 100,
+  );
 
   useEffect(() => {
     let isMounted = true;
@@ -4035,21 +4038,36 @@ const TeacherPublisherPanel = ({
         </div>
       </div>
       <div className="publisher-progress-card" aria-label="Publisher setup progress">
-        <div>
+        <div className="publisher-progress-main">
+          <div className="publisher-progress-copy">
+            <span>Setup progress</span>
+            <strong>
+              {completedRequiredPublisherSteps.length}/{requiredPublisherSteps.length} required
+              steps ready
+            </strong>
+          </div>
+          <div
+            className="publisher-progress-track"
+            aria-label="Required publisher setup"
+            aria-valuemax={100}
+            aria-valuemin={0}
+            aria-valuenow={publisherProgressPercent}
+            role="progressbar"
+          >
+            <span style={{ width: `${publisherProgressPercent}%` }} />
+          </div>
+        </div>
+        <div className="publisher-progress-next">
           <span>
-            {nextRequiredPublisherStep ? "Next required step" : "Required setup complete"}
+            {nextRequiredPublisherStep
+              ? `${nextRequiredPublisherStep.title} needed`
+              : "Ready to publish"}
           </span>
-          <strong>
-            {nextRequiredPublisherStep?.title ?? "Review and publish"}
-          </strong>
           <p>
             {nextRequiredPublisherStep?.detail ??
-              "Check mirror choices, then publish the signed channel update."}
+              "Review the channel details, then publish the signed channel update."}
           </p>
         </div>
-        <strong className="publisher-progress-count">
-          {completedRequiredPublisherSteps.length}/{requiredPublisherSteps.length}
-        </strong>
       </div>
       {panelNotice ? (
         <p className="publisher-notice" role="status">
