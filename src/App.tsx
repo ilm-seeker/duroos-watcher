@@ -4037,36 +4037,26 @@ const TeacherPublisherPanel = ({
           <StatusChip label="No central catalog" tone="positive" />
         </div>
       </div>
-      <div className="publisher-progress-card" aria-label="Publisher setup progress">
-        <div className="publisher-progress-main">
-          <div className="publisher-progress-copy">
-            <span>Setup progress</span>
-            <strong>
-              {completedRequiredPublisherSteps.length}/{requiredPublisherSteps.length} required
-              steps ready
-            </strong>
-          </div>
-          <div
-            className="publisher-progress-track"
-            aria-label="Required publisher setup"
-            aria-valuemax={100}
-            aria-valuemin={0}
-            aria-valuenow={publisherProgressPercent}
-            role="progressbar"
-          >
-            <span style={{ width: `${publisherProgressPercent}%` }} />
-          </div>
+      <div className="publisher-setup-strip" aria-label="Publisher setup progress">
+        <div className="publisher-setup-count">
+          <span>Required</span>
+          <strong>
+            {completedRequiredPublisherSteps.length}/{requiredPublisherSteps.length}
+          </strong>
         </div>
-        <div className="publisher-progress-next">
-          <span>
-            {nextRequiredPublisherStep
-              ? `${nextRequiredPublisherStep.title} needed`
-              : "Ready to publish"}
-          </span>
-          <p>
-            {nextRequiredPublisherStep?.detail ??
-              "Review the channel details, then publish the signed channel update."}
-          </p>
+        <div
+          className="publisher-setup-meter"
+          aria-label="Required publisher setup"
+          aria-valuemax={100}
+          aria-valuemin={0}
+          aria-valuenow={publisherProgressPercent}
+          role="progressbar"
+        >
+          <span style={{ width: `${publisherProgressPercent}%` }} />
+        </div>
+        <div className="publisher-setup-next">
+          <strong>{nextRequiredPublisherStep?.title ?? "Publish"}</strong>
+          <p>{nextRequiredPublisherStep?.detail ?? "Review and publish the signed channel."}</p>
         </div>
       </div>
       {panelNotice ? (
