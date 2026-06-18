@@ -8377,17 +8377,30 @@ mod tests {
 
     #[test]
     fn native_player_launch_reports_immediate_exit() {
-        let command = NativePlayerCommand {
-            name: "failing-player".to_string(),
-            program: "/bin/sh".to_string(),
-            args: vec![
+        #[cfg(target_os = "windows")]
+        let (program, args) = (
+            "cmd".to_string(),
+            vec![
+                "/C".to_string(),
+                "echo launch failed 1>&2 & exit /B 42".to_string(),
+            ],
+        );
+        #[cfg(not(target_os = "windows"))]
+        let (program, args) = (
+            "/bin/sh".to_string(),
+            vec![
                 "-c".to_string(),
                 "echo launch failed >&2; exit 42".to_string(),
             ],
+        );
+        let command = NativePlayerCommand {
+            name: "failing-player".to_string(),
+            program,
+            args,
         };
 
-        let error =
-            spawn_native_player_checked(&command, Path::new("/tmp/duroos-test.mp4")).unwrap_err();
+        let media_path = env::temp_dir().join("duroos-test.mp4");
+        let error = spawn_native_player_checked(&command, &media_path).unwrap_err();
 
         assert!(error.contains("exited immediately"));
         assert!(error.contains("launch failed"));

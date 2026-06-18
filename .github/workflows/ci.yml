@@ -23,11 +23,9 @@ jobs:
       - name: Install Ubuntu Tauri dependencies
         if: runner.os == 'Linux'
         timeout-minutes: 15
-        env:
-          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update -o Acquire::Retries=3
-          sudo apt-get install -y --no-install-recommends \
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get update -o Acquire::Retries=3
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \

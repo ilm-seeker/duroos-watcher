@@ -39,9 +39,10 @@ jobs:
 
       - name: Install Ubuntu Tauri dependencies
         if: runner.os == 'Linux'
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get update -o Acquire::Retries=3
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
@@ -91,35 +92,13 @@ jobs:
           prerelease: true
           args: ${{ matrix.platform.args }}
 
-      - name: Generate artifact checksums
-        shell: bash
-        run: |
-          node <<'NODE'
-          const { createHash } = require('node:crypto');
-          const { readdirSync, readFileSync, statSync, writeFileSync } = require('node:fs');
-          const { join } = require('node:path');
-          const root = 'src-tauri/target';
-          const suffixes = ['.dmg', '.app.tar.gz', '.msi', '.exe', '.AppImage', '.deb'];
-          const files = [];
-          const walk = (dir) => {
-            for (const entry of readdirSync(dir)) {
-              const path = join(dir, entry);
-              const stat = statSync(path);
-              if (stat.isDirectory()) walk(path);
-              else if (suffixes.some((suffix) => path.endsWith(suffix))) files.push(path);
-            }
-          };
-          walk(root);
-          files.sort();
-          const lines = files.map((file) => {
-            const hash = createHash('sha256').update(readFileSync(file)).digest('hex');
-            return `${hash}  ${file}`;
-          });
-          writeFileSync('artifact-checksums.txt', `${lines.join('\n')}\n`);
-          NODE
+      - name: Audit release artifacts
+        run: npm run release:audit-artifacts -- --out=artifact-checksums.txt --json=artifact-audit.json
 
-      - name: Upload checksums
+      - name: Upload artifact audit
         uses: actions/upload-artifact@v4
         with:
-          name: checksums-${{ matrix.platform.name }}
-          path: artifact-checksums.txt
+          name: artifact-audit-${{ matrix.platform.name }}
+          path: |
+            artifact-checksums.txt
+            artifact-audit.json
