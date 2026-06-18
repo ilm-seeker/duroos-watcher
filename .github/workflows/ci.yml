@@ -24,7 +24,15 @@ jobs:
         if: runner.os == 'Linux'
         timeout-minutes: 15
         run: |
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get update -o Acquire::Retries=3
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources
+          fi
+          sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get update \
+            -o Acquire::Retries=3 \
+            -o Acquire::ForceIPv4=true \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
