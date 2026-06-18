@@ -3810,7 +3810,7 @@ fn normalize_source_input(input: &str) -> Result<String, String> {
         trimmed.to_string()
     };
 
-    if with_scheme.starts_with("lbry://") {
+    if with_scheme.starts_with("lbry://") || is_nostr_reference(&with_scheme) {
         return Ok(with_scheme);
     }
 
@@ -7605,6 +7605,18 @@ mod tests {
         assert!(is_nostr_reference("nostr:naddr1example"));
         assert!(is_nostr_reference("nostr:npub1example"));
         assert!(is_nostr_reference("nostr+ws://relay.example"));
+    }
+
+    #[test]
+    fn source_normalization_allows_nostr_channel_refs() {
+        assert_eq!(
+            normalize_source_input(" naddr1example ").unwrap(),
+            "naddr1example"
+        );
+        assert_eq!(
+            normalize_source_input("nostr:naddr1example").unwrap(),
+            "nostr:naddr1example"
+        );
     }
 
     #[test]
