@@ -53,7 +53,11 @@ Expected GitHub secret names for production preflight:
 
 Expected GitHub variable names for Windows signing preflight:
 `WINDOWS_CERTIFICATE_THUMBPRINT` and `WINDOWS_TIMESTAMP_URL`. These are not enough by themselves;
-the release workflow or Tauri config must still be wired to a verified Windows signing path.
+the release workflow imports the base64-encoded PFX from `WINDOWS_CERTIFICATE`, writes a generated
+`src-tauri/tauri.windows.conf.json` with the thumbprint and timestamp URL, and lets Tauri sign the
+NSIS/MSI outputs from the certificate store. `WINDOWS_CERTIFICATE_THUMBPRINT` must be the 40-character
+SHA-1 thumbprint of the imported certificate, and `WINDOWS_TIMESTAMP_URL` must be an HTTPS timestamp
+server URL.
 
 ## Production Evidence Required
 
