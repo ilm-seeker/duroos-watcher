@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { extname } from "node:path";
 
 const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
@@ -37,6 +37,15 @@ for (const target of requiredBundleTargets) {
 }
 if (tauriConfig.bundle?.active !== true) {
   failures.push("Tauri bundle.active must be true for release builds.");
+}
+if (!existsSync("src-tauri/icons/icon.png")) {
+  failures.push("Missing Tauri PNG app icon: src-tauri/icons/icon.png");
+}
+if (
+  (bundleTargets.includes("nsis") || bundleTargets.includes("msi")) &&
+  !existsSync("src-tauri/icons/icon.ico")
+) {
+  failures.push("Missing Windows app icon required by tauri-build: src-tauri/icons/icon.ico");
 }
 
 const trackedFiles = execFileSync("git", ["ls-files"], { encoding: "utf8" })
