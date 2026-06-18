@@ -16,6 +16,20 @@ describe("displayJobDetail", () => {
     });
   });
 
+  it("summarizes already-redacted saved local path text", () => {
+    expect(
+      displayJobDetail(
+        "Saved [local path] Support/io.duroos.watcher/library/downloads/source-youtube/lesson/video.mp4",
+        "downloaded",
+      ),
+    ).toEqual({
+      summary: "Saved in the app library.",
+      technicalDetail:
+        "[local path] Support/io.duroos.watcher/library/downloads/source-youtube/lesson/video.mp4",
+      technicalLabel: "Show saved path",
+    });
+  });
+
   it("collapses failed technical detail behind an explicit disclosure", () => {
     const detail =
       "Could not fetch https://example.test/feed.xml: HTTP 404 Not Found. YouTube playlist and channel imports require a public playlist_id or channel_id that YouTube exposes through its RSS feed.";

@@ -20,6 +20,8 @@ import {
   ListVideo,
   Lock,
   MessageSquare,
+  PanelLeftClose,
+  PanelLeftOpen,
   Play,
   QrCode,
   RefreshCcw,
@@ -73,6 +75,13 @@ import {
 } from "./lib/tauri";
 import type { ManifestValidationReport } from "./domain/collectionManifest";
 import { displayJobDetail } from "./domain/jobDisplay";
+import {
+  filterQueueJobs,
+  queueFilterLabel,
+  queueFilterMatches,
+  queueFilters,
+  type QueueFilter,
+} from "./domain/jobQueue";
 import type {
   AppSnapshot,
   ArchiveMirrorConfig,
@@ -115,10 +124,11 @@ import { seedSnapshot } from "./data/seed";
 
 type ViewMode = "library" | "relays" | "sources" | "queue";
 type ImportMode = "local" | "source" | "feed" | "manifest" | "keys";
-type QueueFilter = "all" | "active" | "needs-attention" | "downloaded";
 type BusySourceAction = { sourceId: string; action: "clear" | "download" } | null;
 type PhoneAccessBusyAction = "start" | "stop" | null;
 type MediaStorageBusyAction = "audit" | "cleanup" | null;
+
+const sidebarCollapsedStorageKey = "duroos.sidebarCollapsed";
 
 const defaultRuntimeDiagnostics: RuntimeDiagnostics = {
   desktopRuntimeAvailable: isTauriRuntime(),
@@ -364,6 +374,13 @@ const App = () => {
   const [selectedSourceId, setSelectedSourceId] = useState("all");
   const [viewMode, setViewMode] = useState<ViewMode>("library");
   const [isOnlineMode, setIsOnlineMode] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+
+    return window.localStorage.getItem(sidebarCollapsedStorageKey) === "true";
+  });
   const [isImportOpen, setIsImportOpen] = useState(false);
   const [initialImportMode, setInitialImportMode] = useState<ImportMode>("local");
   const [systemNotice, setSystemNotice] = useState("");
@@ -384,6 +401,10 @@ const App = () => {
   const [mediaStorageAudit, setMediaStorageAudit] = useState<MediaStorageAudit | null>(null);
   const [mediaStorageBusyAction, setMediaStorageBusyAction] =
     useState<MediaStorageBusyAction>(null);
+
+  useEffect(() => {
+    window.localStorage.setItem(sidebarCollapsedStorageKey, String(isSidebarCollapsed));
+  }, [isSidebarCollapsed]);
 
   useEffect(() => {
     let isMounted = true;
@@ -952,10 +973,14 @@ const App = () => {
   };
 
   return (
-    <div className="app-shell">
+    <div
+      className={isSidebarCollapsed ? "app-shell app-shell-sidebar-collapsed" : "app-shell"}
+    >
       <Sidebar
         viewMode={viewMode}
         setViewMode={setViewMode}
+        isCollapsed={isSidebarCollapsed}
+        onToggleCollapsed={() => setIsSidebarCollapsed((current) => !current)}
       />
       <main className="workspace">
         <TopBar
@@ -1092,11 +1117,15 @@ const App = () => {
 interface SidebarProps {
   viewMode: ViewMode;
   setViewMode: (mode: ViewMode) => void;
+  isCollapsed: boolean;
+  onToggleCollapsed: () => void;
 }
 
 const Sidebar = ({
   viewMode,
   setViewMode,
+  isCollapsed,
+  onToggleCollapsed,
 }: SidebarProps) => {
   const navItems: { mode: ViewMode; label: string; icon: typeof Library }[] = [
     { mode: "library", label: "Library", icon: Library },
@@ -1106,15 +1135,33 @@ const Sidebar = ({
   ];
 
   return (
-    <aside className="sidebar" aria-label="Primary">
-      <div className="brand-lockup">
-        <div className="brand-mark">
-          <BookOpen size={22} />
+    <aside
+      id="primary-sidebar"
+      className={isCollapsed ? "sidebar sidebar-collapsed" : "sidebar"}
+      aria-label="Primary"
+      data-collapsed={isCollapsed ? "true" : "false"}
+    >
+      <div className="sidebar-header">
+        <div className="brand-lockup">
+          <div className="brand-mark">
+            <BookOpen size={22} />
+          </div>
+          <div className="brand-copy">
+            <p className="brand-name">Duroos Watcher</p>
+            <p className="brand-subtitle">Local study library</p>
+          </div>
         </div>
-        <div>
-          <p className="brand-name">Duroos Watcher</p>
-          <p className="brand-subtitle">Local study library</p>
-        </div>
+        <button
+          type="button"
+          className="sidebar-toggle"
+          onClick={onToggleCollapsed}
+          aria-controls="primary-sidebar"
+          aria-expanded={!isCollapsed}
+          aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          title={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          {isCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+        </button>
       </div>
 
       <nav className="nav-stack">
@@ -1143,6 +1190,14 @@ const Sidebar = ({
           <li>No telemetry</li>
           <li>Local credentials only</li>
         </ul>
+      </div>
+
+      <div
+        className="privacy-rail"
+        aria-label="Privacy defaults: no accounts, no telemetry, local credentials only"
+        title="Privacy defaults: no accounts, no telemetry, local credentials only"
+      >
+        <ShieldCheck size={18} />
       </div>
 
     </aside>
@@ -4155,37 +4210,6 @@ const SourcesView = ({
   );
 };
 
-const queueFilterMatches = (filter: QueueFilter, job: Job): boolean => {
-  switch (filter) {
-    case "all":
-      return true;
-    case "active":
-      return job.state === "queued" || job.state === "running" || job.state === "live";
-    case "needs-attention":
-      return (
-        job.state === "needs-permission" ||
-        job.state === "failed-auth" ||
-        job.state === "unsupported" ||
-        job.state === "failed"
-      );
-    case "downloaded":
-      return job.state === "downloaded" || job.state === "found" || job.state === "archived";
-  }
-};
-
-const queueFilterLabel = (filter: QueueFilter): string => {
-  switch (filter) {
-    case "all":
-      return "All";
-    case "active":
-      return "Active";
-    case "needs-attention":
-      return "Needs Attention";
-    case "downloaded":
-      return "Downloaded";
-  }
-};
-
 const QueueView = ({
   jobs,
   sources,
@@ -4201,19 +4225,12 @@ const QueueView = ({
 }) => {
   const [activeFilter, setActiveFilter] = useState<QueueFilter>("all");
   const queueQuery = normalizeSearch(query);
-  const visibleJobs = jobs.filter((job) => {
-    const sourceLabel = sources.get(job.sourceId ?? "")?.label ?? "System";
-    return (
-      queueFilterMatches(activeFilter, job) &&
-      includesQuery(queueQuery, [
-        job.label,
-        job.detail,
-        job.state,
-        job.kind,
-        sourceLabel,
-        formatDate(job.updatedAt),
-      ])
-    );
+  const visibleJobs = filterQueueJobs({
+    jobs,
+    sourceById: sources,
+    filter: activeFilter,
+    query,
+    formatDate,
   });
 
   return (
@@ -4235,7 +4252,7 @@ const QueueView = ({
       </div>
 
       <div className="queue-filter-row" aria-label="Update queue filters">
-        {(["all", "active", "needs-attention", "downloaded"] as QueueFilter[]).map((filter) => {
+        {queueFilters.map((filter) => {
           const count = jobs.filter((job) => queueFilterMatches(filter, job)).length;
           return (
             <button

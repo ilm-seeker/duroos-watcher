@@ -68,6 +68,11 @@ button:focus-visible {
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr);
   min-height: 100vh;
+  transition: grid-template-columns 180ms ease;
+}
+
+.app-shell-sidebar-collapsed {
+  grid-template-columns: 88px minmax(0, 1fr);
 }
 
 .sidebar {
@@ -79,13 +84,40 @@ button:focus-visible {
   gap: 22px;
   border-right: 1px solid var(--line);
   background: #fbfaf6;
+  overflow: hidden;
   padding: 22px 16px;
+  transition:
+    padding 180ms ease,
+    gap 180ms ease;
+}
+
+.sidebar-collapsed {
+  gap: 18px;
+  padding: 18px 12px;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.sidebar-collapsed .sidebar-header {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
 }
 
 .brand-lockup {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
+}
+
+.brand-copy {
   min-width: 0;
 }
 
@@ -119,6 +151,34 @@ button:focus-visible {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.4;
+}
+
+.sidebar-toggle {
+  display: inline-flex;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: #39413f;
+  cursor: pointer;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    transform 140ms ease;
+}
+
+.sidebar-toggle:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-muted);
+  color: var(--ink);
+}
+
+.sidebar-toggle:active {
+  transform: translateY(1px);
 }
 
 .nav-stack {
@@ -161,6 +221,21 @@ button:focus-visible {
   color: var(--ink);
 }
 
+.sidebar-collapsed .brand-copy,
+.sidebar-collapsed .nav-item span,
+.sidebar-collapsed .privacy-panel {
+  display: none;
+}
+
+.sidebar-collapsed .brand-lockup,
+.sidebar-collapsed .nav-item {
+  justify-content: center;
+}
+
+.sidebar-collapsed .nav-item {
+  padding: 10px;
+}
+
 .privacy-panel {
   margin-top: auto;
   border: 1px solid var(--line);
@@ -184,6 +259,23 @@ button:focus-visible {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.7;
+}
+
+.privacy-rail {
+  display: none;
+  width: 40px;
+  height: 40px;
+  margin: auto auto 0;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--emerald);
+}
+
+.sidebar-collapsed .privacy-rail {
+  display: flex;
 }
 
 .mode-toggle {
@@ -2448,14 +2540,23 @@ button.compact-row-active {
   }
 
   .sidebar {
+    gap: 18px;
     padding: 18px 12px;
+  }
+
+  .sidebar-header {
+    justify-content: center;
+  }
+
+  .sidebar-toggle {
+    display: none;
   }
 
   .brand-lockup {
     justify-content: center;
   }
 
-  .brand-lockup div:last-child,
+  .brand-copy,
   .nav-item span,
   .privacy-panel {
     display: none;
@@ -2463,6 +2564,10 @@ button.compact-row-active {
 
   .nav-item {
     justify-content: center;
+  }
+
+  .privacy-rail {
+    display: flex;
   }
 
   .dashboard-grid {
@@ -2503,13 +2608,25 @@ button.compact-row-active {
     height: auto;
     flex-direction: row;
     align-items: center;
+    gap: 14px;
     border-right: 0;
     border-bottom: 1px solid var(--line);
     overflow-x: auto;
   }
 
-  .brand-lockup div:last-child,
+  .sidebar-collapsed .sidebar-header,
+  .sidebar-header {
+    display: flex;
+    justify-content: flex-start;
+  }
+
+  .brand-copy,
+  .sidebar-collapsed .brand-copy,
   .nav-item span {
+    display: block;
+  }
+
+  .sidebar-collapsed .nav-item span {
     display: block;
   }
 
@@ -2518,7 +2635,9 @@ button.compact-row-active {
     min-width: max-content;
   }
 
-  .privacy-panel {
+  .privacy-panel,
+  .privacy-rail,
+  .sidebar-collapsed .privacy-rail {
     display: none;
   }
 
@@ -2579,7 +2698,9 @@ button.compact-row-active {
     padding: 12px;
   }
 
-  .brand-lockup div:last-child,
+  .brand-copy,
+  .sidebar-collapsed .brand-copy,
+  .sidebar-collapsed .nav-item span,
   .nav-item span {
     display: none;
   }
@@ -2620,5 +2741,19 @@ button.compact-row-active {
 
   .import-options {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell,
+  .sidebar,
+  .sidebar-toggle,
+  .nav-item,
+  .mode-toggle,
+  .primary-action,
+  .secondary-action,
+  .danger-action,
+  .icon-button {
+    transition: none;
   }
 }

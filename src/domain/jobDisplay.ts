@@ -6,8 +6,10 @@ export interface DisplayJobDetail {
   technicalLabel?: string;
 }
 
+const savedPathPrefixes = ["Saved /", "Saved [local path]"];
+
 export const displayJobDetail = (detail: string, state: Job["state"]): DisplayJobDetail => {
-  if (detail.startsWith("Saved /")) {
+  if (savedPathPrefixes.some((prefix) => detail.startsWith(prefix))) {
     return {
       summary: "Saved in the app library.",
       technicalDetail: detail.replace(/^Saved\s+/, ""),
