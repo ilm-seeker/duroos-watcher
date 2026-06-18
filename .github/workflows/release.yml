@@ -80,6 +80,43 @@ jobs:
       - name: Release repo checks
         run: npm run release:check
 
+      - name: Import Windows signing certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ vars.WINDOWS_CERTIFICATE_THUMBPRINT }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $required = @(
+            "WINDOWS_CERTIFICATE",
+            "WINDOWS_CERTIFICATE_PASSWORD",
+            "WINDOWS_CERTIFICATE_THUMBPRINT",
+            "WINDOWS_TIMESTAMP_URL"
+          )
+          foreach ($name in $required) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "$name is required for Windows release signing."
+            }
+          }
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP "duroos-watcher-signing.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $securePassword = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $expectedThumbprint = ($env:WINDOWS_CERTIFICATE_THUMBPRINT -replace '\s+', '').ToUpperInvariant()
+          $certificate = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $securePassword
+          if ($certificate.Thumbprint -ne $expectedThumbprint) {
+            throw "Imported Windows certificate thumbprint does not match WINDOWS_CERTIFICATE_THUMBPRINT."
+          }
+
+      - name: Prepare Windows signing config
+        if: runner.os == 'Windows'
+        env:
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ vars.WINDOWS_CERTIFICATE_THUMBPRINT }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: node scripts/prepare-windows-signing.mjs
+
       - name: Build Tauri artifacts
         uses: tauri-apps/tauri-action@v0
         timeout-minutes: 45
@@ -93,6 +130,8 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ vars.WINDOWS_CERTIFICATE_THUMBPRINT }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Duroos Watcher ${{ github.ref_name }}"
