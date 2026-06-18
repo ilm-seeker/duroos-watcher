@@ -45,10 +45,17 @@ Run these on macOS, Windows, and Linux before production labeling:
 - Successful GitHub Actions CI matrix run on macOS, Windows, and Ubuntu for the exact release commit.
 - Successful tag release workflow with artifact audit uploads for each platform.
 - `media-tools-report.json` for each target whose package includes bundled media tools.
+- No open GitHub code scanning or Dependabot alerts for the exact release commit.
 - macOS signed and notarized app/DMG evidence.
 - Windows signed installer evidence.
 - Linux AppImage/deb install and launch evidence.
 - Manual smoke-test notes for every item in the platform checklist above.
+
+The current `glib` Dependabot alert is a Linux production blocker, not a local application-code bug:
+`cargo update --manifest-path src-tauri/Cargo.toml -p glib --precise 0.20.12 --dry-run` fails because
+the Tauri Linux stack requires `gtk 0.18.x`, which requires `glib ^0.18`. Do not mark Linux production
+ready until that upstream dependency path is patched or Linux production distribution is explicitly
+removed from scope.
 
 Keep real production evidence in `docs/production-release-evidence.json` and downloaded artifact proof
 under `release-evidence/`; both are ignored by Git because manual QA notes, signing proof, and package
