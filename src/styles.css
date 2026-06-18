@@ -462,8 +462,8 @@ button:focus-visible {
 }
 
 .section-header h2,
-.page-heading h1,
-.player-copy h1,
+.page-heading h2,
+.player-copy h2,
 .drawer-header h1,
 .job-copy h2 {
   margin: 0;
@@ -913,7 +913,7 @@ button:focus-visible {
   gap: 7px;
 }
 
-.player-copy h1 {
+.player-copy h2 {
   font-size: 19px;
   font-weight: 900;
   line-height: 1.25;
@@ -1169,6 +1169,10 @@ button:focus-visible {
   line-height: 1.35;
 }
 
+.phone-endpoint-field {
+  margin: 0;
+}
+
 .phone-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1222,6 +1226,45 @@ button:focus-visible {
 .source-readiness-row-active {
   border-color: var(--line);
   background: var(--surface-muted);
+}
+
+.storage-hygiene-panel {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 14px;
+}
+
+.storage-hygiene-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.storage-hygiene-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.storage-sample-list {
+  display: grid;
+  gap: 6px;
+}
+
+.storage-sample-list code {
+  overflow-wrap: anywhere;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fbfaf6;
+  color: #4a554f;
+  padding: 7px 8px;
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .source-readiness-row div:nth-child(2) {
@@ -1317,7 +1360,7 @@ button.compact-row-active {
   margin-bottom: 16px;
 }
 
-.page-heading h1 {
+.page-heading h2 {
   font-size: 24px;
   font-weight: 900;
   line-height: 1.2;
@@ -1643,6 +1686,54 @@ button.compact-row-active {
 }
 
 .publisher-notice {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.endpoint-test-report {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fbfaf6;
+  padding: 9px;
+}
+
+.endpoint-test-summary,
+.endpoint-test-row {
+  display: grid;
+  gap: 6px;
+}
+
+.endpoint-test-summary span:not(.status-chip),
+.endpoint-test-row span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.endpoint-test-grid {
+  display: grid;
+  gap: 7px;
+}
+
+.endpoint-test-row {
+  border-top: 1px solid var(--line);
+  padding-top: 7px;
+}
+
+.endpoint-test-row code {
+  overflow-wrap: anywhere;
+  color: #4a554f;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.offline-inline-note {
   margin: 0;
   color: var(--muted);
   font-size: 12px;

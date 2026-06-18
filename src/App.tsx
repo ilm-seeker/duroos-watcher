@@ -42,8 +42,10 @@ import QRCode from "qrcode";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   addTrustedCurator,
+  auditMediaStorage,
   chooseLocalMediaPaths,
   clearSourceContent,
+  cleanupMediaStorage,
   createPublisherProfile,
   downloadSourceMedia,
   getPhoneMediaSession,
@@ -64,6 +66,7 @@ import {
   saveWatchState,
   startPhoneMediaSession,
   stopPhoneMediaSession,
+  testPublisherEndpoints,
   unlockPublisherProfile,
   updateLessonOrganization,
   validateCollectionManifest,
@@ -79,10 +82,12 @@ import type {
   Lesson,
   LessonNote,
   LiveSession,
+  MediaStorageAudit,
   MediaFile,
   NostrChannelPreview,
   PhoneMediaSession,
   PublishedLessonDraft,
+  PublisherEndpointTestReport,
   PublisherProfile,
   ProvenanceRecord,
   RuntimeDiagnostics,
@@ -110,6 +115,7 @@ import { seedSnapshot } from "./data/seed";
 type ViewMode = "library" | "relays" | "sources" | "queue";
 type BusySourceAction = { sourceId: string; action: "clear" | "download" } | null;
 type PhoneAccessBusyAction = "start" | "stop" | null;
+type MediaStorageBusyAction = "audit" | "cleanup" | null;
 
 const defaultRuntimeDiagnostics: RuntimeDiagnostics = {
   desktopRuntimeAvailable: isTauriRuntime(),
@@ -160,6 +166,20 @@ const formatDate = (value?: string): string => {
     hour: "numeric",
     minute: "2-digit",
   }).format(new Date(value));
+};
+
+const formatBytes = (bytes: number): string => {
+  const safeBytes = Math.max(0, bytes);
+  if (safeBytes >= 1024 * 1024 * 1024) {
+    return `${(safeBytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  }
+  if (safeBytes >= 1024 * 1024) {
+    return `${(safeBytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  if (safeBytes >= 1024) {
+    return `${(safeBytes / 1024).toFixed(1)} KB`;
+  }
+  return `${safeBytes} B`;
 };
 
 const capabilityLabel = (level: CapabilityLevel): string => {
@@ -320,6 +340,9 @@ const App = () => {
   const [phoneAccessNotice, setPhoneAccessNotice] = useState("");
   const [publisherProfiles, setPublisherProfiles] = useState<PublisherProfile[]>([]);
   const [mediaThumbnailUrls, setMediaThumbnailUrls] = useState<Record<string, string>>({});
+  const [mediaStorageAudit, setMediaStorageAudit] = useState<MediaStorageAudit | null>(null);
+  const [mediaStorageBusyAction, setMediaStorageBusyAction] =
+    useState<MediaStorageBusyAction>(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -679,13 +702,14 @@ const App = () => {
     }
   };
 
-  const handleCopyPhoneLink = async () => {
-    if (!phoneSession?.playlistUrl) {
+  const handleCopyPhoneLink = async (playlistUrl?: string) => {
+    const link = playlistUrl ?? phoneSession?.playlistUrl;
+    if (!link) {
       return;
     }
 
     try {
-      await navigator.clipboard.writeText(phoneSession.playlistUrl);
+      await navigator.clipboard.writeText(link);
       setPhoneAccessNotice("Phone link copied.");
     } catch {
       setPhoneAccessNotice("Copy failed. Select and copy the link manually.");
@@ -721,6 +745,48 @@ const App = () => {
       setSystemNotice(message);
     } finally {
       setBusySourceAction(null);
+    }
+  };
+
+  const handleAuditMediaStorage = async () => {
+    try {
+      setMediaStorageBusyAction("audit");
+      const result = await auditMediaStorage();
+      setMediaStorageAudit(result);
+      setSystemNotice(result.messages.join(" "));
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSystemNotice(message);
+    } finally {
+      setMediaStorageBusyAction(null);
+    }
+  };
+
+  const handleCleanupMediaStorage = async () => {
+    const staleFiles = mediaStorageAudit?.staleFiles ?? 0;
+    const staleBytes = mediaStorageAudit?.staleBytes ?? 0;
+    if (staleFiles <= 0) {
+      setSystemNotice("Run a storage scan first; no stale library files are currently listed.");
+      return;
+    }
+    const confirmed = window.confirm(
+      `Remove ${staleFiles} unreferenced file(s) from the app library and reclaim ${formatBytes(staleBytes)}? This cannot be undone.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      setMediaStorageBusyAction("cleanup");
+      const result = await cleanupMediaStorage();
+      setMediaStorageAudit(result.audit);
+      setSystemNotice(result.messages.join(" "));
+      await refreshSnapshot(result.messages.join(" "));
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSystemNotice(message);
+    } finally {
+      setMediaStorageBusyAction(null);
     }
   };
 
@@ -938,10 +1004,14 @@ const App = () => {
             jobs={snapshot.jobs}
             runtimeDiagnostics={runtimeDiagnostics}
             trustedCurators={snapshot.trustedCurators}
+            mediaStorageAudit={mediaStorageAudit}
+            mediaStorageBusyAction={mediaStorageBusyAction}
             busySourceAction={busySourceAction}
             onClearSource={handleClearSource}
             onDownloadSource={handleDownloadSource}
             onRemoveTrustedCurator={handleRemoveTrustedCurator}
+            onAuditMediaStorage={handleAuditMediaStorage}
+            onCleanupMediaStorage={handleCleanupMediaStorage}
           />
         ) : null}
 
@@ -1003,8 +1073,10 @@ const Sidebar = ({
             type="button"
             className={viewMode === mode ? "nav-item nav-item-active" : "nav-item"}
             onClick={() => setViewMode(mode)}
+            aria-label={label}
+            title={label}
           >
-            <Icon size={18} />
+            <Icon size={18} aria-hidden="true" />
             <span>{label}</span>
           </button>
         ))}
@@ -1202,7 +1274,7 @@ interface DashboardProps {
   onSelectSource: (sourceId: string) => void;
   onStartPhoneAccess: () => void;
   onStopPhoneAccess: () => void;
-  onCopyPhoneLink: () => void;
+  onCopyPhoneLink: (playlistUrl?: string) => void;
 }
 
 const Dashboard = ({
@@ -1730,6 +1802,16 @@ const PlayerPanel = ({
     (lesson.contentType === "video" || lesson.contentType === "audio") &&
     runtimeDiagnostics.nativePlaybackAvailable;
   const isOpeningNativePlayer = mediaFile ? busyNativeMediaId === mediaFile.id : false;
+  const activeMediaElementRef = useRef<HTMLMediaElement | null>(null);
+  useEffect(() => {
+    activeMediaElementRef.current = null;
+  }, [lesson.id]);
+  const resetActiveMediaElement = () => {
+    const element = activeMediaElementRef.current;
+    if (element) {
+      element.currentTime = 0;
+    }
+  };
 
   return (
     <section className="player-panel" aria-label="Selected lesson">
@@ -1740,11 +1822,14 @@ const PlayerPanel = ({
         mediaUrl={mediaUrl}
         mediaError={mediaError}
         watchState={watchState}
+        onMediaElementReady={(element) => {
+          activeMediaElementRef.current = element;
+        }}
         onMediaPlaybackError={onMediaPlaybackError}
         onSaveWatchState={onSaveWatchState}
       />
       <div className="player-copy">
-        <h1>{lesson.title}</h1>
+        <h2>{lesson.title}</h2>
         <p>{teacher?.displayName ?? "Unknown teacher"}</p>
         <div className="player-tags">
           <StatusChip label={collection?.title ?? "Unsorted"} tone="neutral" />
@@ -1813,6 +1898,7 @@ const PlayerPanel = ({
       <StudyProgressActions
         lesson={lesson}
         watchState={watchState}
+        onResetPlayback={resetActiveMediaElement}
         onSaveWatchState={onSaveWatchState}
       />
       <div className="provenance-box">
@@ -1892,10 +1978,12 @@ const LessonOrganizationEditor = ({
 const StudyProgressActions = ({
   lesson,
   watchState,
+  onResetPlayback,
   onSaveWatchState,
 }: {
   lesson: Lesson;
   watchState?: WatchState;
+  onResetPlayback: () => void;
   onSaveWatchState: (
     lessonId: string,
     progressSeconds: number,
@@ -1920,7 +2008,10 @@ const StudyProgressActions = ({
       <button
         type="button"
         className="secondary-action"
-        onClick={() => onSaveWatchState(lesson.id, 0, duration, false)}
+        onClick={() => {
+          onResetPlayback();
+          onSaveWatchState(lesson.id, 0, duration, false);
+        }}
         disabled={!watchState}
       >
         <Square size={15} />
@@ -1985,6 +2076,7 @@ const PlayerSurface = ({
   mediaUrl,
   mediaError,
   watchState,
+  onMediaElementReady,
   onMediaPlaybackError,
   onSaveWatchState,
 }: {
@@ -1994,6 +2086,7 @@ const PlayerSurface = ({
   mediaUrl: string;
   mediaError: string;
   watchState?: WatchState;
+  onMediaElementReady: (element: HTMLMediaElement | null) => void;
   onMediaPlaybackError: (message: string) => void;
   onSaveWatchState: (
     lessonId: string,
@@ -2037,6 +2130,7 @@ const PlayerSurface = ({
           className="media-player"
           controls
           preload="metadata"
+          ref={onMediaElementReady}
           src={mediaUrl}
           poster={thumbnailUrl}
           onError={handlePlaybackError}
@@ -2059,6 +2153,7 @@ const PlayerSurface = ({
           className="audio-player"
           controls
           preload="metadata"
+          ref={onMediaElementReady}
           src={mediaUrl}
           onError={handlePlaybackError}
           onLoadedMetadata={(event) => restoreProgress(event.currentTarget)}
@@ -2125,7 +2220,7 @@ const PlayerEmptyPanel = ({
         </span>
       </div>
       <div className="player-copy">
-        <h1>Ready for video, audio, and PDFs</h1>
+        <h2>Ready for video, audio, and PDFs</h2>
         <p>
           Local files play from the app library. Source downloads stay user-initiated and visible in
           the update queue.
@@ -2161,7 +2256,7 @@ const SearchEmptyPanel = ({
       </span>
     </div>
     <div className="player-copy">
-      <h1>No matching study items</h1>
+      <h2>No matching study items</h2>
       <p>Search checks lesson titles, descriptions, URLs, teachers, collections, and sources.</p>
       <div className="player-tags">
         <StatusChip label="Search active" tone="warning" />
@@ -2183,7 +2278,7 @@ interface PhoneAccessPanelProps {
   desktopRuntimeAvailable: boolean;
   onStart: () => void;
   onStop: () => void;
-  onCopyLink: () => void;
+  onCopyLink: (playlistUrl?: string) => void;
 }
 
 const PhoneAccessPanel = ({
@@ -2197,10 +2292,35 @@ const PhoneAccessPanel = ({
   onCopyLink,
 }: PhoneAccessPanelProps) => {
   const [qrDataUrl, setQrDataUrl] = useState("");
-  const playlistUrl = session?.playlistUrl ?? "";
+  const endpoints = session?.endpoints?.length
+    ? session.endpoints
+    : session?.playlistUrl
+      ? [
+          {
+            label: "Default link",
+            host: "",
+            kind: "other" as const,
+            baseUrl: session.baseUrl ?? "",
+            playlistUrl: session.playlistUrl,
+            preferred: true,
+          },
+        ]
+      : [];
+  const [selectedEndpointUrl, setSelectedEndpointUrl] = useState("");
+  const selectedEndpoint =
+    endpoints.find((endpoint) => endpoint.playlistUrl === selectedEndpointUrl) ??
+    endpoints.find((endpoint) => endpoint.preferred) ??
+    endpoints[0];
+  const playlistUrl = selectedEndpoint?.playlistUrl ?? "";
   const isActive = Boolean(session?.active && playlistUrl);
   const startDisabled =
     !desktopRuntimeAvailable || busyAction !== null || eligibleMediaCount === 0;
+
+  useEffect(() => {
+    const preferredEndpoint =
+      endpoints.find((endpoint) => endpoint.preferred) ?? endpoints[0];
+    setSelectedEndpointUrl(preferredEndpoint?.playlistUrl ?? "");
+  }, [session?.id]);
 
   useEffect(() => {
     let isMounted = true;
@@ -2266,11 +2386,30 @@ const PhoneAccessPanel = ({
             <span>Open in VLC</span>
             <code>{playlistUrl}</code>
           </div>
+          {endpoints.length > 1 ? (
+            <label className="field phone-endpoint-field">
+              <span>Network address</span>
+              <select
+                value={playlistUrl}
+                onChange={(event) => setSelectedEndpointUrl(event.target.value)}
+              >
+                {endpoints.map((endpoint) => (
+                  <option key={endpoint.playlistUrl} value={endpoint.playlistUrl}>
+                    {endpoint.label}
+                  </option>
+                ))}
+              </select>
+              <span className="field-hint">
+                {selectedEndpoint?.warning ??
+                  "Use the Wi-Fi/LAN address when VPN, Tor, or a privacy tunnel is active."}
+              </span>
+            </label>
+          ) : null}
           <div className="phone-actions">
             <button
               type="button"
               className="secondary-action"
-              onClick={onCopyLink}
+              onClick={() => onCopyLink(playlistUrl)}
               disabled={busyAction !== null}
             >
               <Copy size={15} />
@@ -2313,7 +2452,7 @@ const PhoneAccessPanel = ({
 
       <div className="phone-access-footnote">
         <Wifi size={15} />
-        <span>Only available on your Wi-Fi while sharing is on.</span>
+        <span>Use a Wi-Fi/LAN address for phone scans; VPN or Tor addresses may not be reachable.</span>
       </div>
       {notice ? <p className="phone-access-notice">{notice}</p> : null}
     </section>
@@ -2478,6 +2617,81 @@ const sourceReadiness = (
   }
 };
 
+const StorageHygienePanel = ({
+  audit,
+  busyAction,
+  onAudit,
+  onCleanup,
+}: {
+  audit: MediaStorageAudit | null;
+  busyAction: MediaStorageBusyAction;
+  onAudit: () => void;
+  onCleanup: () => void;
+}) => {
+  const staleFiles = audit?.staleFiles ?? 0;
+  const canCleanup = staleFiles > 0 && busyAction === null;
+
+  return (
+    <section className="storage-hygiene-panel">
+      <div className="storage-hygiene-heading">
+        <div className="matrix-source">
+          <Database size={18} aria-hidden="true" />
+          <div>
+            <strong>Storage Audit</strong>
+            <span>Find app-library files no current DB row references.</span>
+          </div>
+        </div>
+        <div className="managed-source-actions">
+          <button
+            type="button"
+            className="secondary-action"
+            onClick={onAudit}
+            disabled={busyAction !== null}
+          >
+            <Search size={15} />
+            <span>{busyAction === "audit" ? "Scanning" : "Scan Storage"}</span>
+          </button>
+          <button
+            type="button"
+            className="danger-action"
+            onClick={onCleanup}
+            disabled={!canCleanup}
+            title={
+              staleFiles > 0
+                ? "Remove unreferenced files from the managed app library."
+                : "Scan storage before cleanup."
+            }
+          >
+            <Trash2 size={15} />
+            <span>{busyAction === "cleanup" ? "Cleaning" : "Clean Stale Files"}</span>
+          </button>
+        </div>
+      </div>
+      <div className="storage-hygiene-stats">
+        <StatusChip label={`${audit?.scannedFiles ?? 0} scanned`} tone="neutral" />
+        <StatusChip label={`${audit?.referencedFiles ?? 0} referenced`} tone="positive" />
+        <StatusChip
+          label={`${staleFiles} stale`}
+          tone={staleFiles > 0 ? "warning" : "positive"}
+        />
+        <StatusChip label={formatBytes(audit?.staleBytes ?? 0)} tone="neutral" />
+        <StatusChip label={`${audit?.partialFiles ?? 0} fragments`} tone="neutral" />
+      </div>
+      {audit?.staleSamples.length ? (
+        <div className="storage-sample-list" aria-label="Stale file examples">
+          {audit.staleSamples.map((sample) => (
+            <code key={sample}>{sample}</code>
+          ))}
+        </div>
+      ) : (
+        <p className="panel-empty">
+          {audit ? audit.messages.join(" ") : "Run a scan before cleaning anything."}
+        </p>
+      )}
+    </section>
+  );
+};
+
 const TeacherPanel = ({
   groups,
   selectedTeacherId,
@@ -2598,7 +2812,7 @@ const RelaysView = ({
   <div className="wide-page">
     <div className="page-heading">
       <div>
-        <h1>Curator Relays</h1>
+        <h2>Curator Relays</h2>
         <p>
           Teacher and curator-owned feeds publish uploaded classes, signed manifests, live archives,
           and downloadable media enclosures.
@@ -2684,6 +2898,8 @@ const TeacherPublisherPanel = ({
   const [publishResult, setPublishResult] = useState("");
   const [shareQrDataUrl, setShareQrDataUrl] = useState("");
   const [panelNotice, setPanelNotice] = useState("");
+  const [endpointTestReport, setEndpointTestReport] =
+    useState<PublisherEndpointTestReport | null>(null);
   const [isWorking, setIsWorking] = useState(false);
   const selectedProfile = profiles.find((profile) => profile.id === profileId);
 
@@ -2771,6 +2987,15 @@ const TeacherPublisherPanel = ({
             : lessonDrafts.length === 0
               ? "Select media to publish."
               : "";
+  const endpointTestBlockedReason = !selectedProfile
+    ? "Create or select a publisher profile."
+    : passphrase.length < 8
+      ? "Enter the vault passphrase."
+      : relays.length === 0
+        ? "Add at least one Nostr relay."
+        : blossomServers.length === 0
+          ? "Add at least one Blossom server."
+          : "";
 
   useEffect(() => {
     let isMounted = true;
@@ -2840,6 +3065,32 @@ const TeacherPublisherPanel = ({
     try {
       const profile = await unlockPublisherProfile(selectedProfile.id, passphrase);
       setPanelNotice(`Vault unlocked for ${profile.displayName}.`);
+    } catch (error: unknown) {
+      setPanelNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const testEndpoints = async () => {
+    if (!selectedProfile) {
+      setPanelNotice("Create or select a publisher profile first.");
+      return;
+    }
+
+    setIsWorking(true);
+    setPanelNotice("");
+    setEndpointTestReport(null);
+
+    try {
+      const report = await testPublisherEndpoints({
+        profileId: selectedProfile.id,
+        passphrase,
+        relays,
+        blossomServers,
+      });
+      setEndpointTestReport(report);
+      setPanelNotice(report.messages.join(" "));
     } catch (error: unknown) {
       setPanelNotice(error instanceof Error ? error.message : String(error));
     } finally {
@@ -2933,6 +3184,11 @@ const TeacherPublisherPanel = ({
         <SectionHeader title="Teacher Publisher" meta={`${profiles.length} profiles`} />
         <StatusChip label="No central catalog" tone="neutral" />
       </div>
+      {panelNotice ? (
+        <p className="publisher-notice" role="status">
+          {panelNotice}
+        </p>
+      ) : null}
 
       <div className="publisher-grid">
         <div className="publisher-column">
@@ -3036,6 +3292,28 @@ const TeacherPublisherPanel = ({
             Archive mirrors are public and may be hard to remove. Only hash-matched manifest
             copies are announced.
           </p>
+          <div className="publisher-actions">
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={testEndpoints}
+              disabled={isWorking || Boolean(endpointTestBlockedReason)}
+              title={endpointTestBlockedReason || "Upload a small probe and publish a test event."}
+            >
+              <RadioTower size={16} />
+              <span>{isWorking ? "Working" : "Test Endpoints"}</span>
+            </button>
+          </div>
+          {endpointTestBlockedReason ? (
+            <p className="publisher-inline-note">{endpointTestBlockedReason}</p>
+          ) : (
+            <p className="publisher-inline-note">
+              Endpoint testing creates a tiny public probe on any server or relay that accepts it.
+            </p>
+          )}
+          {endpointTestReport ? (
+            <EndpointTestReportView report={endpointTestReport} />
+          ) : null}
         </div>
       </div>
 
@@ -3149,11 +3427,6 @@ const TeacherPublisherPanel = ({
         </div>
       ) : null}
 
-      {panelNotice ? (
-        <p className="publisher-notice" role="status">
-          {panelNotice}
-        </p>
-      ) : null}
     </section>
   );
 };
@@ -3163,6 +3436,40 @@ const endpointLines = (value: string): string[] =>
     .split(/[\n,]/)
     .map((line) => line.trim())
     .filter(Boolean);
+
+const EndpointTestReportView = ({ report }: { report: PublisherEndpointTestReport }) => (
+  <div className="endpoint-test-report" role="status">
+    <div className="endpoint-test-summary">
+      <StatusChip
+        label={report.passed ? "Endpoint test passed" : "Endpoint issues"}
+        tone={report.passed ? "positive" : "warning"}
+      />
+      <span>{report.messages.join(" ")}</span>
+    </div>
+    <div className="endpoint-test-grid">
+      {report.blossomResults.map((result) => (
+        <div className="endpoint-test-row" key={`${result.serverUrl}-${result.hash}`}>
+          <StatusChip
+            label={result.uploaded ? "Storage ok" : "Storage failed"}
+            tone={result.uploaded ? "positive" : "danger"}
+          />
+          <code>{result.serverUrl}</code>
+          <span>{result.message}</span>
+        </div>
+      ))}
+      {report.relayResults.map((result) => (
+        <div className="endpoint-test-row" key={result.relayUrl}>
+          <StatusChip
+            label={result.accepted ? "Relay ok" : "Relay failed"}
+            tone={result.accepted ? "positive" : "danger"}
+          />
+          <code>{result.relayUrl}</code>
+          <span>{result.message || "No relay message."}</span>
+        </div>
+      ))}
+    </div>
+  </div>
+);
 
 const fileNameFromPath = (path: string): string =>
   path.split(/[\\/]/).filter(Boolean).pop() ?? path;
@@ -3332,20 +3639,28 @@ const SourcesView = ({
   jobs,
   runtimeDiagnostics,
   trustedCurators,
+  mediaStorageAudit,
+  mediaStorageBusyAction,
   busySourceAction,
   onClearSource,
   onDownloadSource,
   onRemoveTrustedCurator,
+  onAuditMediaStorage,
+  onCleanupMediaStorage,
 }: {
   sources: Source[];
   lessons: Lesson[];
   jobs: Job[];
   runtimeDiagnostics: RuntimeDiagnostics;
   trustedCurators: TrustedCurator[];
+  mediaStorageAudit: MediaStorageAudit | null;
+  mediaStorageBusyAction: MediaStorageBusyAction;
   busySourceAction: BusySourceAction;
   onClearSource: (source: Source) => void;
   onDownloadSource: (source: Source) => void;
   onRemoveTrustedCurator: (curator: TrustedCurator) => void;
+  onAuditMediaStorage: () => void;
+  onCleanupMediaStorage: () => void;
 }) => {
   const { capabilitySources, addedSources } = splitSourceRows(sources);
 
@@ -3353,13 +3668,20 @@ const SourcesView = ({
     <div className="wide-page">
       <div className="page-heading">
         <div>
-          <h1>Source Capability Matrix</h1>
+          <h2>Source Capability Matrix</h2>
           <p>Platform-level support is separate from playlists, feeds, and channels you add.</p>
         </div>
         <StatusChip label="No credentials in exports" tone="positive" />
       </div>
 
       <SourceReadinessPanel sources={sources} runtimeDiagnostics={runtimeDiagnostics} />
+
+      <StorageHygienePanel
+        audit={mediaStorageAudit}
+        busyAction={mediaStorageBusyAction}
+        onAudit={onAuditMediaStorage}
+        onCleanup={onCleanupMediaStorage}
+      />
 
       <div className="matrix">
         <div className="matrix-header">
@@ -3540,8 +3862,8 @@ const QueueView = ({
   <div className="wide-page">
     <div className="page-heading">
       <div>
-        <h1>Update Queue</h1>
-        <p>Refreshes and downloads are visible, reversible, and source-aware.</p>
+        <h2>Update Queue</h2>
+        <p>Refreshes and downloads are tracked by source with current status and repair context.</p>
       </div>
       <button
         type="button"
@@ -3861,6 +4183,11 @@ const ImportDrawer = ({
             className="primary-action"
             onClick={runSourceIngest}
             disabled={isWorking || !isOnlineMode}
+            title={
+              isOnlineMode
+                ? "Fetch or subscribe to the entered source."
+                : "Switch to online fetch mode before using remote subscriptions or ingest."
+            }
           >
             <Archive size={17} />
             <span>
@@ -3874,15 +4201,26 @@ const ImportDrawer = ({
           {sourceIsNostrChannel ? (
             <button
               type="button"
-              className="secondary-action"
-              onClick={runChannelPreview}
-              disabled={isWorking || !isOnlineMode}
-            >
-              <ShieldCheck size={17} />
-              <span>Preview Channel</span>
-            </button>
+            className="secondary-action"
+            onClick={runChannelPreview}
+            disabled={isWorking || !isOnlineMode}
+            title={
+              isOnlineMode
+                ? "Resolve relay hints and validate the channel manifest."
+                : "Switch to online fetch mode before previewing a channel."
+            }
+          >
+            <ShieldCheck size={17} />
+            <span>Preview Channel</span>
+          </button>
           ) : null}
         </div>
+        {!isOnlineMode ? (
+          <p className="offline-inline-note" role="status">
+            Offline mode keeps remote fetches disabled. Local file import and pasted manifest
+            validation still work.
+          </p>
+        ) : null}
 
         <label className="field">
           <span>Collection manifest</span>

@@ -7,9 +7,10 @@ mod publisher;
 use models::{
     AppSnapshot, ChannelPublishResult, ClearSourceSummary, CreatePublisherProfileRequest,
     DownloadSourceSummary, ImportSummary, IngestSummary, Lesson, LessonNote,
-    ManifestValidationReport, NativePlaybackResult, NostrChannelPreview, PhoneMediaScope,
-    PhoneMediaSession, PublishTeacherChannelRequest, PublisherProfile, RuntimeDiagnostics,
-    TrustCuratorSummary, TrustedCurator, WatchState,
+    ManifestValidationReport, MediaStorageAudit, MediaStorageCleanup, NativePlaybackResult,
+    NostrChannelPreview, PhoneMediaScope, PhoneMediaSession, PublishTeacherChannelRequest,
+    PublisherEndpointTestReport, PublisherEndpointTestRequest, PublisherProfile,
+    RuntimeDiagnostics, TrustCuratorSummary, TrustedCurator, WatchState,
 };
 use phone_access::PhoneAccessState;
 
@@ -122,6 +123,16 @@ async fn download_source_media(
 }
 
 #[tauri::command]
+fn audit_media_storage(app: tauri::AppHandle) -> Result<MediaStorageAudit, String> {
+    db::audit_media_storage(&app)
+}
+
+#[tauri::command]
+fn cleanup_media_storage(app: tauri::AppHandle) -> Result<MediaStorageCleanup, String> {
+    db::cleanup_media_storage(&app)
+}
+
+#[tauri::command]
 fn play_media_file_native(
     app: tauri::AppHandle,
     media_file_id: String,
@@ -213,6 +224,14 @@ fn publish_teacher_channel(
 }
 
 #[tauri::command]
+fn test_publisher_endpoints(
+    app: tauri::AppHandle,
+    request: PublisherEndpointTestRequest,
+) -> Result<PublisherEndpointTestReport, String> {
+    publisher::test_publisher_endpoints(&app, request)
+}
+
+#[tauri::command]
 fn ingest_nostr_channel(
     app: tauri::AppHandle,
     channel_ref: String,
@@ -257,6 +276,8 @@ pub fn run() {
             refresh_source,
             clear_source_content,
             download_source_media,
+            audit_media_storage,
+            cleanup_media_storage,
             play_media_file_native,
             start_phone_media_session,
             get_phone_media_session,
@@ -268,6 +289,7 @@ pub fn run() {
             create_publisher_profile,
             unlock_publisher_profile,
             publish_teacher_channel,
+            test_publisher_endpoints,
             ingest_nostr_channel,
             preview_nostr_channel
         ])

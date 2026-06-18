@@ -1,14 +1,16 @@
 use crate::{
     db,
-    models::{PhoneMediaScope, PhoneMediaSession, PhoneMediaShareItem},
+    models::{PhoneMediaEndpoint, PhoneMediaScope, PhoneMediaSession, PhoneMediaShareItem},
 };
 use chrono::Utc;
 use rusqlite::params;
 use std::{
+    collections::HashSet,
     fs::File,
     io::{Read, Seek, SeekFrom},
-    net::{IpAddr, Ipv4Addr, UdpSocket},
+    net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -76,19 +78,33 @@ pub fn start_session(
         .to_ip()
         .ok_or_else(|| "Phone access did not bind to a network port.".to_string())?
         .port();
-    let host = local_network_ip().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
-    let base_url = format!("http://{host}:{port}");
     let session_id = format!("phone-session-{}", Uuid::new_v4());
     let token = Uuid::new_v4().to_string();
-    let playlist_url = format!("{base_url}{PLAYLIST_PATH}?token={token}");
+    let endpoints = local_network_endpoints(port, &token);
+    let preferred_endpoint = endpoints
+        .iter()
+        .find(|endpoint| endpoint.preferred)
+        .or_else(|| endpoints.first())
+        .ok_or_else(|| "Phone access could not create a playback endpoint.".to_string())?;
+    let base_url = preferred_endpoint.base_url.clone();
+    let playlist_url = preferred_endpoint.playlist_url.clone();
     let item_count = media.len() as i64;
     let items = media
         .iter()
         .map(|item| item.share.clone())
         .collect::<Vec<_>>();
-    let messages = if host.is_loopback() {
+    let messages = if preferred_endpoint.kind == "loopback" {
         vec![
-            "Could not detect a same-Wi-Fi address. The link may only work on this computer."
+            "Could not detect a same-Wi-Fi address. The link only works on this computer."
+                .to_string(),
+        ]
+    } else if endpoints
+        .iter()
+        .any(|endpoint| endpoint.kind == "vpn" || endpoint.kind == "tor")
+    {
+        vec![
+            "Keep this app open while watching on your phone.".to_string(),
+            "VPN or privacy-network addresses were detected; use the Wi-Fi/LAN endpoint for phone scans."
                 .to_string(),
         ]
     } else {
@@ -99,6 +115,7 @@ pub fn start_session(
         active: true,
         base_url: Some(base_url.clone()),
         playlist_url: Some(playlist_url),
+        endpoints,
         started_at: Some(Utc::now().to_rfc3339()),
         item_count,
         items,
@@ -529,16 +546,251 @@ fn mime_type_for_path(path: &Path, content_type: &str) -> &'static str {
     }
 }
 
-fn local_network_ip() -> Option<IpAddr> {
-    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("8.8.8.8:80").ok()?;
-    let ip = socket.local_addr().ok()?.ip();
+#[derive(Debug, Clone)]
+struct EndpointCandidate {
+    host: IpAddr,
+    interface_name: Option<String>,
+    kind: String,
+    score: i32,
+    warning: Option<String>,
+}
+
+fn local_network_endpoints(port: u16, token: &str) -> Vec<PhoneMediaEndpoint> {
+    let mut candidates = interface_ip_candidates();
+    candidates.push(endpoint_candidate(None, Ipv4Addr::LOCALHOST));
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.host.to_string().cmp(&right.host.to_string()))
+    });
+
+    let mut seen = HashSet::new();
+    candidates.retain(|candidate| seen.insert(candidate.host));
+    let preferred_index = candidates
+        .iter()
+        .position(|candidate| candidate.kind == "lan")
+        .or_else(|| {
+            candidates
+                .iter()
+                .position(|candidate| candidate.kind != "loopback")
+        })
+        .unwrap_or(0);
+
+    candidates
+        .into_iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            let host = candidate.host.to_string();
+            let base_url = format!("http://{host}:{port}");
+            let playlist_url = format!("{base_url}{PLAYLIST_PATH}?token={token}");
+            PhoneMediaEndpoint {
+                label: endpoint_label(&candidate),
+                host,
+                kind: candidate.kind,
+                base_url,
+                playlist_url,
+                preferred: index == preferred_index,
+                warning: candidate.warning,
+            }
+        })
+        .collect()
+}
+
+fn interface_ip_candidates() -> Vec<EndpointCandidate> {
+    let mut candidates = if cfg!(target_os = "windows") {
+        windows_ip_candidates()
+    } else {
+        ifconfig_ip_candidates()
+    };
+    candidates.retain(|candidate| !candidate.host.is_unspecified());
+    candidates
+}
+
+fn ifconfig_ip_candidates() -> Vec<EndpointCandidate> {
+    let Ok(output) = Command::new("ifconfig").arg("-a").output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut current_interface: Option<String> = None;
+    let mut candidates = Vec::new();
+    for line in text.lines() {
+        if line
+            .chars()
+            .next()
+            .map(|character| !character.is_whitespace())
+            .unwrap_or(false)
+        {
+            current_interface = line
+                .split(':')
+                .next()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+        }
+
+        let tokens = line.split_whitespace().collect::<Vec<_>>();
+        for (index, token) in tokens.iter().enumerate() {
+            if *token != "inet" {
+                continue;
+            }
+            if let Some(ip) = tokens
+                .get(index + 1)
+                .and_then(|value| value.parse::<Ipv4Addr>().ok())
+            {
+                candidates.push(endpoint_candidate(current_interface.clone(), ip));
+            }
+        }
+    }
+
+    candidates
+}
+
+fn windows_ip_candidates() -> Vec<EndpointCandidate> {
+    let Ok(output) = Command::new("ipconfig").output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut current_interface: Option<String> = None;
+    let mut candidates = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.ends_with(':') {
+            current_interface = Some(trimmed.trim_end_matches(':').to_string());
+            continue;
+        }
+        if !trimmed.contains("IPv4") {
+            continue;
+        }
+        if let Some(value) = trimmed.split(':').nth(1) {
+            if let Some(ip) = value
+                .split_whitespace()
+                .next()
+                .and_then(|candidate| candidate.parse::<Ipv4Addr>().ok())
+            {
+                candidates.push(endpoint_candidate(current_interface.clone(), ip));
+            }
+        }
+    }
+
+    candidates
+}
+
+fn endpoint_candidate(interface_name: Option<String>, ip: Ipv4Addr) -> EndpointCandidate {
+    let interface = interface_name
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mut score = 0;
+    let mut kind = "other".to_string();
+    let mut warning = None;
 
     if ip.is_loopback() {
-        None
-    } else {
-        Some(ip)
+        kind = "loopback".to_string();
+        score -= 200;
+        warning = Some("Only works on this computer.".to_string());
+    } else if looks_like_privacy_interface(&interface) {
+        kind = if interface.contains("tor") {
+            "tor".to_string()
+        } else {
+            "vpn".to_string()
+        };
+        score -= 80;
+        warning = Some(
+            "This looks like a VPN or privacy-network address; phones on Wi-Fi may not reach it."
+                .to_string(),
+        );
+    } else if ip.is_private() {
+        kind = "lan".to_string();
+        score += 100;
     }
+
+    if interface.starts_with("en")
+        || interface.starts_with("eth")
+        || interface.starts_with("wlan")
+        || interface.contains("wi-fi")
+        || interface.contains("wifi")
+    {
+        score += 80;
+        if kind == "other" {
+            kind = "lan".to_string();
+        }
+    }
+    if interface.contains("bridge")
+        || interface.contains("docker")
+        || interface.contains("vmnet")
+        || interface.contains("vbox")
+        || interface.starts_with("awdl")
+        || interface.starts_with("llw")
+    {
+        score -= 60;
+        if kind == "lan" {
+            kind = "other".to_string();
+            warning =
+                Some("This network interface may not be reachable from your phone.".to_string());
+        }
+    }
+    let octets = ip.octets();
+    if octets[0] == 192 && octets[1] == 168 {
+        score += 30;
+    }
+
+    EndpointCandidate {
+        host: IpAddr::V4(ip),
+        interface_name,
+        kind,
+        score,
+        warning,
+    }
+}
+
+fn endpoint_label(candidate: &EndpointCandidate) -> String {
+    let host = candidate.host.to_string();
+    let interface = candidate
+        .interface_name
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    match candidate.kind.as_str() {
+        "lan" => interface
+            .map(|name| format!("Wi-Fi/LAN ({name}) {host}"))
+            .unwrap_or_else(|| format!("Wi-Fi/LAN {host}")),
+        "vpn" => interface
+            .map(|name| format!("VPN/tunnel ({name}) {host}"))
+            .unwrap_or_else(|| format!("VPN/tunnel {host}")),
+        "tor" => interface
+            .map(|name| format!("Privacy network ({name}) {host}"))
+            .unwrap_or_else(|| format!("Privacy network {host}")),
+        "loopback" => format!("This computer only {host}"),
+        _ => interface
+            .map(|name| format!("Other network ({name}) {host}"))
+            .unwrap_or_else(|| format!("Other network {host}")),
+    }
+}
+
+fn looks_like_privacy_interface(interface: &str) -> bool {
+    [
+        "utun",
+        "tun",
+        "tap",
+        "wg",
+        "tailscale",
+        "vpn",
+        "ppp",
+        "ipsec",
+        "zt",
+        "zerotier",
+        "tor",
+    ]
+    .iter()
+    .any(|marker| interface.contains(marker))
 }
 
 impl ActivePhoneSession {
@@ -611,5 +863,19 @@ mod tests {
             mime_type_for_path(Path::new("lesson.wma"), "audio"),
             "audio/x-ms-wma"
         );
+    }
+
+    #[test]
+    fn endpoint_scoring_prefers_lan_over_vpn_tunnel() {
+        let lan = endpoint_candidate(Some("en0".to_string()), Ipv4Addr::new(192, 168, 0, 191));
+        let vpn = endpoint_candidate(Some("utun4".to_string()), Ipv4Addr::new(10, 2, 0, 2));
+        let loopback = endpoint_candidate(None, Ipv4Addr::LOCALHOST);
+
+        assert_eq!(lan.kind, "lan");
+        assert_eq!(vpn.kind, "vpn");
+        assert_eq!(loopback.kind, "loopback");
+        assert!(lan.score > vpn.score);
+        assert!(vpn.score > loopback.score);
+        assert!(vpn.warning.is_some());
     }
 }

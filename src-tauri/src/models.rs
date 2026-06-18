@@ -240,6 +240,28 @@ pub struct DownloadSourceSummary {
     pub messages: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaStorageAudit {
+    pub scanned_files: i64,
+    pub referenced_files: i64,
+    pub stale_files: i64,
+    pub stale_bytes: i64,
+    pub partial_files: i64,
+    pub stale_samples: Vec<String>,
+    pub messages: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaStorageCleanup {
+    pub audit: MediaStorageAudit,
+    pub removed_files: i64,
+    pub failed_removals: i64,
+    pub reclaimed_bytes: i64,
+    pub messages: Vec<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativePlaybackResult {
@@ -289,11 +311,25 @@ pub struct PhoneMediaShareItem {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct PhoneMediaEndpoint {
+    pub label: String,
+    pub host: String,
+    pub kind: String,
+    pub base_url: String,
+    pub playlist_url: String,
+    pub preferred: bool,
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct PhoneMediaSession {
     pub id: String,
     pub active: bool,
     pub base_url: Option<String>,
     pub playlist_url: Option<String>,
+    #[serde(default)]
+    pub endpoints: Vec<PhoneMediaEndpoint>,
     pub started_at: Option<String>,
     pub item_count: i64,
     pub items: Vec<PhoneMediaShareItem>,
@@ -390,6 +426,15 @@ pub struct PublishTeacherChannelRequest {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct PublisherEndpointTestRequest {
+    pub profile_id: String,
+    pub passphrase: String,
+    pub relays: Vec<NostrRelayConfig>,
+    pub blossom_servers: Vec<BlossomServerConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct BlossomUploadResult {
     pub server_url: String,
     pub hash: String,
@@ -429,6 +474,15 @@ pub struct ChannelPublishResult {
     pub nostr_event_id: String,
     pub blossom_results: Vec<BlossomUploadResult>,
     pub archive_results: Vec<ArchiveMirrorResult>,
+    pub relay_results: Vec<NostrRelayPublishResult>,
+    pub messages: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PublisherEndpointTestReport {
+    pub passed: bool,
+    pub blossom_results: Vec<BlossomUploadResult>,
     pub relay_results: Vec<NostrRelayPublishResult>,
     pub messages: Vec<String>,
 }

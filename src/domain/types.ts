@@ -266,6 +266,24 @@ export interface DownloadSourceSummary {
   messages: string[];
 }
 
+export interface MediaStorageAudit {
+  scannedFiles: number;
+  referencedFiles: number;
+  staleFiles: number;
+  staleBytes: number;
+  partialFiles: number;
+  staleSamples: string[];
+  messages: string[];
+}
+
+export interface MediaStorageCleanup {
+  audit: MediaStorageAudit;
+  removedFiles: number;
+  failedRemovals: number;
+  reclaimedBytes: number;
+  messages: string[];
+}
+
 export interface NativePlaybackResult {
   mediaFileId: string;
   lessonId: string;
@@ -305,11 +323,22 @@ export interface PhoneMediaShareItem {
   collectionTitle?: string;
 }
 
+export interface PhoneMediaEndpoint {
+  label: string;
+  host: string;
+  kind: "lan" | "vpn" | "tor" | "loopback" | "other";
+  baseUrl: string;
+  playlistUrl: string;
+  preferred: boolean;
+  warning?: string;
+}
+
 export interface PhoneMediaSession {
   id: string;
   active: boolean;
   baseUrl?: string;
   playlistUrl?: string;
+  endpoints?: PhoneMediaEndpoint[];
   startedAt?: string;
   itemCount: number;
   items: PhoneMediaShareItem[];
@@ -368,6 +397,13 @@ export interface PublishTeacherChannelRequest {
   lessons: PublishedLessonDraft[];
 }
 
+export interface PublisherEndpointTestRequest {
+  profileId: string;
+  passphrase: string;
+  relays: NostrRelayConfig[];
+  blossomServers: BlossomServerConfig[];
+}
+
 export interface BlossomUploadResult {
   serverUrl: string;
   hash: string;
@@ -401,6 +437,13 @@ export interface ChannelPublishResult {
   nostrEventId: string;
   blossomResults: BlossomUploadResult[];
   archiveResults: ArchiveMirrorResult[];
+  relayResults: NostrRelayPublishResult[];
+  messages: string[];
+}
+
+export interface PublisherEndpointTestReport {
+  passed: boolean;
+  blossomResults: BlossomUploadResult[];
   relayResults: NostrRelayPublishResult[];
   messages: string[];
 }

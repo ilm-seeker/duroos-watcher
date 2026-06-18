@@ -11,11 +11,15 @@ import type {
   IngestSummary,
   Lesson,
   LessonNote,
+  MediaStorageAudit,
+  MediaStorageCleanup,
   NativePlaybackResult,
   NostrChannelPreview,
   PhoneMediaScope,
   PhoneMediaSession,
   PublishTeacherChannelRequest,
+  PublisherEndpointTestReport,
+  PublisherEndpointTestRequest,
   PublisherProfile,
   TrustedCurator,
   TrustCuratorSummary,
@@ -230,6 +234,37 @@ export const downloadSourceMedia = async (sourceId: string): Promise<DownloadSou
   return invoke<DownloadSourceSummary>("download_source_media", { sourceId });
 };
 
+export const auditMediaStorage = async (): Promise<MediaStorageAudit> => {
+  if (!isTauriRuntime()) {
+    return {
+      scannedFiles: 0,
+      referencedFiles: 0,
+      staleFiles: 0,
+      staleBytes: 0,
+      partialFiles: 0,
+      staleSamples: [],
+      messages: ["Storage audit requires the Tauri desktop runtime."],
+    };
+  }
+
+  return invoke<MediaStorageAudit>("audit_media_storage");
+};
+
+export const cleanupMediaStorage = async (): Promise<MediaStorageCleanup> => {
+  if (!isTauriRuntime()) {
+    const audit = await auditMediaStorage();
+    return {
+      audit,
+      removedFiles: 0,
+      failedRemovals: 0,
+      reclaimedBytes: 0,
+      messages: ["Storage cleanup requires the Tauri desktop runtime."],
+    };
+  }
+
+  return invoke<MediaStorageCleanup>("cleanup_media_storage");
+};
+
 export const playMediaFileNative = async (
   mediaFileId: string,
 ): Promise<NativePlaybackResult> => {
@@ -249,6 +284,7 @@ export const startPhoneMediaSession = async (
       active: false,
       itemCount: 0,
       items: [],
+      endpoints: [],
       messages: ["Phone access requires the Tauri desktop runtime."],
     };
   }
@@ -415,6 +451,21 @@ export const publishTeacherChannel = async (
   }
 
   return invoke<ChannelPublishResult>("publish_teacher_channel", { request });
+};
+
+export const testPublisherEndpoints = async (
+  request: PublisherEndpointTestRequest,
+): Promise<PublisherEndpointTestReport> => {
+  if (!isTauriRuntime()) {
+    return {
+      passed: false,
+      blossomResults: [],
+      relayResults: [],
+      messages: ["Publisher endpoint testing requires the Tauri desktop runtime."],
+    };
+  }
+
+  return invoke<PublisherEndpointTestReport>("test_publisher_endpoints", { request });
 };
 
 export const previewNostrChannel = async (

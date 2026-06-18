@@ -3,8 +3,9 @@ use crate::{
     models::{
         AppSnapshot, ClearSourceSummary, Collection, DownloadSourceSummary, ImportSummary,
         IngestSummary, Job, Lesson, LessonNote, LiveSession, ManifestValidationReport, MediaFile,
-        NativePlaybackResult, ProvenanceRecord, RuntimeDiagnostics, Source, SourceCapability,
-        Teacher, TeacherRelay, TrustCuratorSummary, TrustedCurator, WatchState,
+        MediaStorageAudit, MediaStorageCleanup, NativePlaybackResult, ProvenanceRecord,
+        RuntimeDiagnostics, Source, SourceCapability, Teacher, TeacherRelay, TrustCuratorSummary,
+        TrustedCurator, WatchState,
     },
     publisher,
 };
@@ -17,10 +18,12 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use scraper::{Html, Selector};
 use sha2::{Digest, Sha256};
 use std::{
-    fs,
+    collections::HashSet,
+    env, fs,
     io::{self, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    thread,
     time::Duration,
 };
 use tauri::{AppHandle, Manager};
@@ -625,14 +628,23 @@ pub fn update_lesson_organization(
         )
         .map_err(|error| error.to_string())?;
 
-    let teacher_id = user_teacher_id(teacher_label);
-    let collection_id = user_collection_id(collection_title);
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
+    let teacher_id = existing_teacher_id_for_label(&transaction, teacher_label)?
+        .unwrap_or_else(|| user_teacher_id(teacher_label));
+    let collection_id =
+        existing_collection_id_for_title(&transaction, collection_title, &source_id)?
+            .unwrap_or_else(|| user_collection_id(collection_title));
 
-    upsert_user_teacher(&transaction, &teacher_id, teacher_label)?;
-    upsert_user_collection(&transaction, &collection_id, collection_title, &source_id)?;
+    if teacher_id.starts_with("teacher-user-") {
+        upsert_user_teacher(&transaction, &teacher_id, teacher_label)?;
+    }
+    if collection_id.starts_with("collection-user-") {
+        upsert_user_collection(&transaction, &collection_id, collection_title, &source_id)?;
+    } else {
+        ensure_collection_source_membership(&transaction, &collection_id, &source_id)?;
+    }
     transaction
         .execute(
             "UPDATE lessons
@@ -710,16 +722,7 @@ pub fn play_media_file_native(
             .to_string()
     })?;
     let command_label = native_player_command_label(&player);
-    let mut command = Command::new(&player.program);
-    command
-        .args(&player.args)
-        .arg(&media_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    command
-        .spawn()
-        .map_err(|error| format!("Could not launch {}: {error}", player.name))?;
+    spawn_native_player_checked(&player, &media_path)?;
 
     Ok(NativePlaybackResult {
         media_file_id,
@@ -1330,6 +1333,61 @@ pub fn clear_source_content(
     })
 }
 
+pub fn audit_media_storage(app: &AppHandle) -> Result<MediaStorageAudit, String> {
+    let data_dir = app_data_dir(app)?;
+    let connection = open_connection(app)?;
+    Ok(media_storage_audit_detail(&connection, &data_dir)?.audit)
+}
+
+pub fn cleanup_media_storage(app: &AppHandle) -> Result<MediaStorageCleanup, String> {
+    let data_dir = app_data_dir(app)?;
+    let connection = open_connection(app)?;
+    let before = media_storage_audit_detail(&connection, &data_dir)?;
+    let mut removed_files = 0_i64;
+    let mut failed_removals = 0_i64;
+    let mut reclaimed_bytes = 0_i64;
+
+    for stale_file in &before.stale_files {
+        if !stale_file.path.is_file() {
+            continue;
+        }
+        match fs::remove_file(&stale_file.path) {
+            Ok(()) => {
+                removed_files += 1;
+                reclaimed_bytes += stale_file.size_bytes;
+            }
+            Err(_) => {
+                failed_removals += 1;
+            }
+        }
+    }
+
+    let audit = media_storage_audit_detail(&connection, &data_dir)?.audit;
+    let mut messages = vec![format!(
+        "Removed {removed_files} stale library file(s), reclaiming {}.",
+        format_bytes(reclaimed_bytes)
+    )];
+    if failed_removals > 0 {
+        messages.push(format!(
+            "{failed_removals} stale file(s) could not be removed; check file permissions and retry."
+        ));
+    }
+    if audit.stale_files > 0 {
+        messages.push(format!(
+            "{} stale file(s) remain in the app library.",
+            audit.stale_files
+        ));
+    }
+
+    Ok(MediaStorageCleanup {
+        audit,
+        removed_files,
+        failed_removals,
+        reclaimed_bytes,
+        messages,
+    })
+}
+
 pub fn download_source_media(
     app: &AppHandle,
     source_id: String,
@@ -1476,7 +1534,13 @@ pub fn download_source_media(
                         source_id: Some(&source_id),
                         lesson_id: Some(&lesson.id),
                         label: &format!("Download: {}", lesson.title),
-                        detail: &format!("Saved {}", media_path.display()),
+                        detail: &format!(
+                            "Saved {} into the app library.",
+                            media_path
+                                .file_name()
+                                .and_then(|value| value.to_str())
+                                .unwrap_or("media file")
+                        ),
                     },
                 )?;
             }
@@ -2784,6 +2848,50 @@ fn user_collection_id(title: &str) -> String {
     format!("collection-user-{}", stable_suffix(&title.to_lowercase()))
 }
 
+fn existing_teacher_id_for_label(
+    transaction: &Transaction<'_>,
+    display_name: &str,
+) -> Result<Option<String>, String> {
+    let label = normalize_organization_label(display_name).to_lowercase();
+    transaction
+        .query_row(
+            "SELECT id
+             FROM teachers
+             WHERE lower(display_name) = ?1
+             ORDER BY CASE WHEN id LIKE 'teacher-user-%' THEN 1 ELSE 0 END, id
+             LIMIT 1",
+            params![label],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
+fn existing_collection_id_for_title(
+    transaction: &Transaction<'_>,
+    title: &str,
+    source_id: &str,
+) -> Result<Option<String>, String> {
+    let title = normalize_organization_label(title).to_lowercase();
+    let source_marker = format!("%\"{source_id}\"%");
+    transaction
+        .query_row(
+            "SELECT id
+             FROM collections
+             WHERE lower(title) = ?1
+             ORDER BY
+               CASE WHEN source_ids_json LIKE ?2 THEN 0 ELSE 1 END,
+               CASE WHEN id LIKE 'collection-user-%' THEN 1 ELSE 0 END,
+               sort_order,
+               id
+             LIMIT 1",
+            params![title, source_marker],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
 fn upsert_user_teacher(
     transaction: &Transaction<'_>,
     teacher_id: &str,
@@ -2882,6 +2990,36 @@ fn refresh_lesson_fts(
         .map_err(|error| error.to_string())
 }
 
+fn ensure_collection_source_membership(
+    transaction: &Transaction<'_>,
+    collection_id: &str,
+    source_id: &str,
+) -> Result<(), String> {
+    let existing_sources: String = transaction
+        .query_row(
+            "SELECT source_ids_json FROM collections WHERE id = ?1",
+            params![collection_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let mut source_ids = serde_json::from_str::<Vec<String>>(&existing_sources).unwrap_or_default();
+    if source_ids.iter().any(|id| id == source_id) {
+        return Ok(());
+    }
+
+    source_ids.push(source_id.to_string());
+    transaction
+        .execute(
+            "UPDATE collections SET source_ids_json = ?1 WHERE id = ?2",
+            params![
+                serde_json::to_string(&source_ids).map_err(|error| error.to_string())?,
+                collection_id
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 fn refresh_collection_count(
     transaction: &Transaction<'_>,
     collection_id: &str,
@@ -2901,7 +3039,7 @@ fn cleanup_empty_collection(
     transaction: &Transaction<'_>,
     collection_id: &str,
 ) -> Result<(), String> {
-    if collection_id == "collection-2" {
+    if !collection_id.starts_with("collection-user-") {
         return Ok(());
     }
 
@@ -2925,7 +3063,7 @@ fn cleanup_empty_collection(
 }
 
 fn cleanup_empty_teacher(transaction: &Transaction<'_>, teacher_id: &str) -> Result<(), String> {
-    if teacher_id == "teacher-3" {
+    if !teacher_id.starts_with("teacher-user-") {
         return Ok(());
     }
 
@@ -4148,6 +4286,134 @@ fn collect_lesson_media_paths(
         .collect())
 }
 
+#[derive(Debug)]
+struct StaleMediaFile {
+    relative_path: String,
+    path: PathBuf,
+    size_bytes: i64,
+}
+
+#[derive(Debug)]
+struct MediaStorageAuditDetail {
+    audit: MediaStorageAudit,
+    stale_files: Vec<StaleMediaFile>,
+}
+
+fn media_storage_audit_detail(
+    connection: &Connection,
+    data_dir: &Path,
+) -> Result<MediaStorageAuditDetail, String> {
+    let referenced_paths = collect_all_media_paths(connection)?
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let library_dir = data_dir.join("library");
+    let mut scanned_files = 0_i64;
+    let mut referenced_files = 0_i64;
+    let mut partial_files = 0_i64;
+    let mut stale_files = Vec::new();
+
+    if library_dir.is_dir() {
+        for entry in WalkDir::new(&library_dir)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+        {
+            let path = entry.path();
+            let Some(relative_path) = relative_library_path(data_dir, path) else {
+                continue;
+            };
+            scanned_files += 1;
+            if is_probably_partial_media_file(path) {
+                partial_files += 1;
+            }
+            if referenced_paths.contains(&relative_path) {
+                referenced_files += 1;
+                continue;
+            }
+            let size_bytes = path
+                .metadata()
+                .map(|metadata| metadata.len().min(i64::MAX as u64) as i64)
+                .unwrap_or(0);
+            stale_files.push(StaleMediaFile {
+                relative_path,
+                path: path.to_path_buf(),
+                size_bytes,
+            });
+        }
+    }
+
+    stale_files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    let stale_bytes = stale_files.iter().map(|file| file.size_bytes).sum::<i64>();
+    let stale_samples = stale_files
+        .iter()
+        .take(5)
+        .map(|file| file.relative_path.clone())
+        .collect::<Vec<_>>();
+    let messages = if stale_files.is_empty() {
+        vec!["No stale app-library media files were found.".to_string()]
+    } else {
+        vec![format!(
+            "Found {} stale app-library file(s), using {}.",
+            stale_files.len(),
+            format_bytes(stale_bytes)
+        )]
+    };
+
+    Ok(MediaStorageAuditDetail {
+        audit: MediaStorageAudit {
+            scanned_files,
+            referenced_files,
+            stale_files: stale_files.len() as i64,
+            stale_bytes,
+            partial_files,
+            stale_samples,
+            messages,
+        },
+        stale_files,
+    })
+}
+
+fn collect_all_media_paths(connection: &Connection) -> Result<Vec<String>, String> {
+    let mut statement = connection
+        .prepare("SELECT relative_path, thumbnail_relative_path FROM media_files")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .map_err(|error| error.to_string())?;
+    let records = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    Ok(records
+        .into_iter()
+        .flat_map(|(relative_path, thumbnail_relative_path)| {
+            std::iter::once(relative_path).chain(thumbnail_relative_path)
+        })
+        .collect())
+}
+
+fn relative_library_path(data_dir: &Path, path: &Path) -> Option<String> {
+    path.strip_prefix(data_dir)
+        .ok()
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .filter(|relative| relative.starts_with("library/"))
+}
+
+fn format_bytes(bytes: i64) -> String {
+    let bytes = bytes.max(0) as f64;
+    if bytes >= 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.1} GB", bytes / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024.0 * 1024.0 {
+        format!("{:.1} MB", bytes / (1024.0 * 1024.0))
+    } else if bytes >= 1024.0 {
+        format!("{:.1} KB", bytes / 1024.0)
+    } else {
+        format!("{} B", bytes as i64)
+    }
+}
+
 fn duplicate_lesson_title_for_hash(
     transaction: &Transaction<'_>,
     content_hash: &str,
@@ -4785,10 +5051,7 @@ fn native_player_candidates(search_dirs: &[PathBuf]) -> Vec<NativePlayerCommand>
         candidates.push(NativePlayerCommand {
             name: "VLC".to_string(),
             program: directory.join("vlc").to_string_lossy().to_string(),
-            args: vec![
-                "--started-from-file".to_string(),
-                "--no-playlist-enqueue".to_string(),
-            ],
+            args: Vec::new(),
         });
         candidates.push(NativePlayerCommand {
             name: "ffplay".to_string(),
@@ -4821,18 +5084,12 @@ fn native_player_candidates(search_dirs: &[PathBuf]) -> Vec<NativePlayerCommand>
         NativePlayerCommand {
             name: "VLC".to_string(),
             program: "vlc".to_string(),
-            args: vec![
-                "--started-from-file".to_string(),
-                "--no-playlist-enqueue".to_string(),
-            ],
+            args: Vec::new(),
         },
         NativePlayerCommand {
             name: "VLC".to_string(),
             program: "/Applications/VLC.app/Contents/MacOS/VLC".to_string(),
-            args: vec![
-                "--started-from-file".to_string(),
-                "--no-playlist-enqueue".to_string(),
-            ],
+            args: Vec::new(),
         },
         NativePlayerCommand {
             name: "ffplay".to_string(),
@@ -4887,6 +5144,48 @@ fn native_player_command_label(command: &NativePlayerCommand) -> String {
     }
 }
 
+fn spawn_native_player_checked(
+    player: &NativePlayerCommand,
+    media_path: &Path,
+) -> Result<(), String> {
+    let stderr_path = env::temp_dir().join(format!(
+        "duroos-native-player-{}-stderr.log",
+        Uuid::new_v4()
+    ));
+    let stderr_file = fs::File::create(&stderr_path)
+        .map_err(|error| format!("Could not prepare native player diagnostics: {error}"))?;
+    let mut command = Command::new(&player.program);
+    command
+        .args(&player.args)
+        .arg(media_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr_file));
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Could not launch {}: {error}", player.name))?;
+
+    thread::sleep(Duration::from_millis(650));
+    match child
+        .try_wait()
+        .map_err(|error| format!("Could not inspect {} startup: {error}", player.name))?
+    {
+        Some(status) => {
+            let stderr = fs::read(&stderr_path).unwrap_or_default();
+            let _ = fs::remove_file(&stderr_path);
+            Err(format!(
+                "{} exited immediately with {status}. {}",
+                player.name,
+                output_summary(&stderr)
+            ))
+        }
+        None => {
+            let _ = fs::remove_file(&stderr_path);
+            Ok(())
+        }
+    }
+}
+
 fn yt_dlp_cookie_file(data_dir: &Path) -> Option<PathBuf> {
     YT_DLP_COOKIE_FILE_NAMES
         .iter()
@@ -4894,15 +5193,12 @@ fn yt_dlp_cookie_file(data_dir: &Path) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-fn yt_dlp_auth_hint(cookies_file: Option<&Path>, data_dir: &Path) -> String {
+fn yt_dlp_auth_hint(cookies_file: Option<&Path>, _data_dir: &Path) -> String {
     if cookies_file.is_some() {
         return "Local cookies were used; if this source still failed, refresh the cookies file or import a manually downloaded file.".to_string();
     }
 
-    format!(
-        "If this source requires sign-in or blocks anonymous fetches, export browser cookies in Netscape format to {} and retry, or import a manually downloaded file.",
-        data_dir.join("yt-dlp-cookies.txt").display()
-    )
+    "If this source requires sign-in or blocks anonymous fetches, export browser cookies in Netscape format to yt-dlp-cookies.txt in the app data folder and retry, or import a manually downloaded file.".to_string()
 }
 
 fn existing_completed_media_file(lesson_dir: &Path, content_type: &str) -> Option<PathBuf> {
@@ -6358,7 +6654,7 @@ fn fetch_jobs(connection: &Connection) -> Result<Vec<Job>, String> {
                 source_id: row.get(3)?,
                 lesson_id: row.get(4)?,
                 label: row.get(5)?,
-                detail: row.get(6)?,
+                detail: sanitize_job_detail(&row.get::<_, String>(6)?),
                 retry_count: row.get(7)?,
                 updated_at: row.get(8)?,
             })
@@ -6366,6 +6662,41 @@ fn fetch_jobs(connection: &Connection) -> Result<Vec<Job>, String> {
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
+}
+
+fn sanitize_job_detail(detail: &str) -> String {
+    detail
+        .split_whitespace()
+        .map(|token| {
+            if looks_like_local_path_token(token) {
+                "[local path]".to_string()
+            } else {
+                token.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn looks_like_local_path_token(token: &str) -> bool {
+    let trimmed = token.trim_matches(|character: char| {
+        matches!(
+            character,
+            '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | '.'
+        )
+    });
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return false;
+    }
+
+    trimmed.starts_with("file://")
+        || trimmed.starts_with("/Users/")
+        || trimmed.starts_with("/Volumes/")
+        || trimmed.starts_with("/private/")
+        || trimmed.starts_with("/var/folders/")
+        || trimmed.starts_with("/tmp/")
+        || trimmed.contains("\\Users\\")
+        || trimmed.contains(":\\Users\\")
 }
 
 fn collect_media_files(path: &Path) -> Vec<PathBuf> {
@@ -6817,9 +7148,51 @@ mod tests {
             )
             .optional()
             .unwrap();
-        assert!(old_collection.is_none());
+        assert_eq!(old_collection.as_deref(), Some("collection-old"));
         let matches = search_lessons(&connection, "New Teacher").unwrap();
         assert_eq!(matches[0].id, "lesson-test");
+    }
+
+    #[test]
+    fn update_lesson_organization_reattaches_existing_feed_owned_rows() {
+        let mut connection = test_connection();
+        insert_test_lesson(&connection);
+
+        update_lesson_organization(
+            &mut connection,
+            "lesson-test".to_string(),
+            "New Teacher".to_string(),
+            "New Course".to_string(),
+        )
+        .unwrap();
+        let restored = update_lesson_organization(
+            &mut connection,
+            "lesson-test".to_string(),
+            " Old   Teacher ".to_string(),
+            "Old Course".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(restored.teacher_id, "teacher-old");
+        assert_eq!(restored.collection_id, "collection-old");
+        let duplicate_teachers: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM teachers
+                 WHERE id LIKE 'teacher-user-%' AND lower(display_name) = 'old teacher'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let duplicate_collections: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM collections
+                 WHERE id LIKE 'collection-user-%' AND lower(title) = 'old course'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(duplicate_teachers, 0);
+        assert_eq!(duplicate_collections, 0);
     }
 
     #[test]
@@ -7842,6 +8215,16 @@ mod tests {
     }
 
     #[test]
+    fn native_player_candidates_do_not_add_vlc_startup_flags() {
+        let candidates = native_player_candidates(&[]);
+
+        assert!(candidates
+            .iter()
+            .filter(|candidate| candidate.name == "VLC")
+            .all(|candidate| candidate.args.is_empty()));
+    }
+
+    #[test]
     fn native_player_command_label_preserves_arguments() {
         let command = NativePlayerCommand {
             name: "ffplay".to_string(),
@@ -7857,6 +8240,24 @@ mod tests {
             native_player_command_label(&command),
             "/opt/homebrew/bin/ffplay -hide_banner -loglevel warning"
         );
+    }
+
+    #[test]
+    fn native_player_launch_reports_immediate_exit() {
+        let command = NativePlayerCommand {
+            name: "failing-player".to_string(),
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "echo launch failed >&2; exit 42".to_string(),
+            ],
+        };
+
+        let error =
+            spawn_native_player_checked(&command, Path::new("/tmp/duroos-test.mp4")).unwrap_err();
+
+        assert!(error.contains("exited immediately"));
+        assert!(error.contains("launch failed"));
     }
 
     #[test]
@@ -8105,5 +8506,50 @@ mod tests {
             resolve_library_media_path(data_dir, "outside/lesson.mp4"),
             None
         );
+    }
+
+    #[test]
+    fn media_storage_audit_reports_unreferenced_library_files_without_absolute_paths() {
+        let connection = test_connection();
+        insert_test_lesson(&connection);
+        let data_dir = test_temp_dir("duroos-storage-audit");
+        let media_dir = data_dir.join("library/imports");
+        fs::create_dir_all(&media_dir).unwrap();
+        fs::write(media_dir.join("referenced.mp4"), vec![1_u8; 2048]).unwrap();
+        fs::write(media_dir.join("stale.mp4.part"), vec![2_u8; 512]).unwrap();
+        connection
+            .execute(
+                "INSERT INTO media_files
+                 (id, lesson_id, relative_path, content_hash, size_bytes, codec, import_status,
+                  hash_verification_state)
+                 VALUES ('media-test', 'lesson-test', 'library/imports/referenced.mp4',
+                  'sha256:test', 2048, NULL, 'ready', 'not-provided')",
+                [],
+            )
+            .unwrap();
+
+        let detail = media_storage_audit_detail(&connection, &data_dir).unwrap();
+
+        assert_eq!(detail.audit.scanned_files, 2);
+        assert_eq!(detail.audit.referenced_files, 1);
+        assert_eq!(detail.audit.stale_files, 1);
+        assert_eq!(detail.audit.partial_files, 1);
+        assert_eq!(
+            detail.audit.stale_samples,
+            vec!["library/imports/stale.mp4.part".to_string()]
+        );
+        assert!(!detail.audit.messages.join(" ").contains("/Users/"));
+        fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[test]
+    fn job_detail_sanitizer_redacts_local_paths_without_touching_urls() {
+        let detail = sanitize_job_detail(
+            "Saved /Users/traveler/private/lesson.mp4 from https://example.test/watch",
+        );
+
+        assert!(detail.contains("[local path]"));
+        assert!(detail.contains("https://example.test/watch"));
+        assert!(!detail.contains("/Users/traveler"));
     }
 }

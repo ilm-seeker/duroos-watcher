@@ -4,7 +4,8 @@ use crate::{
         ArchiveMirrorConfig, ArchiveMirrorResult, BlossomServerConfig, BlossomUploadResult,
         ChannelPublishResult, CreatePublisherProfileRequest, IngestSummary, NostrChannelPreview,
         NostrRelayConfig, NostrRelayPublishResult, PublishTeacherChannelRequest,
-        PublishedLessonDraft, PublisherProfile,
+        PublishedLessonDraft, PublisherEndpointTestReport, PublisherEndpointTestRequest,
+        PublisherProfile,
     },
 };
 use argon2::Argon2;
@@ -30,6 +31,7 @@ use std::{
 use tauri::AppHandle;
 use tungstenite::{connect, Message as WsMessage};
 use url::Url;
+use uuid::Uuid;
 use zeroize::Zeroize;
 
 const DUROOS_CHANNEL_KIND: u64 = 30078;
@@ -403,6 +405,71 @@ pub fn publish_teacher_channel(
             "Share the naddr channel link with learners; no central Duroos catalog was created."
                 .to_string(),
         ],
+    })
+}
+
+pub fn test_publisher_endpoints(
+    app: &AppHandle,
+    request: PublisherEndpointTestRequest,
+) -> Result<PublisherEndpointTestReport, String> {
+    validate_passphrase(&request.passphrase)?;
+    let relays = normalize_relays(request.relays)?;
+    let blossom_servers = normalize_blossom_servers(request.blossom_servers)?;
+    let connection = db::open_connection(app)?;
+    let profile = publisher_profile_for_id(&connection, app, request.profile_id.trim())?
+        .ok_or_else(|| "Publisher profile was not found.".to_string())?;
+    let keys = unlock_profile_keys(app, &profile, &request.passphrase)?;
+    let client = Client::builder()
+        .user_agent("DuroosWatcher/0.1 publisher-endpoint-test")
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let probe_body = format!(
+        "Duroos Watcher publisher endpoint test\nprofile={}\ntime={}\n",
+        profile.id,
+        Utc::now().to_rfc3339()
+    );
+    let blossom_upload = upload_blob_to_servers(
+        &client,
+        probe_body.as_bytes(),
+        "text/plain; charset=utf-8",
+        "txt",
+        &blossom_servers,
+        &keys,
+    );
+    let relay_event = endpoint_probe_event(&keys, &profile, &blossom_upload.urls)?;
+    let relay_results = publish_event_to_relays(&relay_event, &relays);
+    let storage_ok = blossom_upload.results.iter().any(|result| result.uploaded);
+    let relay_ok = relay_results.iter().any(|result| result.accepted);
+    let passed = storage_ok && relay_ok;
+    let mut messages = vec![format!(
+        "Endpoint test {}: {} Blossom server(s) uploaded the probe; {} relay(s) accepted the test event.",
+        if passed { "passed" } else { "completed with issues" },
+        blossom_upload
+            .results
+            .iter()
+            .filter(|result| result.uploaded)
+            .count(),
+        relay_results
+            .iter()
+            .filter(|result| result.accepted)
+            .count()
+    )];
+    if !passed {
+        messages.push(
+            "A real publish still needs at least one working Blossom server and one accepting Nostr relay."
+                .to_string(),
+        );
+    }
+    messages.push(
+        "The probe is intentionally small and public on any endpoint that accepted it.".to_string(),
+    );
+
+    Ok(PublisherEndpointTestReport {
+        passed,
+        blossom_results: blossom_upload.results,
+        relay_results,
+        messages,
     })
 }
 
@@ -1403,6 +1470,39 @@ fn signed_nostr_event(
         content,
         sig: signature.to_string(),
     })
+}
+
+fn endpoint_probe_event(
+    keys: &PublisherKeys,
+    profile: &PublisherProfile,
+    blossom_urls: &[String],
+) -> Result<NostrEvent, String> {
+    let probe_id = format!("duroos-endpoint-test:{}", Uuid::new_v4());
+    let mut tags = vec![
+        vec!["d".to_string(), probe_id],
+        vec!["client".to_string(), APP_TAG.to_string()],
+        vec!["t".to_string(), "duroos-endpoint-test".to_string()],
+        vec![
+            "alt".to_string(),
+            "Duroos Watcher publisher endpoint test".to_string(),
+        ],
+    ];
+    tags.extend(
+        blossom_urls
+            .iter()
+            .map(|url| vec!["r".to_string(), url.clone()]),
+    );
+    let content = json!({
+        "app": APP_TAG,
+        "type": "publisher-endpoint-test",
+        "profileId": profile.id,
+        "curatorPublicKey": profile.curator_public_key,
+        "publishedAt": Utc::now().to_rfc3339(),
+        "message": "Small public probe used to verify Duroos Watcher publisher relay/storage configuration."
+    })
+    .to_string();
+
+    signed_nostr_event(&keys.nostr_secret_key, DUROOS_CHANNEL_KIND, tags, content)
 }
 
 fn blossom_auth_header(
@@ -2580,6 +2680,46 @@ mod tests {
         assert!(fetched.tags.iter().any(|tag| {
             tag.first().map(String::as_str) == Some("d")
                 && tag.get(1).map(String::as_str) == Some(identifier)
+        }));
+    }
+
+    #[test]
+    fn endpoint_probe_event_is_marked_as_test_only() {
+        let profile = PublisherProfile {
+            id: "publisher-test".to_string(),
+            display_name: "Endpoint Teacher".to_string(),
+            curator_public_key: general_purpose::STANDARD
+                .encode(SigningKey::from_bytes(&[11_u8; 32]).verifying_key()),
+            nostr_pubkey: nostr_pubkey_from_secret(&[12_u8; 32]).unwrap(),
+            relays: vec![],
+            blossom_servers: vec![],
+            created_at: "2026-06-17T00:00:00Z".to_string(),
+            updated_at: "2026-06-17T00:00:00Z".to_string(),
+            vault_configured: true,
+        };
+        let keys = PublisherKeys {
+            curator_secret_key: [11_u8; 32],
+            nostr_secret_key: [12_u8; 32],
+        };
+
+        let event = endpoint_probe_event(
+            &keys,
+            &profile,
+            &["https://blossom.example/probe.txt".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(event.kind, DUROOS_CHANNEL_KIND);
+        assert!(event
+            .content
+            .contains("\"type\":\"publisher-endpoint-test\""));
+        assert!(event.tags.iter().any(|tag| {
+            tag.first().map(String::as_str) == Some("t")
+                && tag.get(1).map(String::as_str) == Some("duroos-endpoint-test")
+        }));
+        assert!(event.tags.iter().any(|tag| {
+            tag.first().map(String::as_str) == Some("r")
+                && tag.get(1).map(String::as_str) == Some("https://blossom.example/probe.txt")
         }));
     }
 }
