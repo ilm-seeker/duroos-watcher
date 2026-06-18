@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { buildLibraryLessonView } from "./libraryView";
-import type { Collection, Lesson, MediaFile, Source, Teacher, WatchState } from "./types";
+import type {
+  Collection,
+  Lesson,
+  MediaFile,
+  Source,
+  Teacher,
+  TeacherRelay,
+  TrustedCurator,
+  WatchState,
+} from "./types";
 
 const teacher: Teacher = {
   id: "teacher-test",
@@ -214,6 +223,80 @@ describe("buildLibraryLessonView", () => {
     expect(result.sourceGroups.map((group) => group.id)).toEqual([
       source.id,
       otherSource.id,
+    ]);
+  });
+
+  it("derives subscribed channel status from relays, source rows, lessons, media, and curator trust", () => {
+    const channelSource: Source = {
+      ...source,
+      id: "source-channel",
+      platform: "teacher-relay",
+      label: "Channel: Foundations",
+      identifier: "https://teacher.example/duroos.json",
+      trustedCuratorId: "curator-foundations",
+      lastCheckedAt: "2026-06-18T10:00:00.000Z",
+    };
+    const relay: TeacherRelay = {
+      id: "relay-foundations",
+      teacherId: teacher.id,
+      title: "Foundations",
+      description: "Signed classes and notes.",
+      feedUrl: channelSource.identifier,
+      feedFormat: "duroos-manifest",
+      feedTransport: "nostr",
+      trustState: "signed-untrusted",
+      trustPolicy: "manual-review",
+      visibility: "public",
+      autoDownload: true,
+      lastPublishedAt: "2026-06-17T10:00:00.000Z",
+      subscriberCount: 12,
+    };
+    const curator: TrustedCurator = {
+      id: "curator-foundations",
+      displayName: "Foundations Curator",
+      publicKey: "npub1test",
+      trustNote: "Known local source.",
+      addedAt: "2026-06-18T08:00:00.000Z",
+    };
+    const postLesson: Lesson = {
+      ...lesson("lesson-post", "Source Note"),
+      contentType: "post",
+      sourceId: channelSource.id,
+      publishedAt: "2026-06-18T11:00:00.000Z",
+    };
+    const missingLesson: Lesson = {
+      ...lesson("lesson-missing", "Needed Audio"),
+      sourceId: channelSource.id,
+      publishedAt: "2026-06-18T09:00:00.000Z",
+    };
+    const readyLesson: Lesson = {
+      ...lesson("lesson-ready", "Ready Audio"),
+      sourceId: channelSource.id,
+      publishedAt: "2026-06-17T09:00:00.000Z",
+    };
+
+    const result = view({
+      sources: [source, channelSource],
+      teacherRelays: [relay],
+      trustedCurators: [curator],
+      lessons: [postLesson, missingLesson, readyLesson],
+      mediaFiles: [mediaFile(readyLesson.id)],
+    });
+
+    expect(result.channelSubscriptions).toEqual([
+      expect.objectContaining({
+        id: channelSource.id,
+        sourceId: channelSource.id,
+        relayId: relay.id,
+        title: "Foundations",
+        curatorLabel: teacher.displayName,
+        itemCount: 3,
+        localFileCount: 1,
+        missingFileCount: 1,
+        postCount: 1,
+        latestUpdateAt: postLesson.publishedAt,
+        trusted: true,
+      }),
     ]);
   });
 });

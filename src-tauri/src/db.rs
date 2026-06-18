@@ -1933,7 +1933,7 @@ fn ingest_feed_url(
     let source_label = match platform.as_str() {
         "youtube" => format!("YouTube: {}", parsed_feed.title),
         "archive-org" => format!("Archive.org: {}", parsed_feed.title),
-        "teacher-relay" => format!("Curator: {}", parsed_feed.title),
+        "teacher-relay" => format!("Channel: {}", parsed_feed.title),
         "rss-feed" => format!("Feed: {}", parsed_feed.title),
         _ => parsed_feed.title.clone(),
     };
@@ -4643,9 +4643,13 @@ pub(crate) fn resolve_library_media_path(data_dir: &Path, relative_path: &str) -
 }
 
 fn find_yt_dlp_command() -> Result<YtDlpCommand, String> {
-    let candidates = [
+    let mut candidates = vec![
         YtDlpCommand {
             program: "yt-dlp".to_string(),
+            args: Vec::new(),
+        },
+        YtDlpCommand {
+            program: "yt-dlp.exe".to_string(),
             args: Vec::new(),
         },
         YtDlpCommand {
@@ -4657,10 +4661,31 @@ fn find_yt_dlp_command() -> Result<YtDlpCommand, String> {
             args: Vec::new(),
         },
         YtDlpCommand {
+            program: "/usr/bin/yt-dlp".to_string(),
+            args: Vec::new(),
+        },
+        YtDlpCommand {
             program: "python3".to_string(),
             args: vec!["-m".to_string(), "yt_dlp".to_string()],
         },
+        YtDlpCommand {
+            program: "python".to_string(),
+            args: vec!["-m".to_string(), "yt_dlp".to_string()],
+        },
     ];
+
+    if cfg!(target_os = "windows") {
+        if let Some(program_files) = env::var_os("ProgramFiles") {
+            candidates.push(YtDlpCommand {
+                program: PathBuf::from(program_files)
+                    .join("yt-dlp")
+                    .join("yt-dlp.exe")
+                    .to_string_lossy()
+                    .to_string(),
+                args: Vec::new(),
+            });
+        }
+    }
 
     for candidate in candidates {
         let probe = Command::new(&candidate.program)
@@ -5004,13 +5029,28 @@ fn transcode_media_for_webkit(
 }
 
 fn find_media_tool(tool_name: &str) -> Option<String> {
-    [
+    let mut candidates = vec![
         tool_name.to_string(),
+        format!("{tool_name}.exe"),
         format!("/opt/homebrew/bin/{tool_name}"),
         format!("/usr/local/bin/{tool_name}"),
-    ]
-    .into_iter()
-    .find(|candidate| {
+        format!("/usr/bin/{tool_name}"),
+    ];
+
+    if cfg!(target_os = "windows") {
+        if let Some(program_files) = env::var_os("ProgramFiles") {
+            candidates.push(
+                PathBuf::from(program_files)
+                    .join("ffmpeg")
+                    .join("bin")
+                    .join(format!("{tool_name}.exe"))
+                    .to_string_lossy()
+                    .to_string(),
+            );
+        }
+    }
+
+    candidates.into_iter().find(|candidate| {
         Command::new(candidate)
             .arg("-version")
             .output()
@@ -5049,13 +5089,35 @@ fn native_player_candidates(search_dirs: &[PathBuf]) -> Vec<NativePlayerCommand>
             ],
         });
         candidates.push(NativePlayerCommand {
+            name: "mpv".to_string(),
+            program: directory.join("mpv.exe").to_string_lossy().to_string(),
+            args: vec![
+                "--force-window=yes".to_string(),
+                "--no-terminal".to_string(),
+            ],
+        });
+        candidates.push(NativePlayerCommand {
             name: "VLC".to_string(),
             program: directory.join("vlc").to_string_lossy().to_string(),
             args: Vec::new(),
         });
         candidates.push(NativePlayerCommand {
+            name: "VLC".to_string(),
+            program: directory.join("vlc.exe").to_string_lossy().to_string(),
+            args: Vec::new(),
+        });
+        candidates.push(NativePlayerCommand {
             name: "ffplay".to_string(),
             program: directory.join("ffplay").to_string_lossy().to_string(),
+            args: vec![
+                "-hide_banner".to_string(),
+                "-loglevel".to_string(),
+                "warning".to_string(),
+            ],
+        });
+        candidates.push(NativePlayerCommand {
+            name: "ffplay".to_string(),
+            program: directory.join("ffplay.exe").to_string_lossy().to_string(),
             args: vec![
                 "-hide_banner".to_string(),
                 "-loglevel".to_string(),
@@ -5082,6 +5144,14 @@ fn native_player_candidates(search_dirs: &[PathBuf]) -> Vec<NativePlayerCommand>
             ],
         },
         NativePlayerCommand {
+            name: "mpv".to_string(),
+            program: "/usr/bin/mpv".to_string(),
+            args: vec![
+                "--force-window=yes".to_string(),
+                "--no-terminal".to_string(),
+            ],
+        },
+        NativePlayerCommand {
             name: "VLC".to_string(),
             program: "vlc".to_string(),
             args: Vec::new(),
@@ -5089,6 +5159,11 @@ fn native_player_candidates(search_dirs: &[PathBuf]) -> Vec<NativePlayerCommand>
         NativePlayerCommand {
             name: "VLC".to_string(),
             program: "/Applications/VLC.app/Contents/MacOS/VLC".to_string(),
+            args: Vec::new(),
+        },
+        NativePlayerCommand {
+            name: "VLC".to_string(),
+            program: "/usr/bin/vlc".to_string(),
             args: Vec::new(),
         },
         NativePlayerCommand {
@@ -5118,7 +5193,60 @@ fn native_player_candidates(search_dirs: &[PathBuf]) -> Vec<NativePlayerCommand>
                 "warning".to_string(),
             ],
         },
+        NativePlayerCommand {
+            name: "ffplay".to_string(),
+            program: "/usr/bin/ffplay".to_string(),
+            args: vec![
+                "-hide_banner".to_string(),
+                "-loglevel".to_string(),
+                "warning".to_string(),
+            ],
+        },
     ]);
+
+    if cfg!(target_os = "windows") {
+        if let Some(program_files) = env::var_os("ProgramFiles") {
+            let program_files = PathBuf::from(program_files);
+            candidates.extend([
+                NativePlayerCommand {
+                    name: "mpv".to_string(),
+                    program: program_files
+                        .join("mpv")
+                        .join("mpv.exe")
+                        .to_string_lossy()
+                        .to_string(),
+                    args: vec![
+                        "--force-window=yes".to_string(),
+                        "--no-terminal".to_string(),
+                    ],
+                },
+                NativePlayerCommand {
+                    name: "VLC".to_string(),
+                    program: program_files
+                        .join("VideoLAN")
+                        .join("VLC")
+                        .join("vlc.exe")
+                        .to_string_lossy()
+                        .to_string(),
+                    args: Vec::new(),
+                },
+                NativePlayerCommand {
+                    name: "ffplay".to_string(),
+                    program: program_files
+                        .join("ffmpeg")
+                        .join("bin")
+                        .join("ffplay.exe")
+                        .to_string_lossy()
+                        .to_string(),
+                    args: vec![
+                        "-hide_banner".to_string(),
+                        "-loglevel".to_string(),
+                        "warning".to_string(),
+                    ],
+                },
+            ]);
+        }
+    }
 
     candidates
 }
@@ -6145,7 +6273,7 @@ fn ensure_default_records(connection: &mut Connection) -> Result<(), String> {
         (
             "source-teacher-relay",
             "teacher-relay",
-            "Curator Relay",
+            "Channels",
             "https://teacher.example/feed.duroos.json",
             "none",
             "Manual + daily check",
@@ -7280,7 +7408,7 @@ mod tests {
                  (id, platform, label, identifier, feed_format, feed_transport, trust_state,
                   trusted_curator_id, auth_mode, update_schedule, capability_json, enabled,
                   last_checked_at, last_verified_at)
-                 VALUES (?1, 'teacher-relay', 'Curator: Foundations', ?2, 'duroos-manifest',
+                 VALUES (?1, 'teacher-relay', 'Channel: Foundations', ?2, 'duroos-manifest',
                   'https', 'signed-untrusted', NULL, 'none', 'manual', ?3, 1, NULL, ?4)",
                 params![
                     "source-teacher-relay-test",
@@ -8206,11 +8334,18 @@ mod tests {
             bundle_dir.join("mpv").to_string_lossy().to_string()
         );
         assert!(candidates.iter().any(|candidate| {
+            candidate.name == "mpv"
+                && candidate.program == bundle_dir.join("mpv.exe").to_string_lossy().to_string()
+        }));
+        assert!(candidates.iter().any(|candidate| {
             candidate.name == "VLC"
                 && candidate.program == "/Applications/VLC.app/Contents/MacOS/VLC"
         }));
         assert!(candidates.iter().any(|candidate| {
             candidate.name == "ffplay" && candidate.program == "/opt/homebrew/bin/ffplay"
+        }));
+        assert!(candidates.iter().any(|candidate| {
+            candidate.name == "ffplay" && candidate.program == "/usr/bin/ffplay"
         }));
     }
 

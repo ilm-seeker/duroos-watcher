@@ -685,7 +685,8 @@ button:focus-visible {
 
 .lesson-row,
 .lesson-grid,
-.relay-grid {
+.relay-grid,
+.channel-card-list {
   display: grid;
   gap: 12px;
 }
@@ -704,9 +705,14 @@ button:focus-visible {
   grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
 }
 
+.channel-card-list {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .lesson-card,
 .lesson-row-item,
 .relay-card,
+.channel-card,
 .live-session-row {
   min-width: 0;
   border: 1px solid var(--line);
@@ -1682,6 +1688,16 @@ button.compact-row-active {
   line-height: 1.4;
 }
 
+.library-organization-panel {
+  gap: 12px;
+}
+
+.organization-pill-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
 .job-list {
   display: grid;
   gap: 10px;
@@ -1721,6 +1737,13 @@ button.compact-row-active {
   justify-content: flex-end;
 }
 
+.channel-mode-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
 .relay-aside {
   display: grid;
   gap: 14px;
@@ -1757,7 +1780,8 @@ button.compact-row-active {
   line-height: 1.45;
 }
 
-.feed-follow-panel > .relay-grid {
+.feed-follow-panel > .relay-grid,
+.feed-follow-panel > .channel-card-list {
   grid-column: 1 / -1;
 }
 
@@ -1770,6 +1794,79 @@ button.compact-row-active {
 
 .feed-follow-panel .empty-state svg {
   grid-row: 1 / span 2;
+}
+
+.channel-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  padding: 14px;
+}
+
+.channel-card-main,
+.channel-title-block {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.channel-title-block h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 850;
+  line-height: 1.25;
+}
+
+.channel-title-block span,
+.channel-card p,
+.channel-card-stats {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.channel-card p {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.channel-card-meta,
+.channel-card-stats,
+.channel-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.channel-card-stats {
+  color: var(--faint);
+}
+
+.channel-card code,
+.live-session-copy code {
+  overflow-wrap: anywhere;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #faf8f1;
+  color: #4a554f;
+  padding: 7px 8px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.channel-card-actions {
+  min-width: 150px;
+  align-content: start;
+  justify-content: flex-end;
+}
+
+.channel-card-actions .secondary-action,
+.channel-card-actions .danger-action {
+  width: 100%;
+  justify-content: center;
 }
 
 .publisher-panel {
@@ -2087,6 +2184,82 @@ button.compact-row-active {
   font-size: 12px;
   font-weight: 700;
   line-height: 1.45;
+}
+
+.preset-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px;
+}
+
+.preset-panel > div,
+.preset-row,
+.advanced-network-settings {
+  min-width: 0;
+}
+
+.preset-panel strong,
+.preset-row strong {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.preset-panel span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.preset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 8px;
+}
+
+.preset-row {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfaf6;
+  padding: 9px;
+}
+
+.preset-row .status-chip {
+  justify-self: start;
+}
+
+.preset-row code {
+  overflow-wrap: anywhere;
+  color: #4a554f;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.advanced-network-settings {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.advanced-network-settings summary {
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.advanced-network-settings[open] summary {
+  margin-bottom: 10px;
 }
 
 .endpoint-test-report {
@@ -2892,6 +3065,20 @@ button.compact-row-active {
   .managed-source-actions {
     justify-content: flex-start;
   }
+
+  .channel-card {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .channel-card-actions {
+    min-width: 0;
+    justify-content: flex-start;
+  }
+
+  .channel-card-actions .secondary-action,
+  .channel-card-actions .danger-action {
+    width: auto;
+  }
 }
 
 @media (max-width: 620px) {
@@ -2914,7 +3101,8 @@ button.compact-row-active {
 
   .lesson-row,
   .lesson-grid,
-  .relay-grid {
+  .relay-grid,
+  .channel-card-list {
     grid-template-columns: 1fr;
   }
 

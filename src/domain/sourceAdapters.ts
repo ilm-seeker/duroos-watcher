@@ -163,7 +163,7 @@ export const sourceAdapters: SourceAdapterDescriptor[] = [
   },
   {
     platform: "teacher-relay",
-    label: "Curator Relay",
+    label: "Channels",
     description: "Subscribe to teacher or curator-owned signed feeds and shared Nostr channel links.",
     capability: capability(
       "native",
@@ -175,7 +175,7 @@ export const sourceAdapters: SourceAdapterDescriptor[] = [
       "stable",
     ),
     acceptedInputs: [
-      "Relay feed URL",
+      "Teacher channel URL",
       "Signed Duroos manifest",
       "Nostr naddr channel link",
       "JSON Feed URL",

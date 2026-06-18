@@ -31,8 +31,8 @@ export const seedSources: Source[] = sourceAdapters.map((adapter) => ({
           ? "https://example.com/feed.xml"
         : adapter.platform === "archive-org"
           ? "archive.org/details/<identifier>"
-          : adapter.platform === "teacher-relay"
-            ? "https://teacher.example/feed.xml"
+        : adapter.platform === "teacher-relay"
+            ? "https://teacher.example/duroos.json"
             : `${adapter.platform}:not-configured`,
   feedFormat:
     adapter.platform === "teacher-relay" ? "duroos-manifest" : "rss",

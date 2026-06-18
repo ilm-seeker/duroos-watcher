@@ -25,3 +25,6 @@ Reports about third-party channels, feeds, manifests, media, curators, downloads
 - Duroos v2 manifests can be signed with Ed25519; a valid signature proves integrity for the included public key, not that the curator is trusted by the user.
 - Media hashes are verified when a feed provides a sha256 hash. Hash mismatches must not attach a file as ready media.
 - Nostr, IPFS, and BitTorrent references are not default redistribution channels in v1.
+- The Tauri asset protocol is intended to serve only files inside the app library. CSP changes should keep remote content out of the renderer unless a feature explicitly needs it and has a threat model.
+- Release artifacts are production only after platform signing/notarization, artifact checksums, and media-tool checksum manifests are complete. Unsigned artifacts are alpha/testing builds.
+- CI and release logs must not include cookies, private paths, publisher passphrases, signing keys, Nostr private keys, platform tokens, or local identity material.

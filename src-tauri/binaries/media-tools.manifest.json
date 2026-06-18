@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "status": "strategy",
+  "policy": "Production builds that bundle or CI-fetch media tools must pin every executable with version, source URL, SHA-256 checksum, license, and target triple before artifact signing.",
+  "requiredTools": ["yt-dlp", "ffmpeg", "ffprobe"],
+  "optionalPlayers": ["mpv", "vlc", "ffplay"],
+  "artifactFields": ["tool", "target", "version", "sourceUrl", "sha256", "license"],
+  "artifacts": []
+}

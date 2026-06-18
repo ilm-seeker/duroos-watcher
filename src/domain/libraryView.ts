@@ -1,4 +1,13 @@
-import type { Collection, Lesson, MediaFile, Source, Teacher, WatchState } from "./types";
+import type {
+  Collection,
+  Lesson,
+  MediaFile,
+  Source,
+  Teacher,
+  TeacherRelay,
+  TrustedCurator,
+  WatchState,
+} from "./types";
 
 export type SmartScopeId =
   | "all"
@@ -22,6 +31,29 @@ export interface LibraryGroup {
   completedCount: number;
 }
 
+export interface ChannelSubscriptionView {
+  id: string;
+  relayId: string;
+  sourceId?: string;
+  title: string;
+  curatorLabel: string;
+  description?: string;
+  feedUrl: string;
+  feedFormat: string;
+  trustState: TeacherRelay["trustState"];
+  trustPolicy: TeacherRelay["trustPolicy"];
+  visibility: TeacherRelay["visibility"];
+  autoDownload: boolean;
+  itemCount: number;
+  localFileCount: number;
+  missingFileCount: number;
+  postCount: number;
+  latestUpdateAt?: string;
+  latestPublishedAt?: string;
+  latestCheckedAt?: string;
+  trusted: boolean;
+}
+
 export interface LibraryLessonViewInput {
   query: string;
   selectedLessonId: string;
@@ -34,6 +66,8 @@ export interface LibraryLessonViewInput {
   collections: Collection[];
   sources: Source[];
   mediaFiles: MediaFile[];
+  teacherRelays?: TeacherRelay[];
+  trustedCurators?: TrustedCurator[];
   watchState: WatchState[];
 }
 
@@ -47,6 +81,7 @@ export interface LibraryLessonView {
   teacherGroups: LibraryGroup[];
   collectionGroups: LibraryGroup[];
   sourceGroups: LibraryGroup[];
+  channelSubscriptions: ChannelSubscriptionView[];
 }
 
 export const buildLibraryLessonView = ({
@@ -61,6 +96,8 @@ export const buildLibraryLessonView = ({
   collections,
   sources,
   mediaFiles,
+  teacherRelays = [],
+  trustedCurators = [],
   watchState,
 }: LibraryLessonViewInput): LibraryLessonView => {
   const normalizedQuery = query.trim().toLowerCase();
@@ -143,6 +180,14 @@ export const buildLibraryLessonView = ({
     teacherGroups: buildGroups(lessons, teachers, watchByLessonId, "teacher"),
     collectionGroups: buildGroups(lessons, collections, watchByLessonId, "collection"),
     sourceGroups: buildGroups(lessons, sources, watchByLessonId, "source"),
+    channelSubscriptions: buildChannelSubscriptions({
+      teacherRelays,
+      teachers,
+      sources,
+      lessons,
+      mediaFiles,
+      trustedCurators,
+    }),
   };
 };
 
@@ -166,6 +211,92 @@ const needsLocalFile = (
   lesson: Lesson,
   mediaByLessonId: Map<string, MediaFile>,
 ): boolean => lesson.contentType !== "post" && !mediaByLessonId.has(lesson.id);
+
+const latestDate = (values: Array<string | undefined>): string | undefined => {
+  const dates = values.filter((value): value is string => Boolean(value));
+  return dates.sort((left, right) => right.localeCompare(left))[0];
+};
+
+const sourceMatchesRelay = (source: Source, relay: TeacherRelay): boolean =>
+  source.platform === "teacher-relay" &&
+  (source.identifier === relay.feedUrl ||
+    source.id === relay.id ||
+    source.id === `source-${relay.id}` ||
+    source.label === relay.title ||
+    source.label === `Curator: ${relay.title}` ||
+    source.label === `Channel: ${relay.title}`);
+
+const buildChannelSubscriptions = ({
+  teacherRelays,
+  teachers,
+  sources,
+  lessons,
+  mediaFiles,
+  trustedCurators,
+}: {
+  teacherRelays: TeacherRelay[];
+  teachers: Teacher[];
+  sources: Source[];
+  lessons: Lesson[];
+  mediaFiles: MediaFile[];
+  trustedCurators: TrustedCurator[];
+}): ChannelSubscriptionView[] => {
+  const teacherById = new Map(teachers.map((teacher) => [teacher.id, teacher]));
+  const mediaByLessonId = new Map(mediaFiles.map((file) => [file.lessonId, file]));
+  const trustedCuratorIds = new Set(trustedCurators.map((curator) => curator.id));
+
+  return teacherRelays
+    .map((relay) => {
+      const source = sources.find((row) => sourceMatchesRelay(row, relay));
+      const channelLessons = source
+        ? lessons.filter((lesson) => lesson.sourceId === source.id)
+        : lessons.filter((lesson) => lesson.teacherId === relay.teacherId);
+      const missingFileCount = channelLessons.filter((lesson) =>
+        needsLocalFile(lesson, mediaByLessonId),
+      ).length;
+      const localFileCount = channelLessons.filter((lesson) =>
+        mediaByLessonId.has(lesson.id),
+      ).length;
+      const postCount = channelLessons.filter((lesson) => lesson.contentType === "post").length;
+      const latestLessonAt = latestDate(channelLessons.map((lesson) => lesson.publishedAt));
+      const latestUpdateAt = latestDate([
+        relay.lastPublishedAt,
+        source?.lastCheckedAt,
+        latestLessonAt,
+      ]);
+      const trusted =
+        relay.trustState === "signed-trusted" ||
+        Boolean(source?.trustedCuratorId && trustedCuratorIds.has(source.trustedCuratorId));
+
+      return {
+        id: source?.id ?? relay.id,
+        relayId: relay.id,
+        sourceId: source?.id,
+        title: relay.title,
+        curatorLabel: teacherById.get(relay.teacherId)?.displayName ?? relay.teacherId,
+        description: relay.description,
+        feedUrl: relay.feedUrl,
+        feedFormat: relay.feedFormat,
+        trustState: relay.trustState,
+        trustPolicy: relay.trustPolicy,
+        visibility: relay.visibility,
+        autoDownload: relay.autoDownload,
+        itemCount: channelLessons.length,
+        localFileCount,
+        missingFileCount,
+        postCount,
+        latestUpdateAt,
+        latestPublishedAt: relay.lastPublishedAt,
+        latestCheckedAt: source?.lastCheckedAt,
+        trusted,
+      };
+    })
+    .sort(
+      (left, right) =>
+        (right.latestUpdateAt ?? "").localeCompare(left.latestUpdateAt ?? "") ||
+        left.title.localeCompare(right.title),
+    );
+};
 
 const lessonMatchesScope = (
   lesson: Lesson,

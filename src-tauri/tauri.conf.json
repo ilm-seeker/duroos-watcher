@@ -21,11 +21,19 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost blob:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:1420 ws://127.0.0.1:1420; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPDATA/library/**"]
+        "scope": ["$APPDATA/library/**/*"]
       }
     }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg", "nsis", "msi", "appimage", "deb"],
+    "publisher": "Duroos Watcher",
+    "category": "Education",
+    "shortDescription": "Local-first study library for educational media",
+    "longDescription": "Duroos Watcher imports, organizes, and plays educational media locally, with signed protocol-based channels for teacher and curator publishing."
   }
 }

@@ -108,7 +108,7 @@ export interface TeacherRelay {
   description?: string;
 }
 
-export type LiveProvider = "youtube-live" | "mixlr" | "paltalk" | "custom-rtmp";
+export type LiveProvider = "youtube-live" | "mixlr" | "custom-rtmp";
 export type LiveSessionStatus =
   | "scheduled"
   | "live"

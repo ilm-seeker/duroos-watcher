@@ -104,7 +104,6 @@ import type {
   Source,
   SourcePlatform,
   Teacher,
-  TeacherRelay,
   TrustState,
   TrustedCurator,
   WatchState,
@@ -117,6 +116,7 @@ import {
 } from "./domain/sourceManagement";
 import {
   buildLibraryLessonView,
+  type ChannelSubscriptionView,
   type LibraryGroup,
   type SmartScopeId,
 } from "./domain/libraryView";
@@ -137,6 +137,21 @@ const defaultRuntimeDiagnostics: RuntimeDiagnostics = {
   ytDlpCookiesConfigured: false,
   messages: ["Runtime diagnostics have not been checked yet."],
 };
+
+const starterNostrRelayPresets = [
+  { name: "Damus relay", url: "wss://relay.damus.io" },
+  { name: "nos.lol", url: "wss://nos.lol" },
+  { name: "Primal relay", url: "wss://relay.primal.net" },
+];
+
+const starterBlossomServerPresets = [
+  { name: "Primal Blossom", url: "https://blossom.primal.net" },
+  { name: "hzrd149 CDN", url: "https://cdn.hzrd149.com" },
+  { name: "Blossom Band", url: "https://blossom.band" },
+];
+
+const starterRelayText = starterNostrRelayPresets.map((preset) => preset.url).join("\n");
+const starterBlossomText = starterBlossomServerPresets.map((preset) => preset.url).join("\n");
 
 const downloaderStatus = (
   runtimeDiagnostics: RuntimeDiagnostics,
@@ -271,8 +286,8 @@ const searchConfigForView = (
       };
     case "relays":
       return {
-        ariaLabel: "Search feeds, publisher support, and live lessons",
-        placeholder: "Search feeds, relays, live lessons",
+        ariaLabel: "Search channels, publisher support, and live lessons",
+        placeholder: "Search channels, curators, live lessons",
       };
     case "sources":
       return {
@@ -579,6 +594,7 @@ const App = () => {
     teacherGroups,
     collectionGroups,
     sourceGroups,
+    channelSubscriptions,
   } = useMemo(
     () =>
       buildLibraryLessonView({
@@ -593,6 +609,8 @@ const App = () => {
         collections: snapshot.collections,
         sources: snapshot.sources,
         mediaFiles: snapshot.mediaFiles,
+        teacherRelays: snapshot.teacherRelays,
+        trustedCurators: snapshot.trustedCurators,
         watchState: snapshot.watchState,
       }),
     [
@@ -607,6 +625,8 @@ const App = () => {
       snapshot.mediaFiles,
       snapshot.sources,
       snapshot.teachers,
+      snapshot.teacherRelays,
+      snapshot.trustedCurators,
       snapshot.watchState,
     ],
   );
@@ -886,6 +906,55 @@ const App = () => {
     }
   };
 
+  const sourceForChannel = (channel: ChannelSubscriptionView): Source | undefined =>
+    channel.sourceId ? sourceById.get(channel.sourceId) : undefined;
+
+  const handleRefreshChannel = async (channel: ChannelSubscriptionView) => {
+    if (!isOnlineMode) {
+      setSystemNotice("Switch to online fetch mode before refreshing subscribed channels.");
+      return;
+    }
+
+    const source = sourceForChannel(channel);
+    if (!source) {
+      setSystemNotice(`No editable source row is linked to "${channel.title}". Re-follow the channel link to manage it.`);
+      return;
+    }
+
+    try {
+      setSystemNotice(`Refreshing ${channel.title}...`);
+      const result = await refreshSource(source.id);
+      const counts = `${result.imported} added, ${result.skipped} skipped, ${result.failed} failed.`;
+      const message = result.messages.join(" ");
+      const notice = `${channel.title}: ${counts}${message ? ` ${message}` : ""}`;
+      setSystemNotice(notice);
+      await refreshSnapshot(notice);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSystemNotice(message);
+    }
+  };
+
+  const handleDownloadChannel = async (channel: ChannelSubscriptionView) => {
+    const source = sourceForChannel(channel);
+    if (!source) {
+      setSystemNotice(`No editable source row is linked to "${channel.title}". Re-follow the channel link to manage downloads.`);
+      return;
+    }
+
+    await handleDownloadSource(source);
+  };
+
+  const handleUnfollowChannel = async (channel: ChannelSubscriptionView) => {
+    const source = sourceForChannel(channel);
+    if (!source) {
+      setSystemNotice(`No editable source row is linked to "${channel.title}".`);
+      return;
+    }
+
+    await handleClearSource(source);
+  };
+
   const handleNativePlayback = async (mediaFile: MediaFile) => {
     try {
       setBusyNativeMediaId(mediaFile.id);
@@ -1015,6 +1084,7 @@ const App = () => {
             teacherGroups={teacherGroups}
             collectionGroups={collectionGroups}
             sourceGroups={sourceGroups}
+            channelSubscriptions={channelSubscriptions}
             selectedTeacherId={selectedTeacherId}
             selectedCollectionId={selectedCollectionId}
             selectedSourceId={selectedSourceId}
@@ -1043,6 +1113,9 @@ const App = () => {
             busySourceAction={busySourceAction}
             busyNativeMediaId={busyNativeMediaId}
             onDownloadSource={handleDownloadSource}
+            onRefreshChannel={handleRefreshChannel}
+            onDownloadChannel={handleDownloadChannel}
+            onUnfollowChannel={handleUnfollowChannel}
             onNativePlayback={handleNativePlayback}
             onMediaPlaybackError={setSelectedMediaError}
             onSaveWatchState={handleSaveWatchState}
@@ -1059,12 +1132,16 @@ const App = () => {
 
         {viewMode === "relays" ? (
           <RelaysView
-            relays={snapshot.teacherRelays}
+            channelSubscriptions={channelSubscriptions}
             liveSessions={snapshot.liveSessions}
             teachers={teacherById}
             query={query}
+            busySourceAction={busySourceAction}
             publisherProfiles={publisherProfiles}
             onOpenImport={openImport}
+            onRefreshChannel={handleRefreshChannel}
+            onDownloadChannel={handleDownloadChannel}
+            onUnfollowChannel={handleUnfollowChannel}
             onPublisherProfilesChanged={refreshPublisherProfiles}
             onPublisherResult={setSystemNotice}
           />
@@ -1130,7 +1207,7 @@ const Sidebar = ({
 }: SidebarProps) => {
   const navItems: { mode: ViewMode; label: string; icon: typeof Library }[] = [
     { mode: "library", label: "Library", icon: Library },
-    { mode: "relays", label: "Feeds & Publishing", icon: Rss },
+    { mode: "relays", label: "Channels", icon: Rss },
     { mode: "sources", label: "Sources", icon: Database },
     { mode: "queue", label: "Update Queue", icon: History },
   ];
@@ -1317,7 +1394,7 @@ const viewTitle = (viewMode: ViewMode): string => {
     case "library":
       return "Media Library";
     case "relays":
-      return "Feeds & Publishing";
+      return "Channels";
     case "sources":
       return "Source Control";
     case "queue":
@@ -1336,6 +1413,7 @@ interface DashboardProps {
   teacherGroups: LibraryGroup[];
   collectionGroups: LibraryGroup[];
   sourceGroups: LibraryGroup[];
+  channelSubscriptions: ChannelSubscriptionView[];
   selectedTeacherId: string;
   selectedCollectionId: string;
   selectedSourceId: string;
@@ -1364,6 +1442,9 @@ interface DashboardProps {
   busySourceAction: BusySourceAction;
   busyNativeMediaId: string | null;
   onDownloadSource: (source: Source) => void;
+  onRefreshChannel: (channel: ChannelSubscriptionView) => void;
+  onDownloadChannel: (channel: ChannelSubscriptionView) => void;
+  onUnfollowChannel: (channel: ChannelSubscriptionView) => void;
   onNativePlayback: (mediaFile: MediaFile) => void;
   onMediaPlaybackError: (message: string) => void;
   onSaveWatchState: (
@@ -1397,6 +1478,7 @@ const Dashboard = ({
   teacherGroups,
   collectionGroups,
   sourceGroups,
+  channelSubscriptions,
   selectedTeacherId,
   selectedCollectionId,
   selectedSourceId,
@@ -1425,6 +1507,9 @@ const Dashboard = ({
   busySourceAction,
   busyNativeMediaId,
   onDownloadSource,
+  onRefreshChannel,
+  onDownloadChannel,
+  onUnfollowChannel,
   onNativePlayback,
   onMediaPlaybackError,
   onSaveWatchState,
@@ -1531,8 +1616,8 @@ const Dashboard = ({
       </div>
 
       <SectionHeader
-        title="Feed Inbox"
-        meta={isSearchActive ? "Matching source updates" : "Subscribed source updates"}
+        title="New Items"
+        meta={isSearchActive ? "Matching updates" : "Subscribed updates"}
       />
       <div className="lesson-grid">
         {newLessons.length ? (
@@ -1555,7 +1640,7 @@ const Dashboard = ({
         ) : (
           <EmptyState
             icon={Rss}
-            title={isSearchActive ? "No matching feed items" : "No feed items"}
+            title={isSearchActive ? "No matching new items" : "No new items"}
             detail={
               isSearchActive
                 ? "No source updates match this search."
@@ -1566,23 +1651,26 @@ const Dashboard = ({
       </div>
 
       <SectionHeader
-        title="Curator Relay Feeds"
-        meta={`${snapshot.teacherRelays.length} subscriptions`}
+        title="Subscribed Channels"
+        meta={`${channelSubscriptions.length} followed`}
       />
-      <div className="relay-grid">
-        {snapshot.teacherRelays.length ? (
-          snapshot.teacherRelays.map((relay) => (
-            <RelayCard
-              key={relay.id}
-              relay={relay}
-              teacher={teacherById.get(relay.teacherId)}
+      <div className="channel-card-list">
+        {channelSubscriptions.length ? (
+          channelSubscriptions.map((channel) => (
+            <ChannelSubscriptionCard
+              key={channel.id}
+              channel={channel}
+              busySourceAction={busySourceAction}
+              onRefresh={onRefreshChannel}
+              onDownload={onDownloadChannel}
+              onUnfollow={onUnfollowChannel}
             />
           ))
         ) : (
           <EmptyState
             icon={Rss}
-            title="No relay subscriptions"
-            detail="Add a signed curator manifest or teacher feed when one is available."
+            title="No followed channels"
+            detail="Follow a signed teacher channel or curator manifest when one is available."
           />
         )}
       </div>
@@ -1630,6 +1718,11 @@ const Dashboard = ({
         onStop={onStopPhoneAccess}
         onCopyLink={onCopyPhoneLink}
       />
+      <LibraryOrganizationPanel
+        channels={channelSubscriptions}
+        lessons={snapshot.lessons}
+        mediaByLessonId={mediaByLessonId}
+      />
       <SourceReadinessPanel
         sources={snapshot.sources}
         groups={sourceGroups}
@@ -1675,7 +1768,7 @@ const FirstRunDashboard = ({
           <StatusChip label="Local-first" tone="positive" />
           <h2>Build your local study library</h2>
           <p>
-            Import lessons you are allowed to save, or follow a teacher feed. Duroos stores your
+            Import lessons you are allowed to save, or follow a teacher channel. Duroos stores your
             library locally and keeps remote fetching under your control.
           </p>
         </div>
@@ -1690,7 +1783,7 @@ const FirstRunDashboard = ({
           </button>
           <button type="button" className="secondary-action" onClick={() => onOpenImport("feed")}>
             <Rss size={17} />
-            <span>Follow Teacher Feed</span>
+            <span>Follow Channel</span>
           </button>
         </div>
         <div className="first-run-trust-row">
@@ -2903,6 +2996,61 @@ const StorageHygienePanel = ({
   );
 };
 
+const LibraryOrganizationPanel = ({
+  channels,
+  lessons,
+  mediaByLessonId,
+}: {
+  channels: ChannelSubscriptionView[];
+  lessons: Lesson[];
+  mediaByLessonId: Map<string, MediaFile>;
+}) => {
+  const contentTypes: ContentType[] = ["video", "audio", "pdf", "post"];
+  const localFileCount = lessons.filter((lesson) => mediaByLessonId.has(lesson.id)).length;
+  const missingFileCount = lessons.filter(
+    (lesson) => isFileBackedContentType(lesson.contentType) && !mediaByLessonId.has(lesson.id),
+  ).length;
+
+  return (
+    <section className="side-panel library-organization-panel">
+      <SectionHeader title="Library Organization" meta={`${channels.length} channels`} />
+      <div className="compact-list">
+        {channels.slice(0, 3).map((channel) => (
+          <div className="compact-row" key={channel.id}>
+            <div className="round-icon">
+              <Rss size={16} />
+            </div>
+            <div>
+              <strong>{channel.title}</strong>
+              <span>
+                {channel.itemCount} items · {channel.localFileCount} local ·{" "}
+                {channel.missingFileCount} need files
+              </span>
+            </div>
+          </div>
+        ))}
+        {channels.length === 0 ? <p className="panel-empty">No followed channels yet.</p> : null}
+      </div>
+      <div className="organization-pill-grid" aria-label="Library content types">
+        {contentTypes.map((contentType) => (
+          <StatusChip
+            key={contentType}
+            label={`${contentType} ${lessons.filter((lesson) => lesson.contentType === contentType).length}`}
+            tone="neutral"
+          />
+        ))}
+      </div>
+      <div className="organization-pill-grid" aria-label="Library availability">
+        <StatusChip label={`${localFileCount} local files`} tone="positive" />
+        <StatusChip
+          label={`${missingFileCount} need files`}
+          tone={missingFileCount > 0 ? "warning" : "positive"}
+        />
+      </div>
+    </section>
+  );
+};
+
 const TeacherPanel = ({
   groups,
   selectedTeacherId,
@@ -2943,35 +3091,101 @@ const TeacherPanel = ({
   </section>
 );
 
-const RelayCard = ({ relay, teacher }: { relay: TeacherRelay; teacher?: Teacher }) => (
-  <article className="relay-card">
-    <div className="relay-card-header">
-      <div className="round-icon">
-        <Rss size={16} />
+const ChannelSubscriptionCard = ({
+  channel,
+  busySourceAction,
+  onRefresh,
+  onDownload,
+  onUnfollow,
+}: {
+  channel: ChannelSubscriptionView;
+  busySourceAction: BusySourceAction;
+  onRefresh: (channel: ChannelSubscriptionView) => void;
+  onDownload: (channel: ChannelSubscriptionView) => void;
+  onUnfollow: (channel: ChannelSubscriptionView) => void;
+}) => {
+  const isDownloading =
+    busySourceAction?.action === "download" && busySourceAction.sourceId === channel.sourceId;
+  const isRemoving =
+    busySourceAction?.action === "clear" && busySourceAction.sourceId === channel.sourceId;
+  const mediaTone =
+    channel.missingFileCount > 0 ? "warning" : channel.localFileCount > 0 ? "positive" : "neutral";
+
+  return (
+    <article className="channel-card">
+      <div className="channel-card-main">
+        <div className="relay-card-header">
+          <div className="round-icon">
+            <Rss size={16} />
+          </div>
+          <div className="channel-title-block">
+            <h3>{channel.title}</h3>
+            <span>{channel.curatorLabel}</span>
+          </div>
+        </div>
+        <p>{channel.description ?? "Signed channel subscription."}</p>
+        <div className="channel-card-meta">
+          <StatusChip label={trustLabel(channel.trustState)} tone={trustTone(channel.trustState)} />
+          <StatusChip
+            label={channel.trusted ? "Trusted curator" : channel.trustPolicy.replace(/-/g, " ")}
+            tone={channel.trusted ? "positive" : "neutral"}
+          />
+          <StatusChip
+            label={`${channel.localFileCount}/${channel.itemCount} local`}
+            tone={mediaTone}
+          />
+          <StatusChip
+            label={channel.autoDownload ? "Auto-download" : "Review first"}
+            tone={channel.autoDownload ? "positive" : "warning"}
+          />
+        </div>
+        <div className="channel-card-stats">
+          <span>{channel.itemCount} items</span>
+          <span>{channel.missingFileCount} need files</span>
+          <span>{channel.postCount} notes</span>
+          <span>Updated {formatDate(channel.latestUpdateAt)}</span>
+        </div>
+        <code>{channel.feedUrl}</code>
       </div>
-      <StatusChip
-        label={relay.autoDownload ? "Auto-download on" : "Review first"}
-        tone={relay.autoDownload ? "positive" : "warning"}
-      />
-    </div>
-    <h3>{relay.title}</h3>
-    <p>{relay.description}</p>
-    <div className="relay-meta">
-      <span>{teacher?.displayName ?? "Unknown teacher"}</span>
-      <span>{relay.visibility}</span>
-      <span>{relay.trustPolicy.replace(/-/g, " ")}</span>
-    </div>
-    <div className="managed-source-meta">
-      <StatusChip label={relay.feedFormat.replace(/-/g, " ")} tone="neutral" />
-      <StatusChip label={trustLabel(relay.trustState)} tone={trustTone(relay.trustState)} />
-    </div>
-    <code>{relay.feedUrl}</code>
-    <div className="relay-footer">
-      <span>{relay.subscriberCount} subscribers</span>
-      <span>Last publish {formatDate(relay.lastPublishedAt)}</span>
-    </div>
-  </article>
-);
+      <div className="channel-card-actions">
+        <button
+          type="button"
+          className="secondary-action"
+          onClick={() => onRefresh(channel)}
+          disabled={!channel.sourceId}
+          title={channel.sourceId ? "Refresh this channel." : "Re-follow this channel to manage it."}
+        >
+          <RefreshCcw size={15} />
+          <span>Refresh</span>
+        </button>
+        <button
+          type="button"
+          className="secondary-action"
+          onClick={() => onDownload(channel)}
+          disabled={!channel.sourceId || isDownloading}
+          title={
+            channel.sourceId
+              ? "Download missing file-backed lessons for this channel."
+              : "Re-follow this channel to manage downloads."
+          }
+        >
+          <Download size={15} />
+          <span>{isDownloading ? "Downloading" : "Download"}</span>
+        </button>
+        <button
+          type="button"
+          className="danger-action"
+          onClick={() => onUnfollow(channel)}
+          disabled={!channel.sourceId || isRemoving}
+          title={channel.sourceId ? "Remove this channel source and its rows." : "No source row is linked."}
+        >
+          <X size={15} />
+          <span>{isRemoving ? "Removing" : "Unfollow"}</span>
+        </button>
+      </div>
+    </article>
+  );
+};
 
 const LiveSessionPanel = ({
   liveSessions,
@@ -3006,39 +3220,46 @@ const LiveSessionPanel = ({
 );
 
 const RelaysView = ({
-  relays,
+  channelSubscriptions,
   liveSessions,
   teachers,
   query,
+  busySourceAction,
   publisherProfiles,
   onOpenImport,
+  onRefreshChannel,
+  onDownloadChannel,
+  onUnfollowChannel,
   onPublisherProfilesChanged,
   onPublisherResult,
 }: {
-  relays: TeacherRelay[];
+  channelSubscriptions: ChannelSubscriptionView[];
   liveSessions: LiveSession[];
   teachers: Map<string, Teacher>;
   query: string;
+  busySourceAction: BusySourceAction;
   publisherProfiles: PublisherProfile[];
   onOpenImport: (mode?: ImportMode) => void;
+  onRefreshChannel: (channel: ChannelSubscriptionView) => void;
+  onDownloadChannel: (channel: ChannelSubscriptionView) => void;
+  onUnfollowChannel: (channel: ChannelSubscriptionView) => void;
   onPublisherProfilesChanged: () => Promise<void>;
   onPublisherResult: (notice: string) => void;
 }) => {
   const relayQuery = normalizeSearch(query);
-  const visibleRelays = relays.filter((relay) => {
-    const teacher = teachers.get(relay.teacherId);
-    return includesQuery(relayQuery, [
-      relay.title,
-      relay.feedUrl,
-      relay.feedFormat,
-      relay.feedTransport,
-      relay.trustState,
-      relay.visibility,
-      relay.trustPolicy,
-      relay.description,
-      teacher?.displayName,
-    ]);
-  });
+  const [channelMode, setChannelMode] = useState<"following" | "publish">("following");
+  const visibleChannels = channelSubscriptions.filter((channel) =>
+    includesQuery(relayQuery, [
+      channel.title,
+      channel.feedUrl,
+      channel.feedFormat,
+      channel.trustState,
+      channel.visibility,
+      channel.trustPolicy,
+      channel.description,
+      channel.curatorLabel,
+    ]),
+  );
   const visibleLiveSessions = liveSessions.filter((session) => {
     const teacher = teachers.get(session.teacherId);
     return includesQuery(relayQuery, [
@@ -3055,68 +3276,94 @@ const RelaysView = ({
     <div className="wide-page relays-page">
       <div className="page-heading relays-heading">
         <div>
-          <h2>Feeds & Publishing</h2>
+          <h2>Channels</h2>
           <p>
-            Follow teacher-owned signed feeds, or publish a local signed channel without a central
-            catalog.
+            Follow signed teacher and curator channels, or publish a local signed channel without a
+            central catalog.
           </p>
         </div>
         <div className="relays-heading-status">
-          <StatusChip label="Signed feeds" tone="positive" />
+          <StatusChip label="Signed manifests" tone="positive" />
           <StatusChip label="No central catalog" tone="neutral" />
         </div>
       </div>
 
+      <div className="channel-mode-tabs" role="tablist" aria-label="Channels mode">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={channelMode === "following"}
+          className={channelMode === "following" ? "scope-chip scope-chip-active" : "scope-chip"}
+          onClick={() => setChannelMode("following")}
+        >
+          Following
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={channelMode === "publish"}
+          className={channelMode === "publish" ? "scope-chip scope-chip-active" : "scope-chip"}
+          onClick={() => setChannelMode("publish")}
+        >
+          Publish
+        </button>
+      </div>
+
       <div className="relay-layout">
         <section className="relay-main">
-          <section className="feed-follow-panel" aria-label="Follow teacher feeds">
-            <div className="feed-follow-copy">
-              <SectionHeader
-                title="Follow Teacher Feeds"
-                meta={`${visibleRelays.length} subscriptions`}
-              />
-              <p>
-                Preview signed teacher feeds or channel links before adding them to the local
-                library.
-              </p>
-            </div>
-            <button type="button" className="secondary-action" onClick={() => onOpenImport("feed")}>
-              <Rss size={16} />
-              <span>Follow Feed</span>
-            </button>
-            <div className="relay-grid">
-              {visibleRelays.length ? (
-                visibleRelays.map((relay) => (
-                  <RelayCard
-                    key={relay.id}
-                    relay={relay}
-                    teacher={teachers.get(relay.teacherId)}
-                  />
-                ))
-              ) : (
-                <EmptyState
-                  icon={Rss}
-                  title={relayQuery ? "No matching feeds" : "No subscribed feeds"}
-                  detail={
-                    relayQuery
-                      ? "Clear search or try a teacher, feed URL, or trust state."
-                      : "Follow a signed teacher feed or curator manifest when one is available."
-                  }
+          {channelMode === "following" ? (
+            <section className="feed-follow-panel" aria-label="Followed channels">
+              <div className="feed-follow-copy">
+                <SectionHeader
+                  title="Following"
+                  meta={`${visibleChannels.length} channel${visibleChannels.length === 1 ? "" : "s"}`}
                 />
-              )}
-            </div>
-          </section>
-
-          <TeacherPublisherPanel
-            profiles={publisherProfiles}
-            onProfilesChanged={onPublisherProfilesChanged}
-            onResult={onPublisherResult}
-          />
+                <p>
+                  Follow a Duroos manifest or Nostr channel link, review trust, then download only
+                  what belongs in the local library.
+                </p>
+              </div>
+              <button type="button" className="secondary-action" onClick={() => onOpenImport("feed")}>
+                <Rss size={16} />
+                <span>Follow Channel</span>
+              </button>
+              <div className="channel-card-list">
+                {visibleChannels.length ? (
+                  visibleChannels.map((channel) => (
+                    <ChannelSubscriptionCard
+                      key={channel.id}
+                      channel={channel}
+                      busySourceAction={busySourceAction}
+                      onRefresh={onRefreshChannel}
+                      onDownload={onDownloadChannel}
+                      onUnfollow={onUnfollowChannel}
+                    />
+                  ))
+                ) : (
+                  <EmptyState
+                    icon={Rss}
+                    title={relayQuery ? "No matching channels" : "No followed channels"}
+                    detail={
+                      relayQuery
+                        ? "Clear search or try a curator, channel URL, media state, or trust state."
+                        : "Follow a signed teacher channel or curator manifest when one is available."
+                    }
+                  />
+                )}
+              </div>
+            </section>
+          ) : (
+            <TeacherPublisherPanel
+              profiles={publisherProfiles}
+              onProfilesChanged={onPublisherProfilesChanged}
+              onResult={onPublisherResult}
+            />
+          )}
         </section>
 
         <aside className="relay-aside">
           <section className="side-panel relay-publish-panel">
-            <SectionHeader title="Publish Model" meta="signed feeds" />
+            <SectionHeader title="Protocol Model" meta="signed channels" />
             <div className="publish-steps">
               <div>
                 <UploadCloud size={17} />
@@ -3124,11 +3371,11 @@ const RelaysView = ({
               </div>
               <div>
                 <ShieldCheck size={17} />
-                <span>Feed signs lesson metadata, hashes, and provenance.</span>
+                <span>Manifest signs lesson metadata, hashes, and provenance.</span>
               </div>
               <div>
                 <Download size={17} />
-                <span>Subscribers fetch or auto-download approved enclosures.</span>
+                <span>Learners fetch or auto-download approved enclosures.</span>
               </div>
             </div>
           </section>
@@ -3153,7 +3400,7 @@ const RelaysView = ({
             detail={
               relayQuery
                 ? "Clear search or try a provider, title, teacher, or status."
-                : "Live capture stays manual until a teacher feed or provider setup is configured."
+                : "Live capture stays manual until a teacher channel or provider setup is configured."
             }
           />
         )}
@@ -3174,8 +3421,8 @@ const TeacherPublisherPanel = ({
   const [profileId, setProfileId] = useState(profiles[0]?.id ?? "");
   const [displayName, setDisplayName] = useState("");
   const [passphrase, setPassphrase] = useState("");
-  const [relayText, setRelayText] = useState("");
-  const [blossomText, setBlossomText] = useState("");
+  const [relayText, setRelayText] = useState(starterRelayText);
+  const [blossomText, setBlossomText] = useState(starterBlossomText);
   const [archiveText, setArchiveText] = useState("");
   const [ipfsApiUrl, setIpfsApiUrl] = useState("");
   const [ipfsGatewayUrl, setIpfsGatewayUrl] = useState("");
@@ -3187,6 +3434,7 @@ const TeacherPublisherPanel = ({
   const [panelNotice, setPanelNotice] = useState("");
   const [endpointTestReport, setEndpointTestReport] =
     useState<PublisherEndpointTestReport | null>(null);
+  const [testedEndpointSignature, setTestedEndpointSignature] = useState("");
   const [isWorking, setIsWorking] = useState(false);
   const selectedProfile = profiles.find((profile) => profile.id === profileId);
 
@@ -3208,6 +3456,12 @@ const TeacherPublisherPanel = ({
 
   const relays = endpointLines(relayText).map((url) => ({ url }));
   const blossomServers = endpointLines(blossomText).map((url) => ({ url }));
+  const endpointSignature = [
+    relays.map((relay) => relay.url).join("|"),
+    blossomServers.map((server) => server.url).join("|"),
+  ].join("::");
+  const endpointHealthPassed =
+    Boolean(endpointTestReport?.passed) && testedEndpointSignature === endpointSignature;
   const archiveMirrors: ArchiveMirrorConfig[] = [
     ...endpointLines(archiveText).map((url) => ({
       service: "https",
@@ -3239,7 +3493,9 @@ const TeacherPublisherPanel = ({
       tone: passphrase.length >= 8 ? "positive" : "warning",
     },
     {
-      label: relays.length ? `${relays.length} relay${relays.length === 1 ? "" : "s"}` : "Relay needed",
+      label: relays.length
+        ? `${relays.length} Nostr endpoint${relays.length === 1 ? "" : "s"}`
+        : "Nostr endpoint needed",
       tone: relays.length ? "positive" : "warning",
     },
     {
@@ -3247,6 +3503,10 @@ const TeacherPublisherPanel = ({
         ? `${blossomServers.length} Blossom server${blossomServers.length === 1 ? "" : "s"}`
         : "Storage needed",
       tone: blossomServers.length ? "positive" : "warning",
+    },
+    {
+      label: endpointHealthPassed ? "Network tested" : "Health check needed",
+      tone: endpointHealthPassed ? "positive" : "warning",
     },
     {
       label: lessonDrafts.length
@@ -3273,13 +3533,15 @@ const TeacherPublisherPanel = ({
         ? "Add at least one Nostr relay."
         : blossomServers.length === 0
           ? "Add at least one Blossom server."
-          : ipfsApiUrl.trim() && !ipfsGatewayUrl.trim()
-            ? "Add the IPFS gateway URL for local IPFS archival."
-            : !channelTitle.trim()
-              ? "Add a channel title."
-              : lessonDrafts.length === 0
-                ? "Select media to publish."
-                : "";
+          : !endpointHealthPassed
+            ? "Run a passing endpoint test for the current relay and storage settings."
+            : ipfsApiUrl.trim() && !ipfsGatewayUrl.trim()
+              ? "Add the IPFS gateway URL for local IPFS archival."
+              : !channelTitle.trim()
+                ? "Add a channel title."
+                : lessonDrafts.length === 0
+                  ? "Select media to publish."
+                  : "";
   const endpointTestBlockedReason = !selectedProfile
     ? "Create or select a publisher profile."
     : passphrase.length < 8
@@ -3298,24 +3560,18 @@ const TeacherPublisherPanel = ({
       complete: Boolean(selectedProfile),
     },
     {
-      title: "Unlock",
-      detail: passphrase.length >= 8 ? "Passphrase ready." : "Enter the local vault passphrase.",
-      complete: passphrase.length >= 8,
-    },
-    {
-      title: "Endpoints",
-      detail:
-        relays.length && blossomServers.length
-          ? `${relays.length} relay(s), ${blossomServers.length} storage server(s).`
-          : "Add at least one relay and one Blossom server.",
-      complete: relays.length > 0 && blossomServers.length > 0,
-    },
-    {
-      title: "Channel",
+      title: "Channel Details",
       detail: channelTitle.trim()
         ? "Learner-facing channel name is ready."
         : "Name the channel learners will follow.",
       complete: Boolean(channelTitle.trim()),
+    },
+    {
+      title: "Storage",
+      detail: endpointHealthPassed
+        ? "One relay and one Blossom server accepted the probe."
+        : "Test one working Nostr relay and one Blossom server.",
+      complete: endpointHealthPassed,
     },
     {
       title: "Media",
@@ -3331,6 +3587,11 @@ const TeacherPublisherPanel = ({
         : "Archive mirrors are optional and can stay empty.",
       complete: true,
       optional: true,
+    },
+    {
+      title: "Publish",
+      detail: passphrase.length >= 8 ? "Passphrase ready for signing." : "Enter the local vault passphrase.",
+      complete: passphrase.length >= 8,
     },
   ] satisfies Array<{ title: string; detail: string; complete: boolean; optional?: boolean }>;
   const requiredPublisherSteps = publisherSteps.filter((step) => !step.optional);
@@ -3430,6 +3691,7 @@ const TeacherPublisherPanel = ({
         blossomServers,
       });
       setEndpointTestReport(report);
+      setTestedEndpointSignature(endpointSignature);
       setPanelNotice(report.messages.join(" "));
     } catch (error: unknown) {
       setPanelNotice(error instanceof Error ? error.message : String(error));
@@ -3478,6 +3740,10 @@ const TeacherPublisherPanel = ({
       setPanelNotice("Create or select a publisher profile first.");
       return;
     }
+    if (!endpointHealthPassed) {
+      setPanelNotice("Run a passing endpoint test for the current relay and storage settings first.");
+      return;
+    }
 
     setIsWorking(true);
     setPanelNotice("");
@@ -3518,6 +3784,14 @@ const TeacherPublisherPanel = ({
     }
   };
 
+  const useStarterPresets = () => {
+    setRelayText(starterRelayText);
+    setBlossomText(starterBlossomText);
+    setEndpointTestReport(null);
+    setTestedEndpointSignature("");
+    setPanelNotice("Starter presets loaded. Run Test Endpoints before publishing.");
+  };
+
   return (
     <section className="publisher-panel">
       <div className="publisher-panel-header">
@@ -3525,7 +3799,7 @@ const TeacherPublisherPanel = ({
           <span className="publisher-kicker">Teacher publisher</span>
           <h2>Publish a signed channel</h2>
           <p>
-            Build a local profile, test relays and storage, then share one signed channel link.
+            Build a local profile, test network storage, then share one signed channel link.
           </p>
         </div>
         <div className="publisher-trust-stack" aria-label="Publisher model">
@@ -3614,53 +3888,90 @@ const TeacherPublisherPanel = ({
         </div>
 
         <div className="publisher-column">
-          <SectionHeader title="2. Relays & Storage" meta="test first" />
-          <label className="field">
-            <span>Nostr relays</span>
-            <textarea
-              value={relayText}
-              onChange={(event) => setRelayText(event.target.value)}
-            />
-            <span className="field-hint">One relay per line, for example wss://relay.example.</span>
-          </label>
-          <label className="field">
-            <span>Blossom servers</span>
-            <textarea
-              value={blossomText}
-              onChange={(event) => setBlossomText(event.target.value)}
-            />
-            <span className="field-hint">One storage server per line, for example https://blossom.example.</span>
-          </label>
-          <label className="field">
-            <span>Archive manifest mirrors</span>
-            <textarea
-              value={archiveText}
-              onChange={(event) => setArchiveText(event.target.value)}
-            />
-            <span className="field-hint">Optional public mirror URLs, one per line.</span>
-          </label>
-          <div className="archive-ipfs-grid">
-            <label className="field">
-              <span>Local IPFS API</span>
-              <input
-                value={ipfsApiUrl}
-                onChange={(event) => setIpfsApiUrl(event.target.value)}
-              />
-              <span className="field-hint">Local API URL, for example http://127.0.0.1:5001.</span>
-            </label>
-            <label className="field">
-              <span>IPFS gateway</span>
-              <input
-                value={ipfsGatewayUrl}
-                onChange={(event) => setIpfsGatewayUrl(event.target.value)}
-              />
-              <span className="field-hint">Gateway used to verify the pinned manifest.</span>
-            </label>
+          <SectionHeader title="2. Storage" meta="test first" />
+          <div className="preset-panel">
+            <div>
+              <strong>Starter presets</strong>
+              <span>Third-party, editable, and not operated by Duroos.</span>
+            </div>
+            <button type="button" className="secondary-action" onClick={useStarterPresets}>
+              <RefreshCcw size={15} />
+              <span>Use Presets</span>
+            </button>
           </div>
-          <p className="publisher-inline-note">
-            Archive mirrors are public and may be hard to remove. Only hash-matched manifest
-            copies are announced.
-          </p>
+          <div className="preset-grid" aria-label="Starter network presets">
+            {starterNostrRelayPresets.map((preset) => (
+              <div className="preset-row" key={preset.url}>
+                <StatusChip label="Nostr" tone="neutral" />
+                <strong>{preset.name}</strong>
+                <code>{preset.url}</code>
+              </div>
+            ))}
+            {starterBlossomServerPresets.map((preset) => (
+              <div className="preset-row" key={preset.url}>
+                <StatusChip label="Blossom" tone="neutral" />
+                <strong>{preset.name}</strong>
+                <code>{preset.url}</code>
+              </div>
+            ))}
+          </div>
+          <details className="advanced-network-settings">
+            <summary>Customize network settings</summary>
+            <label className="field">
+              <span>Nostr relays</span>
+              <textarea
+                value={relayText}
+                onChange={(event) => {
+                  setRelayText(event.target.value);
+                  setEndpointTestReport(null);
+                  setTestedEndpointSignature("");
+                }}
+              />
+              <span className="field-hint">One relay per line, for example wss://relay.example.</span>
+            </label>
+            <label className="field">
+              <span>Blossom servers</span>
+              <textarea
+                value={blossomText}
+                onChange={(event) => {
+                  setBlossomText(event.target.value);
+                  setEndpointTestReport(null);
+                  setTestedEndpointSignature("");
+                }}
+              />
+              <span className="field-hint">One storage server per line, for example https://blossom.example.</span>
+            </label>
+            <label className="field">
+              <span>Archive manifest mirrors</span>
+              <textarea
+                value={archiveText}
+                onChange={(event) => setArchiveText(event.target.value)}
+              />
+              <span className="field-hint">Optional public mirror URLs, one per line.</span>
+            </label>
+            <div className="archive-ipfs-grid">
+              <label className="field">
+                <span>Local IPFS API</span>
+                <input
+                  value={ipfsApiUrl}
+                  onChange={(event) => setIpfsApiUrl(event.target.value)}
+                />
+                <span className="field-hint">Local API URL, for example http://127.0.0.1:5001.</span>
+              </label>
+              <label className="field">
+                <span>IPFS gateway</span>
+                <input
+                  value={ipfsGatewayUrl}
+                  onChange={(event) => setIpfsGatewayUrl(event.target.value)}
+                />
+                <span className="field-hint">Gateway used to verify the pinned manifest.</span>
+              </label>
+            </div>
+            <p className="publisher-inline-note">
+              Archive mirrors are public and may be hard to remove. Only hash-matched manifest
+              copies are announced.
+            </p>
+          </details>
           <div className="publisher-actions">
             <button
               type="button"
@@ -3688,7 +3999,7 @@ const TeacherPublisherPanel = ({
 
       <div className="publisher-grid">
         <div className="publisher-column">
-          <SectionHeader title="3. Channel" meta="learner-facing" />
+          <SectionHeader title="3. Channel Details" meta="learner-facing" />
           <label className="field">
             <span>Channel title</span>
             <input
@@ -3737,7 +4048,7 @@ const TeacherPublisherPanel = ({
         </div>
 
         <div className="publisher-column">
-          <SectionHeader title="4. Publish Queue" meta={`${lessonDrafts.length} files`} />
+          <SectionHeader title="4. Media" meta={`${lessonDrafts.length} files`} />
           <div className="publish-draft-list">
             {lessonDrafts.length ? (
               lessonDrafts.map((draft, index) => (
@@ -3928,19 +4239,13 @@ const LiveProviderMatrix = () => {
     {
       name: "Mixlr",
       status: "Recording import",
-      detail: "Live audio recordings can be brought into a relay, but do not assume open API automation.",
-      tone: "warning" as const,
-    },
-    {
-      name: "Paltalk",
-      status: "Manual import",
-      detail: "No official ingest API is assumed; teacher uploads recordings before publishing.",
+      detail: "Live audio recordings can be imported into a channel, but do not assume open API automation.",
       tone: "warning" as const,
     },
     {
       name: "Custom RTMP",
-      status: "Future relay",
-      detail: "Best architecture for direct teacher hosting once a private relay server exists.",
+      status: "Future direct host",
+      detail: "Best architecture for direct teacher hosting once private publishing infrastructure exists.",
       tone: "neutral" as const,
     },
   ];
@@ -4226,7 +4531,7 @@ const SourcesView = ({
           <EmptyState
             icon={Rss}
             title="No added sources"
-            detail="Use Import to add a playlist, feed, Telegram channel, archive item, video URL, or teacher relay."
+            detail="Use Import to add a playlist, feed, Telegram channel, archive item, video URL, or teacher channel."
           />
         )}
       </section>
@@ -4816,8 +5121,10 @@ const ImportDrawer = ({
                 <span>
                   {isWorking
                     ? "Working"
-                    : mode === "feed" || sourceIsNostrChannel
-                      ? "Import Feed"
+                    : sourceIsNostrChannel
+                      ? "Follow Channel"
+                      : mode === "feed"
+                        ? "Import Feed"
                       : "Subscribe / Ingest"}
                 </span>
               </button>
@@ -4829,12 +5136,12 @@ const ImportDrawer = ({
                   disabled={isWorking || !isOnlineMode}
                   title={
                     isOnlineMode
-                      ? "Resolve relay hints and validate the channel manifest."
+                      ? "Resolve network hints and validate the channel manifest."
                       : "Switch to online fetch mode before previewing a channel."
                   }
                 >
                   <ShieldCheck size={17} />
-                  <span>Preview Feed</span>
+                  <span>Preview Channel</span>
                 </button>
               ) : null}
               {!isOnlineMode ? (
@@ -4905,7 +5212,7 @@ const ImportDrawer = ({
             <div className="transport-reference-note">
               <RadioTower size={17} />
               <span>
-                Nostr channel links resolve signed Duroos manifests from configured relay hints.
+                Nostr channel links resolve signed Duroos manifests from configured network hints.
                 Blossom, HTTP, and enclosure URLs remain review-first downloads; IPFS CIDs and
                 BitTorrent magnets validate only as manifest references.
               </span>
@@ -4975,7 +5282,7 @@ const ChannelPreviewPanel = ({
           {preview
             ? `${preview.curatorDisplayName} · ${formatDate(preview.publishedAt)}`
             : isLoading
-              ? "Resolving relay pointer and validating manifest."
+              ? "Resolving channel pointer and validating manifest."
               : "Preview before importing to verify the teacher, trust state, and media count."}
         </span>
       </div>
@@ -4987,7 +5294,7 @@ const ChannelPreviewPanel = ({
     <div className="channel-preview-stats">
       <span>{preview ? `${preview.lessonCount} lessons` : "Lessons unknown"}</span>
       <span>{preview ? `${preview.mediaCount} media refs` : "Media unknown"}</span>
-      <span>{preview ? `${preview.relayCount} relays` : "Relays unknown"}</span>
+      <span>{preview ? `${preview.relayCount} network hints` : "Network unknown"}</span>
       <span>
         {preview ? `${preview.blossomServerCount} Blossom servers` : "Storage unknown"}
       </span>
