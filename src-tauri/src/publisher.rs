@@ -16,7 +16,7 @@ use chacha20poly1305::{
 };
 use chrono::Utc;
 use ed25519_dalek::{Signer as Ed25519Signer, SigningKey};
-use rand::{rngs::OsRng, RngCore};
+use rand::{rngs::OsRng, Rng};
 use reqwest::blocking::{multipart, Client};
 use rusqlite::{params, Connection, OptionalExtension};
 use secp256k1::{Keypair, Message as SecpMessage, Secp256k1, SecretKey, XOnlyPublicKey};
@@ -150,10 +150,8 @@ pub fn create_publisher_profile(
     let relays = normalize_relays(request.relays)?;
     let blossom_servers = normalize_blossom_servers(request.blossom_servers)?;
 
-    let mut curator_secret = [0_u8; 32];
-    let mut nostr_secret = [0_u8; 32];
-    OsRng.fill_bytes(&mut curator_secret);
-    OsRng.fill_bytes(&mut nostr_secret);
+    let mut curator_secret = random_32_bytes();
+    let mut nostr_secret = random_32_bytes();
 
     let curator_signing_key = SigningKey::from_bytes(&curator_secret);
     let curator_public_key = general_purpose::STANDARD.encode(curator_signing_key.verifying_key());
@@ -1553,10 +1551,8 @@ fn parse_ok_message(text: &str, event_id: &str) -> Option<(bool, String)> {
 }
 
 fn encrypt_vault(passphrase: &str, plaintext: &VaultPlaintext) -> Result<VaultFile, String> {
-    let mut salt = [0_u8; 16];
-    let mut nonce = [0_u8; 24];
-    OsRng.fill_bytes(&mut salt);
-    OsRng.fill_bytes(&mut nonce);
+    let salt = random_16_bytes();
+    let nonce = random_24_bytes();
     let mut key = derive_vault_key(passphrase, &salt)?;
     let cipher = XChaCha20Poly1305::new_from_slice(&key).map_err(|error| error.to_string())?;
     let plaintext_json = serde_json::to_vec(plaintext).map_err(|error| error.to_string())?;
@@ -1573,6 +1569,18 @@ fn encrypt_vault(passphrase: &str, plaintext: &VaultPlaintext) -> Result<VaultFi
         nonce: general_purpose::STANDARD.encode(nonce),
         ciphertext: general_purpose::STANDARD.encode(ciphertext),
     })
+}
+
+fn random_16_bytes() -> [u8; 16] {
+    OsRng.gen()
+}
+
+fn random_24_bytes() -> [u8; 24] {
+    OsRng.gen()
+}
+
+fn random_32_bytes() -> [u8; 32] {
+    OsRng.gen()
 }
 
 fn decrypt_vault(passphrase: &str, vault: &VaultFile) -> Result<VaultPlaintext, String> {
