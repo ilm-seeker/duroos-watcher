@@ -13,6 +13,7 @@
     "media-tools:fetch": "node scripts/fetch-media-tools.mjs",
     "release:check": "node scripts/release-check.mjs",
     "release:audit-artifacts": "node scripts/audit-release-artifacts.mjs",
+    "release:production-gate": "node scripts/production-release-gate.mjs",
     "tauri:build:app": "tauri build --bundles app --ci",
     "tauri:build:full": "tauri build --ci",
     "tauri": "tauri"

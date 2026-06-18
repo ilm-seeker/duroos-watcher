@@ -1,0 +1,180 @@
+{
+  "schemaVersion": 1,
+  "release": {
+    "version": "0.1.0",
+    "tag": "v0.1.0",
+    "commit": "REPLACE_WITH_RELEASE_COMMIT_SHA"
+  },
+  "ci": {
+    "runId": "REPLACE_WITH_CI_RUN_ID",
+    "url": "https://github.com/ilm-seeker/duroos-watcher/actions/runs/REPLACE_WITH_CI_RUN_ID",
+    "headSha": "REPLACE_WITH_RELEASE_COMMIT_SHA",
+    "conclusion": "success",
+    "jobs": [
+      {
+        "name": "macos-latest",
+        "conclusion": "success"
+      },
+      {
+        "name": "windows-latest",
+        "conclusion": "success"
+      },
+      {
+        "name": "ubuntu-22.04",
+        "conclusion": "success"
+      }
+    ]
+  },
+  "releaseWorkflow": {
+    "runId": "REPLACE_WITH_TAG_RELEASE_RUN_ID",
+    "url": "https://github.com/ilm-seeker/duroos-watcher/actions/runs/REPLACE_WITH_TAG_RELEASE_RUN_ID",
+    "tag": "v0.1.0",
+    "headSha": "REPLACE_WITH_RELEASE_COMMIT_SHA",
+    "conclusion": "success",
+    "jobs": [
+      {
+        "name": "macOS Apple Silicon",
+        "conclusion": "success"
+      },
+      {
+        "name": "macOS Intel",
+        "conclusion": "success"
+      },
+      {
+        "name": "Windows",
+        "conclusion": "success"
+      },
+      {
+        "name": "Ubuntu",
+        "conclusion": "success"
+      }
+    ]
+  },
+  "artifactAudits": [
+    {
+      "platform": "macos-aarch64",
+      "auditJson": "release-evidence/macos-aarch64/artifact-audit.json",
+      "checksums": "release-evidence/macos-aarch64/artifact-checksums.txt"
+    },
+    {
+      "platform": "macos-x86_64",
+      "auditJson": "release-evidence/macos-x86_64/artifact-audit.json",
+      "checksums": "release-evidence/macos-x86_64/artifact-checksums.txt"
+    },
+    {
+      "platform": "windows-x86_64",
+      "auditJson": "release-evidence/windows-x86_64/artifact-audit.json",
+      "checksums": "release-evidence/windows-x86_64/artifact-checksums.txt"
+    },
+    {
+      "platform": "linux-x86_64",
+      "auditJson": "release-evidence/linux-x86_64/artifact-audit.json",
+      "checksums": "release-evidence/linux-x86_64/artifact-checksums.txt"
+    }
+  ],
+  "mediaToolReports": [
+    {
+      "target": "aarch64-apple-darwin",
+      "reportJson": "release-evidence/media-tools/aarch64-apple-darwin/media-tools-report.json"
+    },
+    {
+      "target": "x86_64-apple-darwin",
+      "reportJson": "release-evidence/media-tools/x86_64-apple-darwin/media-tools-report.json"
+    },
+    {
+      "target": "x86_64-pc-windows-msvc",
+      "reportJson": "release-evidence/media-tools/x86_64-pc-windows-msvc/media-tools-report.json"
+    },
+    {
+      "target": "x86_64-unknown-linux-gnu",
+      "reportJson": "release-evidence/media-tools/x86_64-unknown-linux-gnu/media-tools-report.json"
+    }
+  ],
+  "signing": {
+    "macos": {
+      "appSigned": true,
+      "dmgSigned": true,
+      "notarized": true,
+      "stapled": true,
+      "evidence": [
+        "codesign --verify output pointer",
+        "spctl assessment output pointer",
+        "xcrun notarytool log output pointer",
+        "xcrun stapler validate output pointer"
+      ]
+    },
+    "windows": {
+      "installerSigned": true,
+      "evidence": ["signtool verify output pointer"]
+    },
+    "linux": {
+      "packageReviewPassed": true,
+      "evidence": ["AppImage/deb install, metadata, dependency, and launch review output pointer"]
+    }
+  },
+  "manualQa": [
+    {
+      "platform": "macos",
+      "date": "2026-06-18",
+      "tester": "REPLACE_WITH_TESTER",
+      "artifact": "REPLACE_WITH_SIGNED_MACOS_ARTIFACT",
+      "result": "pass",
+      "checks": {
+        "installAndLaunch": true,
+        "importVideoAudioPdf": true,
+        "followSignedChannel": true,
+        "refreshFollowedChannel": true,
+        "downloadMissingMedia": true,
+        "publishChannelWithRelayAndBlossom": true,
+        "offlineModeBlocksRemoteFetch": true,
+        "webviewPlayback": true,
+        "nativePlayerFallback": true,
+        "phoneSharingStartStop": true,
+        "privacyLeakInspection": true
+      },
+      "notes": ["manual QA notes or log pointer"]
+    },
+    {
+      "platform": "windows",
+      "date": "2026-06-18",
+      "tester": "REPLACE_WITH_TESTER",
+      "artifact": "REPLACE_WITH_SIGNED_WINDOWS_ARTIFACT",
+      "result": "pass",
+      "checks": {
+        "installAndLaunch": true,
+        "importVideoAudioPdf": true,
+        "followSignedChannel": true,
+        "refreshFollowedChannel": true,
+        "downloadMissingMedia": true,
+        "publishChannelWithRelayAndBlossom": true,
+        "offlineModeBlocksRemoteFetch": true,
+        "webviewPlayback": true,
+        "nativePlayerFallback": true,
+        "phoneSharingStartStop": true,
+        "privacyLeakInspection": true
+      },
+      "notes": ["manual QA notes or log pointer"]
+    },
+    {
+      "platform": "linux",
+      "date": "2026-06-18",
+      "tester": "REPLACE_WITH_TESTER",
+      "artifact": "REPLACE_WITH_LINUX_ARTIFACT",
+      "result": "pass",
+      "checks": {
+        "installAndLaunch": true,
+        "importVideoAudioPdf": true,
+        "followSignedChannel": true,
+        "refreshFollowedChannel": true,
+        "downloadMissingMedia": true,
+        "publishChannelWithRelayAndBlossom": true,
+        "offlineModeBlocksRemoteFetch": true,
+        "webviewPlayback": true,
+        "nativePlayerFallback": true,
+        "phoneSharingStartStop": true,
+        "privacyLeakInspection": true
+      },
+      "notes": ["manual QA notes or log pointer"]
+    }
+  ]
+}

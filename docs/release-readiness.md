@@ -12,6 +12,7 @@
 - Local app-only macOS verification: `npm run tauri:build:app`.
 - Full local packaging: `npm run tauri:build:full`.
 - Production release packaging: tag push through `.github/workflows/release.yml`.
+- Production evidence gate: `npm run release:production-gate`.
 
 The app-only build avoids the local DMG Finder/AppleScript packaging path. Full macOS packaging still
 needs a non-hanging DMG runner plus signing/notarization proof before production labeling.
@@ -48,3 +49,10 @@ Run these on macOS, Windows, and Linux before production labeling:
 - Windows signed installer evidence.
 - Linux AppImage/deb install and launch evidence.
 - Manual smoke-test notes for every item in the platform checklist above.
+
+Keep real production evidence in `docs/production-release-evidence.json` and downloaded artifact proof
+under `release-evidence/`; both are ignored by Git because manual QA notes, signing proof, and package
+downloads can include local account names, private paths, certificate metadata, or large binaries. Use
+`docs/production-release-evidence.example.json` as the shape, then run
+`npm run release:production-gate`. A release is not production-ready until that command passes for the
+exact commit being shipped.

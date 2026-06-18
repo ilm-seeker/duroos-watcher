@@ -19,3 +19,7 @@ src-tauri/.tauri/
 src-tauri/binaries/vendor/
 
 duroos.collection.json
+artifact-audit.json
+artifact-checksums.txt
+docs/production-release-evidence.json
+release-evidence/
