@@ -1064,6 +1064,7 @@ const App = () => {
             teachers={teacherById}
             query={query}
             publisherProfiles={publisherProfiles}
+            onOpenImport={openImport}
             onPublisherProfilesChanged={refreshPublisherProfiles}
             onPublisherResult={setSystemNotice}
           />
@@ -3010,6 +3011,7 @@ const RelaysView = ({
   teachers,
   query,
   publisherProfiles,
+  onOpenImport,
   onPublisherProfilesChanged,
   onPublisherResult,
 }: {
@@ -3018,6 +3020,7 @@ const RelaysView = ({
   teachers: Map<string, Teacher>;
   query: string;
   publisherProfiles: PublisherProfile[];
+  onOpenImport: (mode?: ImportMode) => void;
   onPublisherProfilesChanged: () => Promise<void>;
   onPublisherResult: (notice: string) => void;
 }) => {
@@ -3049,8 +3052,8 @@ const RelaysView = ({
   });
 
   return (
-    <div className="wide-page">
-      <div className="page-heading">
+    <div className="wide-page relays-page">
+      <div className="page-heading relays-heading">
         <div>
           <h2>Feeds & Publishing</h2>
           <p>
@@ -3058,86 +3061,104 @@ const RelaysView = ({
             catalog.
           </p>
         </div>
-        <StatusChip label="Federated publisher" tone="positive" />
+        <div className="relays-heading-status">
+          <StatusChip label="Signed feeds" tone="positive" />
+          <StatusChip label="No central catalog" tone="neutral" />
+        </div>
       </div>
 
-    <div className="relay-layout">
-      <section className="relay-main">
-        <SectionHeader title="Follow Teacher Feeds" meta={`${visibleRelays.length} subscriptions`} />
-        <div className="relay-grid">
-          {visibleRelays.length ? (
-            visibleRelays.map((relay) => (
-              <RelayCard
-                key={relay.id}
-                relay={relay}
-                teacher={teachers.get(relay.teacherId)}
+      <div className="relay-layout">
+        <section className="relay-main">
+          <section className="feed-follow-panel" aria-label="Follow teacher feeds">
+            <div className="feed-follow-copy">
+              <SectionHeader
+                title="Follow Teacher Feeds"
+                meta={`${visibleRelays.length} subscriptions`}
               />
-            ))
-          ) : (
-            <EmptyState
-              icon={Rss}
-              title={relayQuery ? "No matching feeds" : "No subscribed feeds"}
-              detail={
-                relayQuery
-                  ? "Clear search or try a teacher, feed URL, or trust state."
-                  : "Use Import to follow a signed teacher feed or curator manifest."
-              }
-            />
-          )}
-        </div>
-
-        <TeacherPublisherPanel
-          profiles={publisherProfiles}
-          onProfilesChanged={onPublisherProfilesChanged}
-          onResult={onPublisherResult}
-        />
-      </section>
-
-      <aside className="relay-aside">
-        <section className="side-panel relay-publish-panel">
-          <SectionHeader title="Publish Model" meta="signed feeds" />
-          <div className="publish-steps">
-            <div>
-              <UploadCloud size={17} />
-              <span>Teacher or curator publishes class media and source notes.</span>
+              <p>
+                Preview signed teacher feeds or channel links before adding them to the local
+                library.
+              </p>
             </div>
-            <div>
-              <ShieldCheck size={17} />
-              <span>Feed signs lesson metadata, hashes, and provenance.</span>
+            <button type="button" className="secondary-action" onClick={() => onOpenImport("feed")}>
+              <Rss size={16} />
+              <span>Follow Feed</span>
+            </button>
+            <div className="relay-grid">
+              {visibleRelays.length ? (
+                visibleRelays.map((relay) => (
+                  <RelayCard
+                    key={relay.id}
+                    relay={relay}
+                    teacher={teachers.get(relay.teacherId)}
+                  />
+                ))
+              ) : (
+                <EmptyState
+                  icon={Rss}
+                  title={relayQuery ? "No matching feeds" : "No subscribed feeds"}
+                  detail={
+                    relayQuery
+                      ? "Clear search or try a teacher, feed URL, or trust state."
+                      : "Follow a signed teacher feed or curator manifest when one is available."
+                  }
+                />
+              )}
             </div>
-            <div>
-              <Download size={17} />
-              <span>Subscribers fetch or auto-download approved enclosures.</span>
-            </div>
-          </div>
-        </section>
-        <LiveProviderMatrix />
-      </aside>
-    </div>
+          </section>
 
-    <SectionHeader title="Live Lesson Capture" meta={`${visibleLiveSessions.length} sessions`} />
-    <div className="live-session-list">
-      {visibleLiveSessions.length ? (
-        visibleLiveSessions.map((session) => (
-          <LiveSessionRow
-            key={session.id}
-            session={session}
-            teacher={teachers.get(session.teacherId)}
+          <TeacherPublisherPanel
+            profiles={publisherProfiles}
+            onProfilesChanged={onPublisherProfilesChanged}
+            onResult={onPublisherResult}
           />
-        ))
-      ) : (
-        <EmptyState
-          icon={RadioTower}
-          title={relayQuery ? "No matching live lessons" : "No live lessons tracked"}
-          detail={
-            relayQuery
-              ? "Clear search or try a provider, title, teacher, or status."
-              : "Live capture stays manual until a teacher feed or provider setup is configured."
-          }
-        />
-      )}
+        </section>
+
+        <aside className="relay-aside">
+          <section className="side-panel relay-publish-panel">
+            <SectionHeader title="Publish Model" meta="signed feeds" />
+            <div className="publish-steps">
+              <div>
+                <UploadCloud size={17} />
+                <span>Teacher or curator publishes class media and source notes.</span>
+              </div>
+              <div>
+                <ShieldCheck size={17} />
+                <span>Feed signs lesson metadata, hashes, and provenance.</span>
+              </div>
+              <div>
+                <Download size={17} />
+                <span>Subscribers fetch or auto-download approved enclosures.</span>
+              </div>
+            </div>
+          </section>
+          <LiveProviderMatrix />
+        </aside>
+      </div>
+
+      <SectionHeader title="Live Lesson Capture" meta={`${visibleLiveSessions.length} sessions`} />
+      <div className="live-session-list">
+        {visibleLiveSessions.length ? (
+          visibleLiveSessions.map((session) => (
+            <LiveSessionRow
+              key={session.id}
+              session={session}
+              teacher={teachers.get(session.teacherId)}
+            />
+          ))
+        ) : (
+          <EmptyState
+            icon={RadioTower}
+            title={relayQuery ? "No matching live lessons" : "No live lessons tracked"}
+            detail={
+              relayQuery
+                ? "Clear search or try a provider, title, teacher, or status."
+                : "Live capture stays manual until a teacher feed or provider setup is configured."
+            }
+          />
+        )}
+      </div>
     </div>
-  </div>
   );
 };
 
@@ -3234,6 +3255,10 @@ const TeacherPublisherPanel = ({
       tone: lessonDrafts.length ? "positive" : "warning",
     },
     {
+      label: channelTitle.trim() ? "Channel title" : "Title needed",
+      tone: channelTitle.trim() ? "positive" : "warning",
+    },
+    {
       label: archiveMirrors.length
         ? `${archiveMirrors.length} archive mirror${archiveMirrors.length === 1 ? "" : "s"}`
         : "Archive optional",
@@ -3250,9 +3275,11 @@ const TeacherPublisherPanel = ({
           ? "Add at least one Blossom server."
           : ipfsApiUrl.trim() && !ipfsGatewayUrl.trim()
             ? "Add the IPFS gateway URL for local IPFS archival."
-            : lessonDrafts.length === 0
-              ? "Select media to publish."
-              : "";
+            : !channelTitle.trim()
+              ? "Add a channel title."
+              : lessonDrafts.length === 0
+                ? "Select media to publish."
+                : "";
   const endpointTestBlockedReason = !selectedProfile
     ? "Create or select a publisher profile."
     : passphrase.length < 8
@@ -3284,6 +3311,13 @@ const TeacherPublisherPanel = ({
       complete: relays.length > 0 && blossomServers.length > 0,
     },
     {
+      title: "Channel",
+      detail: channelTitle.trim()
+        ? "Learner-facing channel name is ready."
+        : "Name the channel learners will follow.",
+      complete: Boolean(channelTitle.trim()),
+    },
+    {
       title: "Media",
       detail: lessonDrafts.length
         ? `${lessonDrafts.length} publishable file(s) selected.`
@@ -3296,8 +3330,12 @@ const TeacherPublisherPanel = ({
         ? "Archive mirrors will be announced only after hash match."
         : "Archive mirrors are optional and can stay empty.",
       complete: true,
+      optional: true,
     },
-  ];
+  ] satisfies Array<{ title: string; detail: string; complete: boolean; optional?: boolean }>;
+  const requiredPublisherSteps = publisherSteps.filter((step) => !step.optional);
+  const completedRequiredPublisherSteps = requiredPublisherSteps.filter((step) => step.complete);
+  const nextRequiredPublisherStep = requiredPublisherSteps.find((step) => !step.complete);
 
   useEffect(() => {
     let isMounted = true;
@@ -3483,8 +3521,34 @@ const TeacherPublisherPanel = ({
   return (
     <section className="publisher-panel">
       <div className="publisher-panel-header">
-        <SectionHeader title="Publish Teacher Channel" meta={`${profiles.length} profiles`} />
-        <StatusChip label="No central catalog" tone="neutral" />
+        <div className="publisher-title-copy">
+          <span className="publisher-kicker">Teacher publisher</span>
+          <h2>Publish a signed channel</h2>
+          <p>
+            Build a local profile, test relays and storage, then share one signed channel link.
+          </p>
+        </div>
+        <div className="publisher-trust-stack" aria-label="Publisher model">
+          <StatusChip label={`${profiles.length} profiles`} tone="neutral" />
+          <StatusChip label="No central catalog" tone="positive" />
+        </div>
+      </div>
+      <div className="publisher-progress-card" aria-label="Publisher setup progress">
+        <div>
+          <span>
+            {nextRequiredPublisherStep ? "Next required step" : "Required setup complete"}
+          </span>
+          <strong>
+            {nextRequiredPublisherStep?.title ?? "Review and publish"}
+          </strong>
+          <p>
+            {nextRequiredPublisherStep?.detail ??
+              "Check mirror choices, then publish the signed channel update."}
+          </p>
+        </div>
+        <strong className="publisher-progress-count">
+          {completedRequiredPublisherSteps.length}/{requiredPublisherSteps.length}
+        </strong>
       </div>
       {panelNotice ? (
         <p className="publisher-notice" role="status">
