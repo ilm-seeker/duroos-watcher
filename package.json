@@ -17,6 +17,7 @@
     "release:audit-artifacts": "node scripts/audit-release-artifacts.mjs",
     "release:production-gate": "node scripts/production-release-gate.mjs",
     "tauri:build:app": "tauri build --bundles app --ci",
+    "tauri:install:local": "npm run tauri:build:app && node scripts/install-local-macos-app.mjs",
     "tauri:build:full": "tauri build --ci",
     "tauri": "tauri"
   },

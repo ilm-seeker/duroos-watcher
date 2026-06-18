@@ -63,9 +63,14 @@ Tauri desktop commands require Rust and Cargo:
 ```bash
 npm run tauri dev
 npm run tauri:build:app
+npm run tauri:install:local
 ```
 
 If `cargo` is missing, install Rust from <https://www.rust-lang.org/tools/install> before running Tauri.
+
+`npm run tauri dev` and `npm run tauri:build:app` do not update the app launched from Finder,
+Spotlight, or `/Applications`. After source changes, run `npm run tauri:install:local` to rebuild
+and replace `/Applications/Duroos Watcher.app`.
 
 Platform setup:
 
