@@ -37,6 +37,7 @@ validateCi(evidence.ci);
 validateReleaseWorkflow(evidence.releaseWorkflow, release.tag);
 validateArtifactAudits(evidence.artifactAudits);
 validateMediaToolReports(evidence.mediaToolReports);
+validateSecurityAlerts(evidence.securityAlerts);
 validateSigning(evidence.signing);
 validateManualQa(evidence.manualQa);
 
@@ -197,6 +198,46 @@ function validateMediaToolReports(reports) {
   }
 }
 
+function validateSecurityAlerts(securityAlerts) {
+  if (!securityAlerts || typeof securityAlerts !== "object") {
+    failures.push("securityAlerts evidence is required.");
+    return;
+  }
+
+  requireIsoDate(securityAlerts.checkedAt, "securityAlerts.checkedAt");
+  requireString(securityAlerts.repository, "securityAlerts.repository is required.");
+  requireString(securityAlerts.commit, "securityAlerts.commit is required.");
+  requireEqual(
+    securityAlerts.commit,
+    expectedCommit,
+    `securityAlerts.commit must match expected commit ${expectedCommit}.`,
+  );
+
+  validateAlertGroup(securityAlerts.codeScanning, "securityAlerts.codeScanning");
+  validateAlertGroup(securityAlerts.dependabot, "securityAlerts.dependabot");
+}
+
+function validateAlertGroup(alertGroup, label) {
+  if (!alertGroup || typeof alertGroup !== "object") {
+    failures.push(`${label} evidence is required.`);
+    return;
+  }
+
+  requireNonNegativeInteger(alertGroup.openAlerts, `${label}.openAlerts`);
+  if (alertGroup.openAlerts !== 0) {
+    failures.push(`${label}.openAlerts must be 0 for production release. Actual: ${alertGroup.openAlerts}.`);
+  }
+  requireEvidenceList(alertGroup.evidence, `${label}.evidence`);
+
+  if (alertGroup.openAlertIds !== undefined) {
+    if (!Array.isArray(alertGroup.openAlertIds)) {
+      failures.push(`${label}.openAlertIds must be an array when present.`);
+    } else if (alertGroup.openAlertIds.length > 0) {
+      failures.push(`${label}.openAlertIds must be empty for production release.`);
+    }
+  }
+}
+
 function validateSigning(signing) {
   if (!signing || typeof signing !== "object") {
     failures.push("signing evidence is required.");
@@ -276,6 +317,12 @@ function requireTrue(value, message) {
 function requireSuccess(value, label) {
   if (value !== "success" && value !== "pass") {
     failures.push(`${label} must be success/pass. Actual: ${String(value ?? "missing")}.`);
+  }
+}
+
+function requireNonNegativeInteger(value, label) {
+  if (!Number.isInteger(value) || value < 0) {
+    failures.push(`${label} must be a non-negative integer.`);
   }
 }
 

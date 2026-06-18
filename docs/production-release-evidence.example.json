@@ -90,6 +90,25 @@
       "reportJson": "release-evidence/media-tools/x86_64-unknown-linux-gnu/media-tools-report.json"
     }
   ],
+  "securityAlerts": {
+    "checkedAt": "2026-06-18",
+    "repository": "ilm-seeker/duroos-watcher",
+    "commit": "REPLACE_WITH_RELEASE_COMMIT_SHA",
+    "codeScanning": {
+      "openAlerts": 0,
+      "openAlertIds": [],
+      "evidence": [
+        "gh api repos/ilm-seeker/duroos-watcher/code-scanning/alerts --paginate output pointer"
+      ]
+    },
+    "dependabot": {
+      "openAlerts": 0,
+      "openAlertIds": [],
+      "evidence": [
+        "gh api repos/ilm-seeker/duroos-watcher/dependabot/alerts --paginate output pointer"
+      ]
+    }
+  },
   "signing": {
     "macos": {
       "appSigned": true,
