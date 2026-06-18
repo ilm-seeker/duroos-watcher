@@ -1,53 +1,93 @@
 # Duroos Watcher
 
-Duroos Watcher is a local-first desktop study library for educational content you save, follow, or subscribe to. It is designed as a focused YouTube-like shell without social feeds, comments, recommendations, public accounts, or telemetry.
+Duroos Watcher is a local-first desktop study library for long-form educational media. It is meant to be a quiet YouTube-like shell for lessons you choose to save, follow, verify, organize, and study without accounts, recommendations, comments, telemetry, or a central Duroos server.
 
-## Current V1 Scope
+The project direction is not "build another LMS." The useful direction is narrower: a private learner and curator tool for preserving permitted lessons locally, tracking provenance, following signed teacher or curator feeds, and making playback and study flow reliable across video, audio, PDFs, and source posts.
 
-- Tauri v2 + React + TypeScript + Vite shell.
-- App-managed media library design with SQLite schema in the Rust backend.
-- Source adapter registry for Local Files, Telegram, RSS/Atom feeds, Archive.org, YouTube, X, Rumble, Odysee, and signed teacher channels with truthful capability labels.
-- User-selected feed subscriptions for dashboard-style updates from custom RSS, Atom, and JSON Feed feeds.
-- Channel subscriptions for signed Duroos manifests with source refs, sha256 hashes, and downloadable media enclosures.
-- Federated teacher publishing from the desktop app through user-configured Nostr relays and Blossom media servers.
-- Live lesson tracking for provider-hosted sessions that can become downloadable archive entries after teacher approval.
-- Public Telegram channel preview ingest without sign-in when Telegram exposes a `t.me/s` page.
-- RSS/Atom/JSON Feed ingest for videos, audio enclosures, PDFs, and post/message entries.
-- Duroos v2 manifest validation with curator identity, safe retrieval refs, and Ed25519 tamper checks in the Rust backend.
-- Archive.org item ingest through the official metadata API for listed video, audio, and PDF files.
-- Direct user-added YouTube, Rumble, and Odysee video URLs create reviewable library rows; X URLs are saved as credential-bound post references.
+## Project Direction
+
+Duroos Watcher is moving toward a local study-library and trusted-source layer:
+
+- **Local learner library first:** imported and downloaded media lives in an app-managed local library backed by SQLite.
+- **Source provenance by default:** lessons keep source URLs, adapter names, hashes when available, permission notes, and import/download history.
+- **Review-first downloads:** feeds and manifests can discover lessons, but media downloads stay explicit and visible.
+- **Signed curator channels:** Duroos manifests can carry curator identity, source references, retrieval references, media hashes, and Ed25519 signatures.
+- **Teacher-owned publishing:** teachers can publish signed channel updates through user-configured Nostr relays and Blossom media servers without Duroos running a central catalog.
+- **Study flow, not social feed:** Smart Library grouping, search, resume progress, lightweight notes, and source-aware cleanup are more important than likes, comments, trending pages, or public profiles.
+- **Privacy-preserving defaults:** no telemetry, no accounts, no remote server, offline mode blocks remote source refreshes, and local cookies or credentials are never exported in collection manifests.
+
+That makes the project closest to a cross between a personal study archive, a source-aware media library, and a signed feed reader. The core bet is that serious learners and teachers need reliable private access to lessons more than they need another social video platform.
+
+## Does This Already Exist?
+
+Adjacent tools exist, but Duroos Watcher's exact combination is narrower than the existing categories: accountless desktop study library, multi-source lesson ingest, local media playback, provenance records, signed teacher manifests, trusted curator keys, review-first downloads, and temporary same-Wi-Fi phone playback.
+
+| Category | Existing examples | Overlap | Why Duroos Watcher is different |
+| --- | --- | --- | --- |
+| LMS | [Moodle LMS](https://moodle.com/products/lms/), Canvas-style systems | Courses, learners, hosted content, assignments, quizzes, progress tracking | An LMS is usually institution/course infrastructure. Duroos Watcher is a personal local desktop library with no required accounts, classroom roster, grading, hosted course site, or central server. |
+| Offline learning platform | [Kolibri](https://learningequality.org/kolibri/about-kolibri/) | Offline-first education, local access, educator-managed resources | Kolibri is closer than a normal LMS, but it is built around classroom/program deployments, learner accounts, assessments, content channels, and local servers. Duroos Watcher is a private source-following and media-preservation app. |
+| YouTube archiver | [Tube Archivist](https://github.com/tubearchivist/tubearchivist), [Pinchflat](https://github.com/kieraneglin/pinchflat), [ytdl-sub](https://github.com/jmbannon/ytdl-sub) | Downloading, archiving, indexing, watched/unwatched state | These are strong references for archival workflows, but they are mostly YouTube/media-center oriented. Duroos Watcher is lesson/source/provenance oriented, supports non-YouTube source records, signed manifests, and teacher publishing. |
+| Media server | [Jellyfin](https://jellyfin.org/), Plex, Kodi | Local media management and streaming | Media servers are good at playback libraries. They are not built around source ingest contracts, curator trust, signed manifests, permission notes, or teacher feed publishing. |
+| Federated video host | [PeerTube](https://joinpeertube.org/) | Independent video publishing, federation, no central Big Tech platform | PeerTube is server-side public video hosting. Duroos Watcher is client-side private study, download, verification, and library organization. |
+| Research or note library | [Zotero](https://www.zotero.org/), Obsidian-style workflows | Personal organization, notes, source awareness | These are better for documents, citations, and writing. Duroos Watcher is media playback, lesson provenance, source refresh, and offline study. |
+
+Verdict: this is not wasted effort, but the product needs disciplined scope. If Duroos Watcher tries to become a full LMS, a general Plex alternative, or a public video network, it will compete with larger mature projects. Its stronger lane is: **follow trusted lesson sources, save permitted media locally, preserve provenance, and study without platform noise.**
+
+## Current Status
+
+Duroos Watcher is pre-1.0 alpha software. The app has working local-first foundations, source ingest paths, local media playback, Smart Library features, manifest validation, and teacher publishing pieces, but production distribution still requires signing, notarization, artifact evidence, and platform smoke tests.
+
+Unsigned or unnotarized builds are testing artifacts only.
+
+## Current Capabilities
+
+- Tauri v2 + React + TypeScript + Vite desktop app.
+- SQLite-backed local library for sources, teachers, collections, lessons, media files, provenance, watch state, notes, jobs, and trusted curators.
 - Local import for video, audio, and PDF study files.
-- Duplicate local imports are skipped by matching stored content hashes; source ingests skip matching source URLs, matching hashes, and same-title/same-duration feed duplicates.
-- Added-source management with clear/delete controls separate from the platform capability matrix.
-- Local media downloads for added sources through direct HTTP or `yt-dlp` when the lesson URL is supported by `yt-dlp`.
+- Duplicate protection through content hashes, source URLs, and feed duplicate checks.
+- Smart Library grouping by teacher, collection, source, content type, and availability.
+- Resume progress for in-app video/audio playback.
+- Lightweight lesson notes and manual metadata correction for teacher/course organization.
+- Source adapter registry for local files, Telegram public previews, RSS/Atom/JSON Feed, Archive.org, YouTube, X, Rumble, Odysee, and signed teacher channels.
+- Public Telegram channel preview ingest when Telegram exposes a `t.me/s` page.
+- RSS, Atom, and JSON Feed ingest for videos, audio enclosures, PDFs, and post/message entries.
+- Archive.org item ingest through the official metadata API.
+- Direct user-added YouTube, Rumble, and Odysee URLs create reviewable source rows; X URLs are saved as credential-bound post references.
+- Local media downloads through direct HTTP or `yt-dlp` when the lesson URL is supported by local tools and permitted by the user.
 - Downloaded media is sha256-verified when a source provides a sha256 hash; mismatches are rejected before the file is attached to a lesson.
-- Temporary Watch on Phone sharing for downloaded/imported audio and video through same-Wi-Fi VLC playlist links.
-- Shared collection manifest validation rejects credentials, local absolute paths, command hooks, and unsafe file paths.
-- Offline-friendly dashboard, library search, source capability matrix, import drawer, update queue, and player surface.
-- AGPL-3.0-or-later open-source license posture.
+- Native player fallback can launch local media through VLC, mpv, or ffplay when available.
+- Temporary **Watch on Phone** sharing creates same-Wi-Fi VLC playlist links for ready audio/video files.
+- Shared collection manifest validation rejects credentials, local absolute paths, command hooks, unsafe file paths, and other export hazards.
 
-## Decentralized Local-First Architecture
+## Trust And Publishing
 
 Duroos Watcher does not use blockchain in v1. The useful primitives are signed metadata, local storage, source provenance, and optional open feed transports.
 
-- **Local-first shell:** no accounts, no telemetry, no central Duroos server, no automatic sharing of subscriptions, watch state, manifests, or media.
-- **Public curator channels:** users subscribe to RSS, Atom, JSON Feed, Duroos manifest URLs, or shared Nostr `naddr` channel links chosen by the user.
-- **Signed manifests:** Duroos v2 manifests include curator identity, optional Nostr pubkey binding, source refs, optional retrieval refs, sha256 hashes, and Ed25519 signatures. A valid signature proves tamper resistance for that public key, not automatic trust.
-- **Review-first media:** users download locally before viewing. Auto-download and redistribution are not enabled by default.
-- **Federated publishing:** teacher publisher profiles keep signing keys in a passphrase-encrypted local vault. Nostr relays carry signed channel announcements with all successful manifest mirror URLs, and Blossom servers store hash-addressed media and manifest blobs. Optional archive mirrors can pin the signed manifest through a teacher-configured local IPFS HTTP API or teacher-supplied public gateway URLs; Duroos announces only archive copies that SHA-256 match the signed manifest. Duroos ships editable third-party starter presets for Nostr and Blossom, but does not operate those endpoints and still has no accounts or central catalog.
-- **Future layers:** IPFS CID and BitTorrent magnet refs are accepted only as explicit manifest retrieval references for content the curator marks as redistributable; they are not default media transports.
+- **Duroos manifests:** schema v2 manifests include curator identity, source refs, optional retrieval refs, sha256 hashes, and Ed25519 signatures. A valid signature proves integrity for that public key, not automatic trust.
+- **Trusted curators:** users can trust a curator key after validating a signed manifest and confirming the curator identity outside the manifest.
+- **Review-first media:** even trusted feeds are reviewed before media is downloaded locally.
+- **Modeled transport refs:** IPFS CIDs and BitTorrent magnets can be validated as manifest references for redistributable content, but they are not default media transports in v1.
+- **Teacher publisher:** publisher profiles keep signing keys in a passphrase-encrypted local vault. Nostr relays announce signed channel updates, Blossom servers store hash-addressed media and manifest blobs, and optional archive mirrors are announced only after SHA-256 verification.
 
-## Channels And Live Lessons
+## Non-Goals
 
-Teachers and curators are modeled as channel owners. A channel can publish uploaded classes, source provenance, media hashes, and enclosure URLs that subscribers review before downloading into their local library. The protocol design is intentionally feed-like so it can work without platform accounts by default.
+- Not a hosted LMS with classes, grades, rosters, assignments, quizzes, or institutional reporting.
+- Not a public social network, comment system, recommendation engine, or central discovery catalog.
+- Not a general-purpose media server replacement for Jellyfin/Plex/Kodi.
+- Not a tool for bypassing source permissions, paid access, platform terms, or copyright rules.
+- Not a claim that signed, hashed, or archived content is lawful, accurate, endorsed, safe, or religiously reviewed.
+- Not remote phone access outside the local network.
 
-Teachers can also publish directly from the desktop app by creating a publisher profile, using editable third-party Nostr/Blossom starter presets or their own endpoints, selecting local video/audio/PDF lessons, and sharing the resulting `naddr` channel link. The app requires one accepting Nostr relay and one uploading Blossom server before publishing. Teachers may also add public archive manifest mirrors, including a local IPFS API plus explicit gateway URL, for durability; archive failures do not publish unsafe links. Learners paste the channel link into Import while online; Duroos resolves the latest channel announcement, tries the advertised manifest mirrors until one hash-verifies, fetches the signed manifest, and keeps media downloads review-first.
+## Privacy Defaults
 
-Live lessons are provider-specific:
-
-- YouTube Live can be tracked through the official live streaming API when the teacher configures API access.
-- Mixlr recordings can be imported or uploaded into a channel after the event; open API automation is not assumed.
-- A private RTMP host is the cleaner long-term path for teacher-hosted live lessons and automatic archives.
+- No telemetry.
+- No accounts.
+- No remote Duroos server.
+- No automatic sharing.
+- Phone access is off by default and only runs during a user-started same-Wi-Fi sharing session.
+- Credentials are intended to stay in local OS-protected storage.
+- Offline mode blocks remote source subscription fetches.
+- Shared collection files must never include credentials, cookies, tokens, Telegram sessions, local absolute paths, or command hooks.
 
 ## Development
 
@@ -68,9 +108,7 @@ npm run tauri:install:local
 
 If `cargo` is missing, install Rust from <https://www.rust-lang.org/tools/install> before running Tauri.
 
-`npm run tauri dev` and `npm run tauri:build:app` do not update the app launched from Finder,
-Spotlight, or `/Applications`. After source changes, run `npm run tauri:install:local` to rebuild
-and replace `/Applications/Duroos Watcher.app`.
+`npm run tauri dev` and `npm run tauri:build:app` do not update the app launched from Finder, Spotlight, or `/Applications`. After source changes, run `npm run tauri:install:local` to rebuild and replace `/Applications/Duroos Watcher.app`.
 
 Platform setup:
 
@@ -78,10 +116,9 @@ Platform setup:
 - Windows: install Rust MSVC, Node 22, WebView2 Runtime, and optional `yt-dlp.exe`, FFmpeg, VLC, or mpv on `PATH`.
 - Linux: install Rust, Node 22, WebKitGTK 4.1 development packages, Ayatana AppIndicator, librsvg, and optional `yt-dlp`, FFmpeg, VLC, mpv, or ffplay.
 
-Downloading source media uses direct HTTP for feed enclosures such as audio, video, and PDFs when
-available. Platform video pages use `yt-dlp`; the app checks common install paths plus
-`python3 -m yt_dlp` and surfaces readiness in the UI. When a subscribed feed or manifest provides a
-sha256 hash, the app verifies the downloaded file before marking it ready.
+## Media Tools
+
+Downloading source media uses direct HTTP for feed enclosures such as audio, video, and PDFs when available. Platform video pages use `yt-dlp`; the app checks common install paths plus `python3 -m yt_dlp` and surfaces readiness in the UI.
 
 Keep `yt-dlp` current. On macOS with Homebrew:
 
@@ -90,73 +127,44 @@ brew upgrade yt-dlp
 yt-dlp --version
 ```
 
-On Windows and Linux, use the package manager or pinned binary source you will use for release
-builds, then verify `yt-dlp --version` from the same shell that launches Tauri.
+For sources that block anonymous fetches or require sign-in, export browser cookies in Netscape format and place them in the app data directory as `yt-dlp-cookies.txt`. The app also accepts `cookies.txt`, but prefers `yt-dlp-cookies.txt` when both files exist. Cookies stay local and are not included in shared collection manifests.
 
-Release media tools are pinned in `src-tauri/binaries/media-tools.manifest.json`. To fetch and
-verify the pinned tools for a packaging target, run:
+Release media tools are pinned in `src-tauri/binaries/media-tools.manifest.json`. To fetch and verify pinned tools for a packaging target, run:
 
 ```bash
 npm run media-tools:fetch -- --target=aarch64-apple-darwin
 ```
 
-The generated `src-tauri/binaries/vendor/<target>/media-tools-report.json` is release evidence and
-must match the manifest before those binaries are copied into a production artifact.
-
-Archive.org item URLs such as `https://archive.org/details/<identifier>` are expanded through
-`https://archive.org/metadata/<identifier>`, then supported files are downloaded from direct
-`archive.org/download` links.
-
-Rumble and Odysee are treated as best-effort direct URL sources in v1. The app does not assume a
-broad official catalog API for either platform; it creates local source rows from user-provided URLs
-and uses local tooling only when the user starts a download.
+The generated `src-tauri/binaries/vendor/<target>/media-tools-report.json` is release evidence and must match the manifest before those binaries are copied into a production artifact.
 
 ## Watch On Phone
 
-The desktop app can temporarily share ready audio and video files on the local Wi-Fi network for
-playback in VLC on iOS or Android. Use **Watch on Phone** in the library dashboard, scan the QR code
-with the phone, and open the link in VLC. The desktop app must stay open while the phone is playing.
+The desktop app can temporarily share ready audio and video files on the local Wi-Fi network for playback in VLC on iOS or Android. Use **Watch on Phone** in the library dashboard, scan the QR code with the phone, and open the link in VLC. The desktop app must stay open while the phone is playing.
 
-Phone access is media-only in v1. PDFs and saved posts are not included in the phone playlist. Each
-sharing session uses a random link token, serves only files already copied into the app library, and
-stops when the user turns sharing off or closes the desktop app. It is not remote access outside the
-local network and does not publish media to a Duroos server.
-
-For sources that block anonymous fetches or require sign-in, export browser cookies in Netscape
-format and place them in the app data directory as `yt-dlp-cookies.txt`. The app also accepts
-`cookies.txt`, but prefers `yt-dlp-cookies.txt` when both files exist. Cookies stay local and are not
-included in shared collection manifests. If a platform still blocks `yt-dlp`, manually download the
-allowed media and import the local file; duplicate checks will prevent a second library copy when the
-same content hash is already present.
-
-## Privacy Defaults
-
-- No telemetry.
-- No accounts.
-- No remote server.
-- No automatic sharing.
-- Phone access is off by default and only runs during a user-started same-Wi-Fi sharing session.
-- Credentials are intended to stay in local OS-protected storage.
-- Offline mode blocks remote source subscription fetches.
-- Shared collection files must never include credentials, cookies, tokens, Telegram sessions, local absolute paths, or command hooks.
+Phone access is media-only in v1. PDFs and saved posts are not included in the phone playlist. Each sharing session uses a random link token, serves only files already copied into the app library, and stops when the user turns sharing off or closes the desktop app. It is not remote access outside the local network and does not publish media to a Duroos server.
 
 ## Release Readiness
 
-The repo prepares cross-platform builds for macOS app/DMG, Windows NSIS/MSI, and Linux AppImage/deb through Tauri configuration and CI workflows. Production labeling still requires external proof: signed and notarized macOS artifacts, signed Windows installers, populated media-tool checksum manifests when tools are bundled or CI-fetched, clean artifact checksums, and manual smoke tests on macOS, Windows, and Linux.
+The repo prepares cross-platform builds for macOS app/DMG, Windows NSIS/MSI, and Linux AppImage/deb through Tauri configuration and CI workflows. Production labeling still requires external proof:
+
+- signed and notarized macOS artifacts
+- signed Windows installers
+- populated media-tool checksum manifests when tools are bundled or CI-fetched
+- clean artifact checksums
+- no open release-blocking GitHub alerts for the release commit
+- manual smoke tests on macOS, Windows, and Linux
 
 Use `npm run tauri:build:app` for local macOS app-only build verification. Use `npm run tauri:build:full` or the tag release workflow for full package generation; local full macOS packaging can still hit the DMG Finder/AppleScript packaging hang and is not production proof by itself.
 
 Run `npm run release:preflight` before pushing a release tag to list missing signing credentials, open GitHub alerts, release/evidence gaps, and Windows signing workflow gaps.
 
-Unsigned artifacts, unnotarized builds, and builds without pinned bundled media-tool checksums are alpha/testing artifacts only.
+See [docs/release-readiness.md](./docs/release-readiness.md) for release evidence requirements.
 
 ## Content Policy
 
 Duroos Watcher stores source provenance automatically for imported items so shared collections can remain auditable. Download features should still be used only for content you are allowed to save or redistribute.
 
-The project maintainers provide software only. They do not create, host, review, verify, moderate, endorse, or control third-party channels, feeds, manifests, media, lessons, curators, downloads, or external websites. Users and curators are solely responsible for the legality, permissions, safety, decency, and redistribution rights of any content they access or publish through the app or compatible manifests.
-
-Official project spaces may remove links, examples, issues, discussions, or manifests that appear to promote unlawful, infringing, abusive, explicit, exploitative, hateful, harassing, privacy-invasive, or otherwise inappropriate material. This does not mean the maintainers can monitor or control third-party forks, mirrors, relays, feeds, private collections, or external communities.
+The project maintainers provide software only. They do not create, host, review, verify, moderate, endorse, or control third-party channels, feeds, manifests, media, lessons, curators, downloads, or external websites. Users and curators are responsible for the legality, permissions, safety, decency, and redistribution rights of any content they access or publish through the app or compatible manifests.
 
 See [DISCLAIMER.md](./DISCLAIMER.md) for the full non-endorsement, third-party content, warranty, and liability disclaimer.
 
