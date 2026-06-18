@@ -59,6 +59,11 @@ button {
   color: inherit;
 }
 
+button:focus-visible {
+  outline: 2px solid rgba(12, 122, 91, 0.48);
+  outline-offset: 2px;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr);
@@ -295,21 +300,66 @@ button {
   gap: 8px;
 }
 
-.runtime-pill,
-.status-chip {
+.runtime-status-group {
   display: inline-flex;
   min-height: 30px;
   align-items: center;
-  gap: 7px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface);
+  gap: 10px;
   color: var(--muted);
-  padding: 5px 10px;
+}
+
+.runtime-status-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  cursor: default;
   font-size: 12px;
   font-weight: 750;
   line-height: 1.2;
   white-space: nowrap;
+}
+
+.runtime-status-item + .runtime-status-item {
+  border-left: 1px solid var(--line);
+  padding-left: 10px;
+}
+
+.runtime-status-item svg {
+  flex: 0 0 auto;
+}
+
+.runtime-status-positive {
+  color: var(--emerald);
+}
+
+.runtime-status-warning {
+  color: var(--amber);
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 0;
+  font-size: 12px;
+  font-weight: 760;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.status-chip::before {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+  opacity: 0.68;
 }
 
 .primary-action,
@@ -462,8 +512,12 @@ button {
   border-radius: var(--radius);
   background: var(--surface);
   box-shadow: none;
-  cursor: pointer;
   text-align: left;
+}
+
+.lesson-card,
+.lesson-row-item {
+  cursor: pointer;
 }
 
 .lesson-card {
@@ -473,11 +527,7 @@ button {
 }
 
 .lesson-card:hover,
-.lesson-row-item:hover,
-.relay-card:hover,
-.live-session-row:hover,
-.side-panel:hover,
-.player-panel:hover {
+.lesson-row-item:hover {
   border-color: var(--line-strong);
 }
 
@@ -756,14 +806,15 @@ button {
 
 .audio-player-icon {
   display: inline-flex;
-  width: 72px;
-  height: 72px;
+  width: 64px;
+  height: 64px;
   align-items: center;
   justify-content: center;
   justify-self: center;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.88);
-  color: var(--ink);
+  border: 1px solid rgba(255, 255, 255, 0.26);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
 }
 
 .audio-player {
@@ -780,14 +831,14 @@ button {
   position: relative;
   z-index: 2;
   display: inline-flex;
-  width: 68px;
-  height: 68px;
+  width: 58px;
+  height: 58px;
   align-items: center;
   justify-content: center;
-  border: 0;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.88);
-  color: var(--ink);
+  border: 1px solid rgba(255, 255, 255, 0.26);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
   cursor: default;
 }
 
@@ -902,10 +953,6 @@ button {
   border-radius: var(--radius);
   background: var(--surface);
   padding: 14px;
-}
-
-.phone-access-panel:hover {
-  border-color: var(--line-strong);
 }
 
 .phone-access-heading {
@@ -1821,10 +1868,15 @@ button {
 
 .channel-preview-stats span,
 .channel-preview-endpoints span {
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: #fffdf7;
-  padding: 5px 8px;
+  border-left: 2px solid var(--line);
+  background: transparent;
+  padding: 0 0 0 8px;
+}
+
+.channel-preview-stats span:first-child,
+.channel-preview-endpoints span:first-child {
+  border-left: 0;
+  padding-left: 0;
 }
 
 .channel-preview-panel code {
@@ -1929,32 +1981,43 @@ button {
 }
 
 .status-neutral {
-  background: var(--surface);
   color: var(--muted);
 }
 
 .status-positive {
-  border-color: rgba(12, 122, 91, 0.24);
-  background: var(--emerald-soft);
   color: var(--emerald);
 }
 
 .status-warning {
-  border-color: rgba(181, 106, 0, 0.28);
-  background: var(--amber-soft);
   color: var(--amber);
 }
 
 .status-danger {
-  border-color: rgba(180, 35, 24, 0.24);
-  background: var(--danger-soft);
   color: var(--danger);
 }
 
 .status-muted {
+  color: var(--faint);
+}
+
+.round-icon.status-positive {
+  border-color: rgba(12, 122, 91, 0.24);
+  background: var(--emerald-soft);
+}
+
+.round-icon.status-warning {
+  border-color: rgba(181, 106, 0, 0.28);
+  background: var(--amber-soft);
+}
+
+.round-icon.status-danger {
+  border-color: rgba(180, 35, 24, 0.24);
+  background: var(--danger-soft);
+}
+
+.round-icon.status-muted {
   border-color: var(--line);
   background: var(--surface-muted);
-  color: var(--faint);
 }
 
 @media (max-width: 1180px) {

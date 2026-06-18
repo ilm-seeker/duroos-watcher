@@ -932,6 +932,8 @@ const TopBar = ({
   const title = viewTitle(viewMode);
 
   const downloader = downloaderStatus(runtimeDiagnostics);
+  const runtimeLabel = isTauriRuntime() ? "Desktop runtime" : "Browser preview";
+  const runtimeStatusLabel = `Runtime status: ${runtimeLabel}. Downloader status: ${downloader.label}.`;
 
   return (
     <header className="top-bar">
@@ -953,22 +955,29 @@ const TopBar = ({
           </div>
         </div>
         <div className="top-actions">
-          <div className="runtime-pill">
-            <HardDrive size={16} />
-            <span>{isTauriRuntime() ? "Desktop runtime" : "Browser preview"}</span>
-          </div>
           <div
-            className={
-              downloader.tone === "positive"
-                ? "runtime-pill status-positive"
-                : downloader.tone === "warning"
-                  ? "runtime-pill status-warning"
-                  : "runtime-pill"
-            }
-            title={runtimeDiagnostics.messages.join(" ")}
+            className="runtime-status-group"
+            role="status"
+            aria-live="polite"
+            aria-label={runtimeStatusLabel}
           >
-            <Download size={16} />
-            <span>{downloader.label}</span>
+            <span className="runtime-status-item">
+              <HardDrive size={15} aria-hidden="true" />
+              <span>{runtimeLabel}</span>
+            </span>
+            <span
+              className={
+                downloader.tone === "positive"
+                  ? "runtime-status-item runtime-status-positive"
+                  : downloader.tone === "warning"
+                    ? "runtime-status-item runtime-status-warning"
+                    : "runtime-status-item"
+              }
+              title={runtimeDiagnostics.messages.join(" ")}
+            >
+              <Download size={15} aria-hidden="true" />
+              <span>{downloader.label}</span>
+            </span>
           </div>
           <button
             type="button"
