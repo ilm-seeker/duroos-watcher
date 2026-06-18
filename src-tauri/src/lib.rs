@@ -6,10 +6,10 @@ mod publisher;
 
 use models::{
     AppSnapshot, ChannelPublishResult, ClearSourceSummary, CreatePublisherProfileRequest,
-    DownloadSourceSummary, ImportSummary, IngestSummary, Lesson, ManifestValidationReport,
-    NativePlaybackResult, NostrChannelPreview, PhoneMediaScope, PhoneMediaSession,
-    PublishTeacherChannelRequest, PublisherProfile, RuntimeDiagnostics, TrustCuratorSummary,
-    TrustedCurator,
+    DownloadSourceSummary, ImportSummary, IngestSummary, Lesson, LessonNote,
+    ManifestValidationReport, NativePlaybackResult, NostrChannelPreview, PhoneMediaScope,
+    PhoneMediaSession, PublishTeacherChannelRequest, PublisherProfile, RuntimeDiagnostics,
+    TrustCuratorSummary, TrustedCurator, WatchState,
 };
 use phone_access::PhoneAccessState;
 
@@ -28,6 +28,50 @@ fn get_runtime_diagnostics(app: tauri::AppHandle) -> Result<RuntimeDiagnostics, 
 fn search_lessons(app: tauri::AppHandle, query: String) -> Result<Vec<Lesson>, String> {
     let connection = db::open_connection(&app)?;
     db::search_lessons(&connection, &query)
+}
+
+#[tauri::command]
+fn save_watch_state(
+    app: tauri::AppHandle,
+    lesson_id: String,
+    progress_seconds: i64,
+    duration_seconds: Option<i64>,
+    completed: bool,
+) -> Result<WatchState, String> {
+    let connection = db::open_connection(&app)?;
+    db::save_watch_state(
+        &connection,
+        lesson_id,
+        progress_seconds,
+        duration_seconds,
+        completed,
+    )
+}
+
+#[tauri::command]
+fn save_lesson_note(
+    app: tauri::AppHandle,
+    lesson_id: String,
+    body: String,
+) -> Result<LessonNote, String> {
+    let connection = db::open_connection(&app)?;
+    db::save_lesson_note(&connection, lesson_id, body)
+}
+
+#[tauri::command]
+fn update_lesson_organization(
+    app: tauri::AppHandle,
+    lesson_id: String,
+    teacher_display_name: String,
+    collection_title: String,
+) -> Result<Lesson, String> {
+    let mut connection = db::open_connection(&app)?;
+    db::update_lesson_organization(
+        &mut connection,
+        lesson_id,
+        teacher_display_name,
+        collection_title,
+    )
 }
 
 #[tauri::command]
@@ -203,6 +247,9 @@ pub fn run() {
             get_app_snapshot,
             get_runtime_diagnostics,
             search_lessons,
+            save_watch_state,
+            save_lesson_note,
+            update_lesson_organization,
             resolve_media_file_path,
             resolve_media_thumbnail_path,
             import_local_files,

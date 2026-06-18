@@ -9,6 +9,8 @@ import type {
   CreatePublisherProfileRequest,
   ImportSummary,
   IngestSummary,
+  Lesson,
+  LessonNote,
   NativePlaybackResult,
   NostrChannelPreview,
   PhoneMediaScope,
@@ -18,6 +20,7 @@ import type {
   TrustedCurator,
   TrustCuratorSummary,
   RuntimeDiagnostics,
+  WatchState,
 } from "../domain/types";
 import {
   parseCollectionManifest,
@@ -70,6 +73,65 @@ export const searchLessons = async (query: string): Promise<AppSnapshot["lessons
   }
 
   return invoke<AppSnapshot["lessons"]>("search_lessons", { query });
+};
+
+export const saveWatchState = async (
+  lessonId: string,
+  progressSeconds: number,
+  durationSeconds: number | undefined,
+  completed: boolean,
+): Promise<WatchState> => {
+  if (!isTauriRuntime()) {
+    return {
+      lessonId,
+      progressSeconds,
+      completed,
+      lastWatchedAt: new Date().toISOString(),
+    };
+  }
+
+  return invoke<WatchState>("save_watch_state", {
+    lessonId,
+    progressSeconds,
+    durationSeconds: durationSeconds ?? null,
+    completed,
+  });
+};
+
+export const saveLessonNote = async (
+  lessonId: string,
+  body: string,
+): Promise<LessonNote> => {
+  if (!isTauriRuntime()) {
+    return {
+      lessonId,
+      body: body.trim(),
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  return invoke<LessonNote>("save_lesson_note", { lessonId, body });
+};
+
+export const updateLessonOrganization = async (
+  lessonId: string,
+  teacherDisplayName: string,
+  collectionTitle: string,
+): Promise<Lesson> => {
+  if (!isTauriRuntime()) {
+    const lesson = seedSnapshot.lessons.find((item) => item.id === lessonId);
+    if (!lesson) {
+      throw new Error("Lesson was not found.");
+    }
+
+    return lesson;
+  }
+
+  return invoke<Lesson>("update_lesson_organization", {
+    lessonId,
+    teacherDisplayName,
+    collectionTitle,
+  });
 };
 
 export const resolveMediaFileUrl = async (mediaFileId: string): Promise<string> => {

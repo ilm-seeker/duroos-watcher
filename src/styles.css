@@ -482,6 +482,57 @@ button:focus-visible {
   font-weight: 700;
 }
 
+.smart-library-bar {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.smart-scope-row,
+.active-filter-row {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.scope-chip,
+.filter-chip {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+  padding: 0 11px;
+  font-size: 12px;
+  font-weight: 800;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.scope-chip strong {
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.scope-chip-active,
+.filter-chip:hover,
+.scope-chip:hover {
+  border-color: rgba(12, 122, 91, 0.28);
+  background: var(--emerald-soft);
+  color: var(--emerald);
+}
+
+.scope-chip-active {
+  box-shadow: inset 3px 0 0 var(--emerald);
+}
+
 .lesson-row,
 .lesson-grid,
 .relay-grid {
@@ -874,6 +925,22 @@ button:focus-visible {
   gap: 6px;
 }
 
+.organization-editor {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.compact-field {
+  margin: 0;
+}
+
+.compact-field input {
+  min-height: 40px;
+  padding: 9px 10px;
+}
+
 .player-actions {
   display: flex;
   flex-wrap: wrap;
@@ -886,6 +953,12 @@ button:focus-visible {
   font-size: 12px;
   font-weight: 650;
   line-height: 1.35;
+}
+
+.study-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .player-empty-panel {
@@ -940,6 +1013,45 @@ button:focus-visible {
 
 .provenance-box code {
   overflow-wrap: anywhere;
+}
+
+.lesson-notes-panel {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-muted);
+  padding: 10px;
+}
+
+.notes-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.notes-heading span {
+  margin-left: auto;
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.lesson-notes-panel textarea {
+  width: 100%;
+  min-height: 92px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  outline: 0;
+  padding: 10px;
+  resize: vertical;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .side-panel {
@@ -1094,8 +1206,22 @@ button:focus-visible {
 .source-readiness-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
   gap: 10px;
   align-items: center;
+  padding: 6px;
+  text-align: left;
+}
+
+.source-readiness-row:hover,
+.source-readiness-row-active {
+  border-color: var(--line);
+  background: var(--surface-muted);
 }
 
 .source-readiness-row div:nth-child(2) {
@@ -1128,6 +1254,23 @@ button:focus-visible {
   min-width: 0;
   gap: 10px;
   align-items: center;
+}
+
+button.compact-row {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 6px;
+  text-align: left;
+}
+
+button.compact-row:hover,
+button.compact-row-active {
+  border-color: var(--line);
+  background: var(--surface-muted);
 }
 
 .compact-row div:last-child {
@@ -2114,6 +2257,10 @@ button:focus-visible {
 
   .lesson-row {
     grid-template-columns: repeat(2, minmax(220px, 1fr));
+  }
+
+  .organization-editor {
+    grid-template-columns: 1fr;
   }
 
   .detail-column {

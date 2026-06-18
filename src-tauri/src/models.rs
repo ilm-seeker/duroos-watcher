@@ -141,6 +141,14 @@ pub struct WatchState {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct LessonNote {
+    pub lesson_id: String,
+    pub body: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct Job {
     pub id: String,
     pub kind: String,
@@ -183,6 +191,7 @@ pub struct AppSnapshot {
     pub media_files: Vec<MediaFile>,
     pub provenance_records: Vec<ProvenanceRecord>,
     pub watch_state: Vec<WatchState>,
+    pub lesson_notes: Vec<LessonNote>,
     pub jobs: Vec<Job>,
     pub trusted_curators: Vec<TrustedCurator>,
 }

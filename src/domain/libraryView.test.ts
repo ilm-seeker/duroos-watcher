@@ -118,4 +118,102 @@ describe("buildLibraryLessonView", () => {
       "lesson-two",
     ]);
   });
+
+  it("filters by smart scope before selecting a lesson", () => {
+    const result = view({
+      activeScopeId: "completed",
+      selectedLessonId: "lesson-one",
+      watchState: [watch("lesson-one"), watch("lesson-two", true)],
+    });
+
+    expect(result.filteredLessons.map((item) => item.id)).toEqual(["lesson-two"]);
+    expect(result.selectedLesson?.id).toBe("lesson-two");
+    expect(result.smartScopes.find((scope) => scope.id === "completed")?.count).toBe(1);
+  });
+
+  it("finds file-backed lessons that still need local media", () => {
+    const result = view({ activeScopeId: "needs-files" });
+
+    expect(result.filteredLessons.map((item) => item.id)).toEqual(["lesson-one"]);
+    expect(result.smartScopes.find((scope) => scope.id === "needs-files")?.count).toBe(1);
+  });
+
+  it("builds teacher and collection groups with active and completed counts", () => {
+    const result = view({
+      watchState: [watch("lesson-one"), watch("lesson-two", true)],
+    });
+
+    expect(result.teacherGroups).toEqual([
+      {
+        id: teacher.id,
+        label: teacher.displayName,
+        lessonCount: 2,
+        activeCount: 1,
+        completedCount: 1,
+      },
+    ]);
+    expect(result.collectionGroups[0]).toMatchObject({
+      id: collection.id,
+      label: collection.title,
+      lessonCount: 2,
+      activeCount: 1,
+      completedCount: 1,
+    });
+  });
+
+  it("combines teacher and collection filters with search", () => {
+    const otherTeacher: Teacher = {
+      id: "teacher-other",
+      displayName: "Other Teacher",
+      sourceLinks: [],
+    };
+    const otherCollection: Collection = {
+      id: "collection-other",
+      title: "Other Course",
+      ownerLabel: "Local",
+      sortOrder: 2,
+      lessonCount: 1,
+      sourceIds: ["source-test"],
+    };
+    const otherLesson: Lesson = {
+      ...lesson("lesson-three", "Opening Class"),
+      teacherId: otherTeacher.id,
+      collectionId: otherCollection.id,
+    };
+
+    const result = view({
+      query: "opening",
+      selectedTeacherId: otherTeacher.id,
+      selectedCollectionId: otherCollection.id,
+      lessons: [lesson("lesson-one", "Opening Class"), otherLesson],
+      teachers: [teacher, otherTeacher],
+      collections: [collection, otherCollection],
+    });
+
+    expect(result.filteredLessons.map((item) => item.id)).toEqual(["lesson-three"]);
+  });
+
+  it("filters by source and returns source groups", () => {
+    const otherSource: Source = {
+      ...source,
+      id: "source-other",
+      label: "Other Source",
+    };
+    const otherLesson: Lesson = {
+      ...lesson("lesson-three", "Outside Class"),
+      sourceId: otherSource.id,
+    };
+
+    const result = view({
+      selectedSourceId: otherSource.id,
+      lessons: [lesson("lesson-one", "Opening Class"), otherLesson],
+      sources: [source, otherSource],
+    });
+
+    expect(result.filteredLessons.map((item) => item.id)).toEqual(["lesson-three"]);
+    expect(result.sourceGroups.map((group) => group.id)).toEqual([
+      source.id,
+      otherSource.id,
+    ]);
+  });
 });

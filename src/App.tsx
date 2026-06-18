@@ -39,7 +39,7 @@ import {
   X,
 } from "lucide-react";
 import QRCode from "qrcode";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   addTrustedCurator,
   chooseLocalMediaPaths,
@@ -60,9 +60,12 @@ import {
   removeTrustedCurator,
   resolveMediaFileUrl,
   resolveMediaThumbnailUrl,
+  saveLessonNote,
+  saveWatchState,
   startPhoneMediaSession,
   stopPhoneMediaSession,
   unlockPublisherProfile,
+  updateLessonOrganization,
   validateCollectionManifest,
 } from "./lib/tauri";
 import type { ManifestValidationReport } from "./domain/collectionManifest";
@@ -74,6 +77,7 @@ import type {
   ContentType,
   Job,
   Lesson,
+  LessonNote,
   LiveSession,
   MediaFile,
   NostrChannelPreview,
@@ -96,7 +100,11 @@ import {
   isFileBackedContentType,
   splitSourceRows,
 } from "./domain/sourceManagement";
-import { buildLibraryLessonView } from "./domain/libraryView";
+import {
+  buildLibraryLessonView,
+  type LibraryGroup,
+  type SmartScopeId,
+} from "./domain/libraryView";
 import { seedSnapshot } from "./data/seed";
 
 type ViewMode = "library" | "relays" | "sources" | "queue";
@@ -290,6 +298,10 @@ const App = () => {
   const [snapshot, setSnapshot] = useState<AppSnapshot>(seedSnapshot);
   const [query, setQuery] = useState("");
   const [selectedLessonId, setSelectedLessonId] = useState(seedSnapshot.lessons[0]?.id ?? "");
+  const [activeScopeId, setActiveScopeId] = useState<SmartScopeId>("all");
+  const [selectedTeacherId, setSelectedTeacherId] = useState("all");
+  const [selectedCollectionId, setSelectedCollectionId] = useState("all");
+  const [selectedSourceId, setSelectedSourceId] = useState("all");
   const [viewMode, setViewMode] = useState<ViewMode>("library");
   const [isOnlineMode, setIsOnlineMode] = useState(false);
   const [isImportOpen, setIsImportOpen] = useState(false);
@@ -467,6 +479,10 @@ const App = () => {
     () => new Map(snapshot.watchState.map((state) => [state.lessonId, state])),
     [snapshot.watchState],
   );
+  const noteByLessonId = useMemo(
+    () => new Map(snapshot.lessonNotes.map((note) => [note.lessonId, note])),
+    [snapshot.lessonNotes],
+  );
 
   const {
     isSearchActive,
@@ -474,11 +490,19 @@ const App = () => {
     selectedLesson,
     continueLessons,
     newLessons,
+    smartScopes,
+    teacherGroups,
+    collectionGroups,
+    sourceGroups,
   } = useMemo(
     () =>
       buildLibraryLessonView({
         query,
         selectedLessonId,
+        activeScopeId,
+        selectedTeacherId,
+        selectedCollectionId,
+        selectedSourceId,
         lessons: snapshot.lessons,
         teachers: snapshot.teachers,
         collections: snapshot.collections,
@@ -487,8 +511,12 @@ const App = () => {
         watchState: snapshot.watchState,
       }),
     [
+      activeScopeId,
       query,
+      selectedCollectionId,
       selectedLessonId,
+      selectedSourceId,
+      selectedTeacherId,
       snapshot.collections,
       snapshot.lessons,
       snapshot.mediaFiles,
@@ -538,6 +566,82 @@ const App = () => {
       (lesson.contentType === "video" || lesson.contentType === "audio")
     );
   }).length;
+
+  const handleSaveWatchState = async (
+    lessonId: string,
+    progressSeconds: number,
+    durationSeconds: number | undefined,
+    completed: boolean,
+  ) => {
+    try {
+      const savedState = await saveWatchState(
+        lessonId,
+        Math.max(0, Math.floor(progressSeconds)),
+        durationSeconds && Number.isFinite(durationSeconds) ? Math.floor(durationSeconds) : undefined,
+        completed,
+      );
+      setSnapshot((current) => {
+        const nextWatchState = current.watchState.some((state) => state.lessonId === lessonId)
+          ? current.watchState.map((state) =>
+              state.lessonId === lessonId ? savedState : state,
+            )
+          : current.watchState.concat(savedState);
+        const nextLessons =
+          durationSeconds && Number.isFinite(durationSeconds)
+            ? current.lessons.map((lesson) =>
+                lesson.id === lessonId
+                  ? { ...lesson, durationSeconds: Math.floor(durationSeconds) }
+                  : lesson,
+              )
+            : current.lessons;
+
+        return {
+          ...current,
+          lessons: nextLessons,
+          watchState: nextWatchState,
+        };
+      });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSystemNotice(message);
+    }
+  };
+
+  const handleSaveLessonNote = async (lessonId: string, body: string) => {
+    try {
+      const savedNote = await saveLessonNote(lessonId, body);
+      setSnapshot((current) => {
+        const withoutNote = current.lessonNotes.filter((note) => note.lessonId !== lessonId);
+        return {
+          ...current,
+          lessonNotes: savedNote.body ? withoutNote.concat(savedNote) : withoutNote,
+        };
+      });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSystemNotice(message);
+    }
+  };
+
+  const handleUpdateLessonOrganization = async (
+    lesson: Lesson,
+    teacherDisplayName: string,
+    collectionTitle: string,
+  ) => {
+    try {
+      const updatedLesson = await updateLessonOrganization(
+        lesson.id,
+        teacherDisplayName,
+        collectionTitle,
+      );
+      setSelectedLessonId(updatedLesson.id);
+      await refreshSnapshot("Lesson organization updated.");
+      setSystemNotice("Lesson organization updated.");
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSystemNotice(message);
+    }
+  };
 
   const handleStartPhoneAccess = async () => {
     try {
@@ -765,12 +869,22 @@ const App = () => {
             filteredLessons={filteredLessons}
             continueLessons={continueLessons}
             newLessons={newLessons}
+            smartScopes={smartScopes}
+            activeScopeId={activeScopeId}
+            setActiveScopeId={setActiveScopeId}
+            teacherGroups={teacherGroups}
+            collectionGroups={collectionGroups}
+            sourceGroups={sourceGroups}
+            selectedTeacherId={selectedTeacherId}
+            selectedCollectionId={selectedCollectionId}
+            selectedSourceId={selectedSourceId}
             isSearchActive={isSearchActive}
             query={query}
             selectedLesson={selectedLesson}
             selectedMediaFile={selectedMediaFile}
             selectedMediaUrl={selectedMediaUrl}
             selectedMediaError={selectedMediaError}
+            selectedLessonNote={selectedLesson ? noteByLessonId.get(selectedLesson.id) : undefined}
             teacherById={teacherById}
             collectionById={collectionById}
             sourceById={sourceById}
@@ -791,6 +905,12 @@ const App = () => {
             onDownloadSource={handleDownloadSource}
             onNativePlayback={handleNativePlayback}
             onMediaPlaybackError={setSelectedMediaError}
+            onSaveWatchState={handleSaveWatchState}
+            onSaveLessonNote={handleSaveLessonNote}
+            onUpdateLessonOrganization={handleUpdateLessonOrganization}
+            onSelectTeacher={setSelectedTeacherId}
+            onSelectCollection={setSelectedCollectionId}
+            onSelectSource={setSelectedSourceId}
             onStartPhoneAccess={handleStartPhoneAccess}
             onStopPhoneAccess={handleStopPhoneAccess}
             onCopyPhoneLink={handleCopyPhoneLink}
@@ -1026,12 +1146,22 @@ interface DashboardProps {
   filteredLessons: Lesson[];
   continueLessons: Lesson[];
   newLessons: Lesson[];
+  smartScopes: { id: SmartScopeId; label: string; count: number }[];
+  activeScopeId: SmartScopeId;
+  setActiveScopeId: (scopeId: SmartScopeId) => void;
+  teacherGroups: LibraryGroup[];
+  collectionGroups: LibraryGroup[];
+  sourceGroups: LibraryGroup[];
+  selectedTeacherId: string;
+  selectedCollectionId: string;
+  selectedSourceId: string;
   isSearchActive: boolean;
   query: string;
   selectedLesson?: Lesson;
   selectedMediaFile?: MediaFile;
   selectedMediaUrl: string;
   selectedMediaError: string;
+  selectedLessonNote?: LessonNote;
   teacherById: Map<string, Teacher>;
   collectionById: Map<string, Collection>;
   sourceById: Map<string, Source>;
@@ -1052,6 +1182,21 @@ interface DashboardProps {
   onDownloadSource: (source: Source) => void;
   onNativePlayback: (mediaFile: MediaFile) => void;
   onMediaPlaybackError: (message: string) => void;
+  onSaveWatchState: (
+    lessonId: string,
+    progressSeconds: number,
+    durationSeconds: number | undefined,
+    completed: boolean,
+  ) => void;
+  onSaveLessonNote: (lessonId: string, body: string) => void;
+  onUpdateLessonOrganization: (
+    lesson: Lesson,
+    teacherDisplayName: string,
+    collectionTitle: string,
+  ) => void;
+  onSelectTeacher: (teacherId: string) => void;
+  onSelectCollection: (collectionId: string) => void;
+  onSelectSource: (sourceId: string) => void;
   onStartPhoneAccess: () => void;
   onStopPhoneAccess: () => void;
   onCopyPhoneLink: () => void;
@@ -1062,12 +1207,22 @@ const Dashboard = ({
   filteredLessons,
   continueLessons,
   newLessons,
+  smartScopes,
+  activeScopeId,
+  setActiveScopeId,
+  teacherGroups,
+  collectionGroups,
+  sourceGroups,
+  selectedTeacherId,
+  selectedCollectionId,
+  selectedSourceId,
   isSearchActive,
   query,
   selectedLesson,
   selectedMediaFile,
   selectedMediaUrl,
   selectedMediaError,
+  selectedLessonNote,
   teacherById,
   collectionById,
   sourceById,
@@ -1088,12 +1243,31 @@ const Dashboard = ({
   onDownloadSource,
   onNativePlayback,
   onMediaPlaybackError,
+  onSaveWatchState,
+  onSaveLessonNote,
+  onUpdateLessonOrganization,
+  onSelectTeacher,
+  onSelectCollection,
+  onSelectSource,
   onStartPhoneAccess,
   onStopPhoneAccess,
   onCopyPhoneLink,
 }: DashboardProps) => (
   <div className="dashboard-grid">
     <section className="content-column">
+      <SmartLibraryControls
+        scopes={smartScopes}
+        activeScopeId={activeScopeId}
+        selectedTeacher={selectedTeacherId === "all" ? undefined : teacherById.get(selectedTeacherId)}
+        selectedCollection={
+          selectedCollectionId === "all" ? undefined : collectionById.get(selectedCollectionId)
+        }
+        selectedSource={selectedSourceId === "all" ? undefined : sourceById.get(selectedSourceId)}
+        onSelectScope={setActiveScopeId}
+        onClearTeacher={() => onSelectTeacher("all")}
+        onClearCollection={() => onSelectCollection("all")}
+        onClearSource={() => onSelectSource("all")}
+      />
       {selectedLesson ? (
         <PlayerPanel
           lesson={selectedLesson}
@@ -1104,7 +1278,9 @@ const Dashboard = ({
           thumbnailUrl={selectedMediaFile ? mediaThumbnailUrls[selectedMediaFile.id] : undefined}
           mediaUrl={selectedMediaUrl}
           mediaError={selectedMediaError}
+          note={selectedLessonNote}
           provenance={provenanceById.get(selectedLesson.provenanceId)}
+          watchState={watchByLessonId.get(selectedLesson.id)}
           progress={getLessonProgress(
             selectedLesson,
             watchByLessonId.get(selectedLesson.id),
@@ -1115,6 +1291,9 @@ const Dashboard = ({
           onDownloadSource={onDownloadSource}
           onNativePlayback={onNativePlayback}
           onMediaPlaybackError={onMediaPlaybackError}
+          onSaveWatchState={onSaveWatchState}
+          onSaveLessonNote={onSaveLessonNote}
+          onUpdateLessonOrganization={onUpdateLessonOrganization}
         />
       ) : (
         isSearchActive ? (
@@ -1256,16 +1435,94 @@ const Dashboard = ({
         onStop={onStopPhoneAccess}
         onCopyLink={onCopyPhoneLink}
       />
-      <SourceReadinessPanel sources={snapshot.sources} runtimeDiagnostics={runtimeDiagnostics} />
-      <TeacherPanel teachers={snapshot.teachers} lessons={snapshot.lessons} />
+      <SourceReadinessPanel
+        sources={snapshot.sources}
+        groups={sourceGroups}
+        selectedSourceId={selectedSourceId}
+        runtimeDiagnostics={runtimeDiagnostics}
+        onSelectSource={onSelectSource}
+      />
+      <TeacherPanel
+        groups={teacherGroups}
+        selectedTeacherId={selectedTeacherId}
+        onSelectTeacher={onSelectTeacher}
+      />
       <LiveSessionPanel
         liveSessions={snapshot.liveSessions}
         teachers={teacherById}
       />
-      <CoursesPanel collections={snapshot.collections} />
+      <CoursesPanel
+        groups={collectionGroups}
+        selectedCollectionId={selectedCollectionId}
+        onSelectCollection={onSelectCollection}
+      />
       <QueueCompact jobs={snapshot.jobs} />
     </aside>
   </div>
+);
+
+const SmartLibraryControls = ({
+  scopes,
+  activeScopeId,
+  selectedTeacher,
+  selectedCollection,
+  selectedSource,
+  onSelectScope,
+  onClearTeacher,
+  onClearCollection,
+  onClearSource,
+}: {
+  scopes: { id: SmartScopeId; label: string; count: number }[];
+  activeScopeId: SmartScopeId;
+  selectedTeacher?: Teacher;
+  selectedCollection?: Collection;
+  selectedSource?: Source;
+  onSelectScope: (scopeId: SmartScopeId) => void;
+  onClearTeacher: () => void;
+  onClearCollection: () => void;
+  onClearSource: () => void;
+}) => (
+  <section className="smart-library-bar" aria-label="Smart library organization">
+    <div className="smart-scope-row" role="tablist" aria-label="Library scope">
+      {scopes.map((scope) => (
+        <button
+          key={scope.id}
+          type="button"
+          className={scope.id === activeScopeId ? "scope-chip scope-chip-active" : "scope-chip"}
+          onClick={() => onSelectScope(scope.id)}
+          aria-pressed={scope.id === activeScopeId}
+        >
+          <span>{scope.label}</span>
+          <strong>{scope.count}</strong>
+        </button>
+      ))}
+    </div>
+    {selectedTeacher || selectedCollection || selectedSource ? (
+      <div className="active-filter-row" aria-label="Active library filters">
+        {selectedTeacher ? (
+          <button type="button" className="filter-chip" onClick={onClearTeacher}>
+            <UserRound size={14} />
+            <span>{selectedTeacher.displayName}</span>
+            <X size={13} />
+          </button>
+        ) : null}
+        {selectedCollection ? (
+          <button type="button" className="filter-chip" onClick={onClearCollection}>
+            <ListVideo size={14} />
+            <span>{selectedCollection.title}</span>
+            <X size={13} />
+          </button>
+        ) : null}
+        {selectedSource ? (
+          <button type="button" className="filter-chip" onClick={onClearSource}>
+            <Database size={14} />
+            <span>{selectedSource.label}</span>
+            <X size={13} />
+          </button>
+        ) : null}
+      </div>
+    ) : null}
+  </section>
 );
 
 const SectionHeader = ({ title, meta }: { title: string; meta: string }) => (
@@ -1410,7 +1667,9 @@ interface PlayerPanelProps {
   thumbnailUrl?: string;
   mediaUrl: string;
   mediaError: string;
+  note?: LessonNote;
   provenance?: ProvenanceRecord;
+  watchState?: WatchState;
   progress: number;
   busySourceAction: BusySourceAction;
   runtimeDiagnostics: RuntimeDiagnostics;
@@ -1418,6 +1677,18 @@ interface PlayerPanelProps {
   onDownloadSource: (source: Source) => void;
   onNativePlayback: (mediaFile: MediaFile) => void;
   onMediaPlaybackError: (message: string) => void;
+  onSaveWatchState: (
+    lessonId: string,
+    progressSeconds: number,
+    durationSeconds: number | undefined,
+    completed: boolean,
+  ) => void;
+  onSaveLessonNote: (lessonId: string, body: string) => void;
+  onUpdateLessonOrganization: (
+    lesson: Lesson,
+    teacherDisplayName: string,
+    collectionTitle: string,
+  ) => void;
 }
 
 const PlayerPanel = ({
@@ -1429,7 +1700,9 @@ const PlayerPanel = ({
   thumbnailUrl,
   mediaUrl,
   mediaError,
+  note,
   provenance,
+  watchState,
   progress,
   busySourceAction,
   runtimeDiagnostics,
@@ -1437,6 +1710,9 @@ const PlayerPanel = ({
   onDownloadSource,
   onNativePlayback,
   onMediaPlaybackError,
+  onSaveWatchState,
+  onSaveLessonNote,
+  onUpdateLessonOrganization,
 }: PlayerPanelProps) => {
   const needsMediaFile =
     isFileBackedContentType(lesson.contentType) && (!mediaFile || Boolean(mediaError));
@@ -1460,7 +1736,9 @@ const PlayerPanel = ({
         thumbnailUrl={thumbnailUrl}
         mediaUrl={mediaUrl}
         mediaError={mediaError}
+        watchState={watchState}
         onMediaPlaybackError={onMediaPlaybackError}
+        onSaveWatchState={onSaveWatchState}
       />
       <div className="player-copy">
         <h1>{lesson.title}</h1>
@@ -1472,6 +1750,12 @@ const PlayerPanel = ({
           <StatusChip label={availabilityLabel(lesson, mediaFile)} tone={availabilityTone(lesson, mediaFile)} />
         </div>
       </div>
+      <LessonOrganizationEditor
+        lesson={lesson}
+        teacher={teacher}
+        collection={collection}
+        onUpdateLessonOrganization={onUpdateLessonOrganization}
+      />
       {mediaFile && (lesson.contentType === "video" || lesson.contentType === "audio") ? (
         <div className="player-actions" aria-label="Native playback actions">
           <button
@@ -1523,6 +1807,11 @@ const PlayerPanel = ({
       <div className="progress-track progress-large" aria-label={`${progress}% watched`}>
         <span style={{ width: `${progress}%` }} />
       </div>
+      <StudyProgressActions
+        lesson={lesson}
+        watchState={watchState}
+        onSaveWatchState={onSaveWatchState}
+      />
       <div className="provenance-box">
         <div>
           <ShieldCheck size={17} />
@@ -1531,7 +1820,158 @@ const PlayerPanel = ({
         <p>{provenance?.permissionNote ?? "No source record found."}</p>
         <code>{provenance?.originUrl ?? lesson.sourceUrl}</code>
       </div>
+      <LessonNotesPanel
+        lesson={lesson}
+        note={note}
+        onSaveLessonNote={onSaveLessonNote}
+      />
     </section>
+  );
+};
+
+const LessonOrganizationEditor = ({
+  lesson,
+  teacher,
+  collection,
+  onUpdateLessonOrganization,
+}: {
+  lesson: Lesson;
+  teacher?: Teacher;
+  collection?: Collection;
+  onUpdateLessonOrganization: (
+    lesson: Lesson,
+    teacherDisplayName: string,
+    collectionTitle: string,
+  ) => void;
+}) => {
+  const defaultTeacher = teacher?.displayName ?? "Personal Library";
+  const defaultCollection = collection?.title ?? "Local Imports";
+  const [teacherName, setTeacherName] = useState(defaultTeacher);
+  const [collectionTitle, setCollectionTitle] = useState(defaultCollection);
+
+  useEffect(() => {
+    setTeacherName(defaultTeacher);
+    setCollectionTitle(defaultCollection);
+  }, [defaultCollection, defaultTeacher, lesson.id]);
+
+  const hasChanges =
+    teacherName.trim() !== defaultTeacher || collectionTitle.trim() !== defaultCollection;
+
+  return (
+    <div className="organization-editor">
+      <label className="field compact-field">
+        <span>Teacher</span>
+        <input
+          value={teacherName}
+          onChange={(event) => setTeacherName(event.target.value)}
+        />
+      </label>
+      <label className="field compact-field">
+        <span>Course</span>
+        <input
+          value={collectionTitle}
+          onChange={(event) => setCollectionTitle(event.target.value)}
+        />
+      </label>
+      <button
+        type="button"
+        className="secondary-action"
+        onClick={() => onUpdateLessonOrganization(lesson, teacherName, collectionTitle)}
+        disabled={!hasChanges || !teacherName.trim() || !collectionTitle.trim()}
+      >
+        <FolderOpen size={15} />
+        <span>Save</span>
+      </button>
+    </div>
+  );
+};
+
+const StudyProgressActions = ({
+  lesson,
+  watchState,
+  onSaveWatchState,
+}: {
+  lesson: Lesson;
+  watchState?: WatchState;
+  onSaveWatchState: (
+    lessonId: string,
+    progressSeconds: number,
+    durationSeconds: number | undefined,
+    completed: boolean,
+  ) => void;
+}) => {
+  const duration = lesson.durationSeconds;
+  const markCompleteProgress = duration ?? watchState?.progressSeconds ?? 0;
+
+  return (
+    <div className="study-actions" aria-label="Study progress actions">
+      <button
+        type="button"
+        className="secondary-action"
+        onClick={() => onSaveWatchState(lesson.id, markCompleteProgress, duration, true)}
+        disabled={watchState?.completed}
+      >
+        <CheckCircle2 size={15} />
+        <span>Mark Complete</span>
+      </button>
+      <button
+        type="button"
+        className="secondary-action"
+        onClick={() => onSaveWatchState(lesson.id, 0, duration, false)}
+        disabled={!watchState}
+      >
+        <Square size={15} />
+        <span>Reset</span>
+      </button>
+    </div>
+  );
+};
+
+const LessonNotesPanel = ({
+  lesson,
+  note,
+  onSaveLessonNote,
+}: {
+  lesson: Lesson;
+  note?: LessonNote;
+  onSaveLessonNote: (lessonId: string, body: string) => void;
+}) => {
+  const savedBodyRef = useRef(note?.body ?? "");
+  const [body, setBody] = useState(note?.body ?? "");
+
+  useEffect(() => {
+    const nextBody = note?.body ?? "";
+    savedBodyRef.current = nextBody;
+    setBody(nextBody);
+  }, [lesson.id, note?.body]);
+
+  useEffect(() => {
+    if (body === savedBodyRef.current) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      savedBodyRef.current = body;
+      onSaveLessonNote(lesson.id, body);
+    }, 650);
+
+    return () => window.clearTimeout(timer);
+  }, [body, lesson.id, onSaveLessonNote]);
+
+  return (
+    <div className="lesson-notes-panel">
+      <div className="notes-heading">
+        <MessageSquare size={16} />
+        <strong>Study Note</strong>
+        <span>{note?.updatedAt ? `Saved ${formatDate(note.updatedAt)}` : "No note"}</span>
+      </div>
+      <textarea
+        value={body}
+        onChange={(event) => setBody(event.target.value)}
+        rows={4}
+        aria-label="Study note"
+      />
+    </div>
   );
 };
 
@@ -1541,19 +1981,50 @@ const PlayerSurface = ({
   thumbnailUrl,
   mediaUrl,
   mediaError,
+  watchState,
   onMediaPlaybackError,
+  onSaveWatchState,
 }: {
   lesson: Lesson;
   mediaFile?: MediaFile;
   thumbnailUrl?: string;
   mediaUrl: string;
   mediaError: string;
+  watchState?: WatchState;
   onMediaPlaybackError: (message: string) => void;
+  onSaveWatchState: (
+    lessonId: string,
+    progressSeconds: number,
+    durationSeconds: number | undefined,
+    completed: boolean,
+  ) => void;
 }) => {
+  const lastSavedSecondRef = useRef(0);
   const handlePlaybackError = () => {
     onMediaPlaybackError(
       "Downloaded file is structurally valid, but the desktop WebView cannot decode this codec. Use a WebKit-compatible MP4 video with H.264/AAC, or a supported audio file.",
     );
+  };
+  const restoreProgress = (element: HTMLMediaElement) => {
+    const duration = Number.isFinite(element.duration) ? Math.floor(element.duration) : undefined;
+    const progressSeconds = watchState?.completed ? 0 : (watchState?.progressSeconds ?? 0);
+    if (progressSeconds > 5 && duration && progressSeconds < duration - 5) {
+      element.currentTime = progressSeconds;
+      lastSavedSecondRef.current = progressSeconds;
+    }
+    if (duration) {
+      onSaveWatchState(lesson.id, progressSeconds, duration, false);
+    }
+  };
+  const saveProgress = (element: HTMLMediaElement, completed = false) => {
+    const currentSecond = Math.floor(element.currentTime || 0);
+    const duration = Number.isFinite(element.duration) ? Math.floor(element.duration) : undefined;
+    if (!completed && Math.abs(currentSecond - lastSavedSecondRef.current) < 10) {
+      return;
+    }
+
+    lastSavedSecondRef.current = currentSecond;
+    onSaveWatchState(lesson.id, currentSecond, duration, completed);
   };
 
   if (mediaUrl && lesson.contentType === "video") {
@@ -1566,6 +2037,10 @@ const PlayerSurface = ({
           src={mediaUrl}
           poster={thumbnailUrl}
           onError={handlePlaybackError}
+          onLoadedMetadata={(event) => restoreProgress(event.currentTarget)}
+          onTimeUpdate={(event) => saveProgress(event.currentTarget)}
+          onPause={(event) => saveProgress(event.currentTarget)}
+          onEnded={(event) => saveProgress(event.currentTarget, true)}
         />
       </div>
     );
@@ -1583,6 +2058,10 @@ const PlayerSurface = ({
           preload="metadata"
           src={mediaUrl}
           onError={handlePlaybackError}
+          onLoadedMetadata={(event) => restoreProgress(event.currentTarget)}
+          onTimeUpdate={(event) => saveProgress(event.currentTarget)}
+          onPause={(event) => saveProgress(event.currentTarget)}
+          onEnded={(event) => saveProgress(event.currentTarget, true)}
         />
       </div>
     );
@@ -1852,34 +2331,59 @@ const sourcePriority: SourcePlatform[] = [
 
 const SourceReadinessPanel = ({
   sources,
+  groups,
+  selectedSourceId,
   runtimeDiagnostics,
+  onSelectSource,
 }: {
   sources: Source[];
+  groups?: LibraryGroup[];
+  selectedSourceId?: string;
   runtimeDiagnostics: RuntimeDiagnostics;
+  onSelectSource?: (sourceId: string) => void;
 }) => {
   const sourceByPlatform = new Map(sources.map((source) => [source.platform, source]));
-  const orderedSources = sourcePriority
-    .map((platform) => sourceByPlatform.get(platform))
-    .filter((source): source is Source => Boolean(source));
+  const sourceById = new Map(sources.map((source) => [source.id, source]));
+  const groupBySourceId = new Map((groups ?? []).map((group) => [group.id, group]));
+  const orderedSources = groups
+    ? groups
+        .map((group) => sourceById.get(group.id))
+        .filter((source): source is Source => Boolean(source))
+    : sourcePriority
+        .map((platform) => sourceByPlatform.get(platform))
+        .filter((source): source is Source => Boolean(source));
 
   return (
     <section className="side-panel source-readiness-panel">
-      <SectionHeader title="Source Readiness" meta="v1 pulls" />
+      <SectionHeader title="Sources" meta={groups ? `${groups.length} active` : "v1 pulls"} />
       <div className="source-readiness-list">
         {orderedSources.slice(0, 7).map((source) => {
           const readiness = sourceReadiness(source, runtimeDiagnostics);
+          const group = groupBySourceId.get(source.id);
 
           return (
-            <div className="source-readiness-row" key={source.id}>
+            <button
+              type="button"
+              className={
+                selectedSourceId === source.id
+                  ? "source-readiness-row source-readiness-row-active"
+                  : "source-readiness-row"
+              }
+              key={source.id}
+              onClick={() => onSelectSource?.(selectedSourceId === source.id ? "all" : source.id)}
+            >
               <div className="round-icon">
                 <SourceIcon platform={source.platform} />
               </div>
               <div>
                 <strong>{source.label}</strong>
-                <span>{readiness.detail}</span>
+                <span>
+                  {group ? `${group.lessonCount} items. ` : ""}
+                  {readiness.detail}
+                </span>
               </div>
               <StatusChip label={readiness.label} tone={readiness.tone} />
-            </div>
+            </button>
           );
         })}
       </div>
@@ -1972,28 +2476,41 @@ const sourceReadiness = (
 };
 
 const TeacherPanel = ({
-  teachers,
-  lessons,
+  groups,
+  selectedTeacherId,
+  onSelectTeacher,
 }: {
-  teachers: Teacher[];
-  lessons: Lesson[];
+  groups: LibraryGroup[];
+  selectedTeacherId: string;
+  onSelectTeacher: (teacherId: string) => void;
 }) => (
   <section className="side-panel">
-    <SectionHeader title="Teachers" meta={`${teachers.length} saved`} />
+    <SectionHeader title="Teachers" meta={`${groups.length} saved`} />
     <div className="compact-list">
-      {teachers.map((teacher) => (
-        <div className="compact-row" key={teacher.id}>
+      {groups.length ? (
+        groups.map((group) => (
+        <button
+          type="button"
+          className={
+            selectedTeacherId === group.id
+              ? "compact-row compact-row-active"
+              : "compact-row"
+          }
+          key={group.id}
+          onClick={() => onSelectTeacher(selectedTeacherId === group.id ? "all" : group.id)}
+        >
           <div className="round-icon">
             <UserRound size={16} />
           </div>
           <div>
-            <strong>{teacher.displayName}</strong>
-            <span>
-              {lessons.filter((lesson) => lesson.teacherId === teacher.id).length} items
-            </span>
+            <strong>{group.label}</strong>
+            <span>{group.lessonCount} items · {group.activeCount} active</span>
           </div>
-        </div>
-      ))}
+        </button>
+      ))
+      ) : (
+        <p className="panel-empty">No teachers yet.</p>
+      )}
     </div>
   </section>
 );
@@ -2743,21 +3260,44 @@ const LiveProviderMatrix = () => {
   );
 };
 
-const CoursesPanel = ({ collections }: { collections: Collection[] }) => (
+const CoursesPanel = ({
+  groups,
+  selectedCollectionId,
+  onSelectCollection,
+}: {
+  groups: LibraryGroup[];
+  selectedCollectionId: string;
+  onSelectCollection: (collectionId: string) => void;
+}) => (
   <section className="side-panel">
-    <SectionHeader title="Courses" meta={`${collections.length} routes`} />
+    <SectionHeader title="Courses" meta={`${groups.length} routes`} />
     <div className="compact-list">
-      {collections.map((collection) => (
-        <div className="compact-row" key={collection.id}>
+      {groups.length ? (
+        groups.map((group) => (
+        <button
+          type="button"
+          className={
+            selectedCollectionId === group.id
+              ? "compact-row compact-row-active"
+              : "compact-row"
+          }
+          key={group.id}
+          onClick={() =>
+            onSelectCollection(selectedCollectionId === group.id ? "all" : group.id)
+          }
+        >
           <div className="round-icon">
             <ListVideo size={16} />
           </div>
           <div>
-            <strong>{collection.title}</strong>
-            <span>{collection.lessonCount} items · {collection.ownerLabel}</span>
+            <strong>{group.label}</strong>
+            <span>{group.lessonCount} items · {group.completedCount} complete</span>
           </div>
-        </div>
-      ))}
+        </button>
+      ))
+      ) : (
+        <p className="panel-empty">No courses yet.</p>
+      )}
     </div>
   </section>
 );

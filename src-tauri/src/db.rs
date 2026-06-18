@@ -2,7 +2,7 @@ use crate::{
     manifest,
     models::{
         AppSnapshot, ClearSourceSummary, Collection, DownloadSourceSummary, ImportSummary,
-        IngestSummary, Job, Lesson, LiveSession, ManifestValidationReport, MediaFile,
+        IngestSummary, Job, Lesson, LessonNote, LiveSession, ManifestValidationReport, MediaFile,
         NativePlaybackResult, ProvenanceRecord, RuntimeDiagnostics, Source, SourceCapability,
         Teacher, TeacherRelay, TrustCuratorSummary, TrustedCurator, WatchState,
     },
@@ -119,6 +119,15 @@ struct RefreshableSource {
 }
 
 #[derive(Debug)]
+struct LocalLessonOrganization {
+    title: String,
+    teacher_id: String,
+    teacher_label: String,
+    collection_id: String,
+    collection_title: String,
+}
+
+#[derive(Debug)]
 struct DownloadLesson {
     id: String,
     title: String,
@@ -195,6 +204,7 @@ pub fn fetch_snapshot(connection: &Connection) -> Result<AppSnapshot, String> {
         media_files: fetch_media_files(connection)?,
         provenance_records: fetch_provenance_records(connection)?,
         watch_state: fetch_watch_state(connection)?,
+        lesson_notes: fetch_lesson_notes(connection)?,
         jobs: fetch_jobs(connection)?,
         trusted_curators: fetch_trusted_curators(connection)?,
     })
@@ -455,6 +465,201 @@ pub fn search_lessons(connection: &Connection, query: &str) -> Result<Vec<Lesson
     Ok(lessons)
 }
 
+pub fn save_watch_state(
+    connection: &Connection,
+    lesson_id: String,
+    progress_seconds: i64,
+    duration_seconds: Option<i64>,
+    completed: bool,
+) -> Result<WatchState, String> {
+    let lesson_id = lesson_id.trim();
+    if lesson_id.is_empty() {
+        return Err("Lesson id is required.".to_string());
+    }
+
+    let existing_duration: Option<i64> = connection
+        .query_row(
+            "SELECT duration_seconds FROM lessons WHERE id = ?1",
+            params![lesson_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Lesson was not found.".to_string())?;
+    let normalized_duration = duration_seconds.filter(|seconds| *seconds > 0);
+    if let Some(duration) = normalized_duration {
+        connection
+            .execute(
+                "UPDATE lessons SET duration_seconds = ?1 WHERE id = ?2",
+                params![duration, lesson_id],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    let effective_duration = normalized_duration.or(existing_duration);
+    let progress_seconds = progress_seconds.max(0);
+    let completed = completed
+        || effective_duration
+            .map(|duration| duration > 0 && progress_seconds.saturating_mul(100) >= duration * 95)
+            .unwrap_or(false);
+    let stored_progress = if completed {
+        effective_duration
+            .filter(|duration| *duration > 0)
+            .unwrap_or(progress_seconds)
+            .max(progress_seconds)
+    } else {
+        progress_seconds
+    };
+    let now = Utc::now().to_rfc3339();
+
+    connection
+        .execute(
+            "INSERT INTO watch_state (lesson_id, progress_seconds, completed, last_watched_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(lesson_id) DO UPDATE SET
+               progress_seconds = excluded.progress_seconds,
+               completed = excluded.completed,
+               last_watched_at = excluded.last_watched_at",
+            params![
+                lesson_id,
+                stored_progress,
+                if completed { 1 } else { 0 },
+                now
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    watch_state_for_lesson(connection, lesson_id)
+}
+
+pub fn save_lesson_note(
+    connection: &Connection,
+    lesson_id: String,
+    body: String,
+) -> Result<LessonNote, String> {
+    let lesson_id = lesson_id.trim();
+    if lesson_id.is_empty() {
+        return Err("Lesson id is required.".to_string());
+    }
+
+    let exists: Option<String> = connection
+        .query_row(
+            "SELECT id FROM lessons WHERE id = ?1",
+            params![lesson_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    if exists.is_none() {
+        return Err("Lesson was not found.".to_string());
+    }
+
+    let body = body.trim().to_string();
+    let now = Utc::now().to_rfc3339();
+    if body.is_empty() {
+        connection
+            .execute(
+                "DELETE FROM lesson_notes WHERE lesson_id = ?1",
+                params![lesson_id],
+            )
+            .map_err(|error| error.to_string())?;
+        return Ok(LessonNote {
+            lesson_id: lesson_id.to_string(),
+            body,
+            updated_at: now,
+        });
+    }
+
+    connection
+        .execute(
+            "INSERT INTO lesson_notes (lesson_id, body, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(lesson_id) DO UPDATE SET
+               body = excluded.body,
+               updated_at = excluded.updated_at",
+            params![lesson_id, body, now],
+        )
+        .map_err(|error| error.to_string())?;
+
+    lesson_note_for_lesson(connection, lesson_id)
+}
+
+pub fn update_lesson_organization(
+    connection: &mut Connection,
+    lesson_id: String,
+    teacher_display_name: String,
+    collection_title: String,
+) -> Result<Lesson, String> {
+    let lesson_id = lesson_id.trim();
+    if lesson_id.is_empty() {
+        return Err("Lesson id is required.".to_string());
+    }
+
+    let teacher_label = teacher_display_name.trim();
+    if teacher_label.is_empty() {
+        return Err("Teacher name is required.".to_string());
+    }
+
+    let collection_title = collection_title.trim();
+    if collection_title.is_empty() {
+        return Err("Collection title is required.".to_string());
+    }
+
+    let lesson_record: Option<(String, String, String, String, String)> = connection
+        .query_row(
+            "SELECT l.title, COALESCE(l.description, ''), l.source_id, l.teacher_id, l.collection_id
+             FROM lessons l
+             WHERE l.id = ?1",
+            params![lesson_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let (title, description, source_id, old_teacher_id, old_collection_id) =
+        lesson_record.ok_or_else(|| "Lesson was not found.".to_string())?;
+    let source_label: String = connection
+        .query_row(
+            "SELECT label FROM sources WHERE id = ?1",
+            params![&source_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+
+    let teacher_id = user_teacher_id(teacher_label);
+    let collection_id = user_collection_id(collection_title);
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+
+    upsert_user_teacher(&transaction, &teacher_id, teacher_label)?;
+    upsert_user_collection(&transaction, &collection_id, collection_title, &source_id)?;
+    transaction
+        .execute(
+            "UPDATE lessons
+             SET teacher_id = ?1, collection_id = ?2
+             WHERE id = ?3",
+            params![&teacher_id, &collection_id, lesson_id],
+        )
+        .map_err(|error| error.to_string())?;
+    refresh_lesson_fts(
+        &transaction,
+        lesson_id,
+        &title,
+        &description,
+        teacher_label,
+        collection_title,
+        &source_label,
+    )?;
+    refresh_collection_count(&transaction, &old_collection_id)?;
+    refresh_collection_count(&transaction, &collection_id)?;
+    cleanup_empty_collection(&transaction, &old_collection_id)?;
+    cleanup_empty_teacher(&transaction, &old_teacher_id)?;
+
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    lesson_for_id(connection, lesson_id)
+}
+
 pub fn play_media_file_native(
     app: &AppHandle,
     media_file_id: String,
@@ -650,11 +855,8 @@ pub fn import_local_files(app: &AppHandle, paths: Vec<String>) -> Result<ImportS
         .map_err(|error| error.to_string())?;
 
     for source_path in import_candidates {
-        let title = source_path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or("Imported lesson")
-            .replace(['_', '-'], " ");
+        let organization = infer_local_lesson_organization(&source_path);
+        let title = organization.title.clone();
         let source_hash = match hash_file(&source_path) {
             Ok(hash) => format!("sha256:{hash}"),
             Err(error) => {
@@ -694,18 +896,31 @@ pub fn import_local_files(app: &AppHandle, paths: Vec<String>) -> Result<ImportS
                         .unwrap_or("unknown")
                 );
 
+                upsert_user_teacher(
+                    &transaction,
+                    &organization.teacher_id,
+                    &organization.teacher_label,
+                )?;
+                upsert_user_collection(
+                    &transaction,
+                    &organization.collection_id,
+                    &organization.collection_title,
+                    "source-local-files",
+                )?;
                 transaction
                     .execute(
                         "INSERT INTO lessons
                          (id, title, content_type, teacher_id, collection_id, source_id, source_url,
                           published_at, description, thumbnail_tone, duration_seconds,
                           media_file_id, provenance_id)
-                         VALUES (?1, ?2, ?3, 'teacher-3', 'collection-2', 'source-local-files',
-                          ?4, ?5, 'Imported local study file', 'emerald', NULL, ?6, ?7)",
+                         VALUES (?1, ?2, ?3, ?4, ?5, 'source-local-files',
+                          ?6, ?7, 'Imported local study file', 'emerald', NULL, ?8, ?9)",
                         params![
                             lesson_id,
                             title,
                             content_type,
+                            organization.teacher_id,
+                            organization.collection_id,
                             origin_url,
                             imported_at,
                             media_file_id,
@@ -752,12 +967,17 @@ pub fn import_local_files(app: &AppHandle, paths: Vec<String>) -> Result<ImportS
                     .execute(
                         "INSERT INTO lessons_fts
                          (lesson_id, title, description, teacher, collection_title, source_label)
-                         VALUES (?1, ?2, 'Imported local study file', 'Personal Library',
-                          'Local Imports', 'Local Files')",
-                        params![lesson_id, title],
+                         VALUES (?1, ?2, 'Imported local study file', ?3, ?4, 'Local Files')",
+                        params![
+                            lesson_id,
+                            title,
+                            organization.teacher_label,
+                            organization.collection_title
+                        ],
                     )
                     .map_err(|error| error.to_string())?;
 
+                refresh_collection_count(&transaction, &organization.collection_id)?;
                 imported += 1;
             }
             Err(error) => {
@@ -968,6 +1188,13 @@ pub fn clear_source_content(
     transaction
         .execute(
             "DELETE FROM watch_state
+             WHERE lesson_id IN (SELECT id FROM lessons WHERE source_id = ?1)",
+            params![&source_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM lesson_notes
              WHERE lesson_id IN (SELECT id FROM lessons WHERE source_id = ?1)",
             params![&source_id],
         )
@@ -2525,6 +2752,328 @@ fn ensure_source_context(
     }
 
     Ok(())
+}
+
+fn normalize_organization_label(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
+}
+
+fn user_teacher_id(display_name: &str) -> String {
+    let display_name = normalize_organization_label(display_name);
+    if display_name.eq_ignore_ascii_case("Personal Library") {
+        return "teacher-3".to_string();
+    }
+
+    format!(
+        "teacher-user-{}",
+        stable_suffix(&display_name.to_lowercase())
+    )
+}
+
+fn user_collection_id(title: &str) -> String {
+    let title = normalize_organization_label(title);
+    if title.eq_ignore_ascii_case("Local Imports") {
+        return "collection-2".to_string();
+    }
+
+    format!("collection-user-{}", stable_suffix(&title.to_lowercase()))
+}
+
+fn upsert_user_teacher(
+    transaction: &Transaction<'_>,
+    teacher_id: &str,
+    display_name: &str,
+) -> Result<(), String> {
+    if teacher_id == "teacher-3" {
+        return Ok(());
+    }
+
+    transaction
+        .execute(
+            "INSERT INTO teachers (id, display_name, description, source_links_json)
+             VALUES (?1, ?2, 'User-organized teacher label.', '[]')
+             ON CONFLICT(id) DO UPDATE SET
+               display_name = excluded.display_name",
+            params![teacher_id, normalize_organization_label(display_name)],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn upsert_user_collection(
+    transaction: &Transaction<'_>,
+    collection_id: &str,
+    title: &str,
+    source_id: &str,
+) -> Result<(), String> {
+    if collection_id == "collection-2" {
+        return Ok(());
+    }
+
+    let existing_sources: Option<String> = transaction
+        .query_row(
+            "SELECT source_ids_json FROM collections WHERE id = ?1",
+            params![collection_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let mut source_ids = existing_sources
+        .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
+        .unwrap_or_default();
+    if !source_ids.iter().any(|id| id == source_id) {
+        source_ids.push(source_id.to_string());
+    }
+
+    transaction
+        .execute(
+            "INSERT INTO collections
+             (id, title, owner_label, sort_order, lesson_count, source_ids_json)
+             VALUES (?1, ?2, 'Smart Library', 800, 0, ?3)
+             ON CONFLICT(id) DO UPDATE SET
+               title = excluded.title,
+               owner_label = excluded.owner_label,
+               source_ids_json = excluded.source_ids_json",
+            params![
+                collection_id,
+                normalize_organization_label(title),
+                serde_json::to_string(&source_ids).map_err(|error| error.to_string())?
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn refresh_lesson_fts(
+    transaction: &Transaction<'_>,
+    lesson_id: &str,
+    title: &str,
+    description: &str,
+    teacher_label: &str,
+    collection_title: &str,
+    source_label: &str,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "DELETE FROM lessons_fts WHERE lesson_id = ?1",
+            params![lesson_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "INSERT INTO lessons_fts
+             (lesson_id, title, description, teacher, collection_title, source_label)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                lesson_id,
+                title,
+                description,
+                normalize_organization_label(teacher_label),
+                normalize_organization_label(collection_title),
+                source_label
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn refresh_collection_count(
+    transaction: &Transaction<'_>,
+    collection_id: &str,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "UPDATE collections
+             SET lesson_count = (SELECT COUNT(*) FROM lessons WHERE collection_id = ?1)
+             WHERE id = ?1",
+            params![collection_id],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn cleanup_empty_collection(
+    transaction: &Transaction<'_>,
+    collection_id: &str,
+) -> Result<(), String> {
+    if collection_id == "collection-2" {
+        return Ok(());
+    }
+
+    let remaining_lessons: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM lessons WHERE collection_id = ?1",
+            params![collection_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if remaining_lessons == 0 {
+        transaction
+            .execute(
+                "DELETE FROM collections WHERE id = ?1",
+                params![collection_id],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn cleanup_empty_teacher(transaction: &Transaction<'_>, teacher_id: &str) -> Result<(), String> {
+    if teacher_id == "teacher-3" {
+        return Ok(());
+    }
+
+    let remaining_lessons: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM lessons WHERE teacher_id = ?1",
+            params![teacher_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let relay_count: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM teacher_relays WHERE teacher_id = ?1",
+            params![teacher_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if remaining_lessons == 0 && relay_count == 0 {
+        transaction
+            .execute("DELETE FROM teachers WHERE id = ?1", params![teacher_id])
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn infer_local_lesson_organization(source_path: &Path) -> LocalLessonOrganization {
+    let fallback_title = source_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(clean_local_label)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "Imported lesson".to_string());
+
+    if let Some((teacher, collection, title)) = infer_bracketed_local_label(&fallback_title)
+        .or_else(|| infer_dash_local_label(&fallback_title))
+    {
+        return local_lesson_organization(title, teacher, collection);
+    }
+
+    if let Some((teacher, collection)) = infer_folder_organization(source_path) {
+        return local_lesson_organization(fallback_title, teacher, collection);
+    }
+
+    LocalLessonOrganization {
+        title: fallback_title,
+        teacher_id: "teacher-3".to_string(),
+        teacher_label: "Personal Library".to_string(),
+        collection_id: "collection-2".to_string(),
+        collection_title: "Local Imports".to_string(),
+    }
+}
+
+fn local_lesson_organization(
+    title: String,
+    teacher_label: String,
+    collection_title: String,
+) -> LocalLessonOrganization {
+    let teacher_label = normalize_organization_label(&teacher_label);
+    let collection_title = normalize_organization_label(&collection_title);
+    LocalLessonOrganization {
+        title: normalize_organization_label(&title),
+        teacher_id: user_teacher_id(&teacher_label),
+        teacher_label,
+        collection_id: user_collection_id(&collection_title),
+        collection_title,
+    }
+}
+
+fn infer_bracketed_local_label(value: &str) -> Option<(String, String, String)> {
+    let remainder = value.strip_prefix('[')?;
+    let closing = remainder.find(']')?;
+    let teacher = clean_local_label(&remainder[..closing]);
+    let after_teacher = clean_local_label(
+        remainder[closing + 1..]
+            .trim_start_matches(['-', ':', ' '])
+            .trim(),
+    );
+    let parts = dash_parts(&after_teacher);
+    if teacher.is_empty() || parts.len() < 2 {
+        return None;
+    }
+
+    Some((teacher, parts[0].clone(), parts[1..].join(" - ")))
+}
+
+fn infer_dash_local_label(value: &str) -> Option<(String, String, String)> {
+    let parts = dash_parts(value);
+    if parts.len() < 3 {
+        return None;
+    }
+
+    Some((parts[0].clone(), parts[1].clone(), parts[2..].join(" - ")))
+}
+
+fn infer_folder_organization(source_path: &Path) -> Option<(String, String)> {
+    let collection_dir = source_path.parent()?;
+    let teacher_dir = collection_dir.parent()?;
+    let collection = folder_label(collection_dir)?;
+    let teacher = folder_label(teacher_dir)?;
+    let teacher_parent = teacher_dir.parent().and_then(folder_label);
+
+    if is_generic_folder(&teacher)
+        || is_generic_folder(&collection)
+        || teacher_parent
+            .as_deref()
+            .map(|label| matches!(label.to_ascii_lowercase().as_str(), "users" | "home"))
+            .unwrap_or(false)
+    {
+        return None;
+    }
+
+    Some((teacher, collection))
+}
+
+fn folder_label(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(clean_local_label)
+        .filter(|value| !value.is_empty())
+}
+
+fn clean_local_label(value: &str) -> String {
+    normalize_organization_label(&value.replace(['_', '/'], " "))
+}
+
+fn dash_parts(value: &str) -> Vec<String> {
+    value
+        .split(" - ")
+        .map(clean_local_label)
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn is_generic_folder(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "desktop"
+            | "documents"
+            | "downloads"
+            | "movies"
+            | "music"
+            | "videos"
+            | "library"
+            | "imports"
+            | "tmp"
+            | "temp"
+    )
 }
 
 fn insert_discovered_lesson(
@@ -4626,7 +5175,7 @@ fn has_iso_bmff_signature(prefix: &[u8]) -> bool {
     prefix
         .windows(4)
         .position(|window| window == b"ftyp")
-        .map(|position| position >= 4 && position <= 64)
+        .map(|position| (4..=64).contains(&position))
         .unwrap_or(false)
 }
 
@@ -4691,7 +5240,7 @@ fn trim_ascii_whitespace(bytes: &[u8]) -> &[u8] {
 
 fn is_plausible_unrecognized_media_payload(prefix: &[u8], size_bytes: u64) -> bool {
     size_bytes >= MIN_PLAUSIBLE_MEDIA_BYTES
-        && prefix.iter().any(|byte| *byte == 0)
+        && prefix.contains(&0)
         && prefix.iter().any(|byte| *byte >= 0x80)
 }
 
@@ -4899,6 +5448,12 @@ fn run_migrations(connection: &Connection) -> Result<(), String> {
               progress_seconds INTEGER NOT NULL,
               completed INTEGER NOT NULL,
               last_watched_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS lesson_notes (
+              lesson_id TEXT PRIMARY KEY REFERENCES lessons(id),
+              body TEXT NOT NULL,
+              updated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS jobs (
@@ -5613,6 +6168,20 @@ fn lesson_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Lesson> {
     })
 }
 
+fn lesson_for_id(connection: &Connection, lesson_id: &str) -> Result<Lesson, String> {
+    connection
+        .query_row(
+            "SELECT id, title, content_type, teacher_id, collection_id, source_id,
+                    source_url, published_at, description, thumbnail_tone,
+                    duration_seconds, media_file_id, provenance_id
+             FROM lessons
+             WHERE id = ?1",
+            params![lesson_id],
+            lesson_from_row,
+        )
+        .map_err(|error| error.to_string())
+}
+
 fn fetch_media_files(connection: &Connection) -> Result<Vec<MediaFile>, String> {
     let mut statement = connection
         .prepare(
@@ -5709,6 +6278,65 @@ fn fetch_watch_state(connection: &Connection) -> Result<Vec<WatchState>, String>
         })
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn watch_state_for_lesson(connection: &Connection, lesson_id: &str) -> Result<WatchState, String> {
+    connection
+        .query_row(
+            "SELECT lesson_id, progress_seconds, completed, last_watched_at
+             FROM watch_state
+             WHERE lesson_id = ?1",
+            params![lesson_id],
+            |row| {
+                Ok(WatchState {
+                    lesson_id: row.get(0)?,
+                    progress_seconds: row.get(1)?,
+                    completed: row.get::<_, i64>(2)? == 1,
+                    last_watched_at: row.get(3)?,
+                })
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
+fn fetch_lesson_notes(connection: &Connection) -> Result<Vec<LessonNote>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT lesson_id, body, updated_at
+             FROM lesson_notes
+             ORDER BY updated_at DESC",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(LessonNote {
+                lesson_id: row.get(0)?,
+                body: row.get(1)?,
+                updated_at: row.get(2)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn lesson_note_for_lesson(connection: &Connection, lesson_id: &str) -> Result<LessonNote, String> {
+    connection
+        .query_row(
+            "SELECT lesson_id, body, updated_at
+             FROM lesson_notes
+             WHERE lesson_id = ?1",
+            params![lesson_id],
+            |row| {
+                Ok(LessonNote {
+                    lesson_id: row.get(0)?,
+                    body: row.get(1)?,
+                    updated_at: row.get(2)?,
+                })
+            },
+        )
         .map_err(|error| error.to_string())
 }
 
@@ -6050,6 +6678,171 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("{prefix}-{}", Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
         directory
+    }
+
+    fn insert_test_lesson(connection: &Connection) {
+        connection
+            .execute(
+                "INSERT INTO sources
+                 (id, platform, label, identifier, auth_mode, update_schedule, capability_json, enabled)
+                 VALUES ('source-test', 'rss-feed', 'Test Source', 'https://example.test/feed.xml',
+                         'none', 'Manual', ?1, 1)",
+                params![
+                    serde_json::to_string(&capability(
+                        "supported",
+                        "limited",
+                        "supported",
+                        false,
+                        "none",
+                        "stable",
+                        "Test"
+                    ))
+                    .unwrap()
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO teachers (id, display_name, description, source_links_json)
+                 VALUES ('teacher-old', 'Old Teacher', NULL, '[]')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO collections
+                 (id, title, owner_label, sort_order, lesson_count, source_ids_json)
+                 VALUES ('collection-old', 'Old Course', 'Test', 1, 1, '[\"source-test\"]')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO lessons
+                 (id, title, content_type, teacher_id, collection_id, source_id, source_url,
+                  description, thumbnail_tone, duration_seconds, media_file_id, provenance_id)
+                 VALUES ('lesson-test', 'Opening Class', 'video', 'teacher-old', 'collection-old',
+                         'source-test', 'https://example.test/lesson.mp4', 'Intro',
+                         'emerald', NULL, NULL, 'prov-test')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO lessons_fts
+                 (lesson_id, title, description, teacher, collection_title, source_label)
+                 VALUES ('lesson-test', 'Opening Class', 'Intro', 'Old Teacher',
+                         'Old Course', 'Test Source')",
+                [],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn save_watch_state_upserts_progress_duration_and_completion() {
+        let connection = test_connection();
+        insert_test_lesson(&connection);
+
+        let saved =
+            save_watch_state(&connection, "lesson-test".to_string(), 96, Some(100), false).unwrap();
+
+        assert!(saved.completed);
+        assert_eq!(saved.progress_seconds, 100);
+        let duration: i64 = connection
+            .query_row(
+                "SELECT duration_seconds FROM lessons WHERE id = 'lesson-test'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(duration, 100);
+
+        let updated =
+            save_watch_state(&connection, "lesson-test".to_string(), 12, None, false).unwrap();
+
+        assert!(!updated.completed);
+        assert_eq!(updated.progress_seconds, 12);
+    }
+
+    #[test]
+    fn save_lesson_note_upserts_and_removes_empty_notes() {
+        let connection = test_connection();
+        insert_test_lesson(&connection);
+
+        let saved = save_lesson_note(
+            &connection,
+            "lesson-test".to_string(),
+            "  Review sanad point.  ".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(saved.body, "Review sanad point.");
+        assert_eq!(fetch_lesson_notes(&connection).unwrap().len(), 1);
+
+        let cleared =
+            save_lesson_note(&connection, "lesson-test".to_string(), "   ".to_string()).unwrap();
+
+        assert!(cleared.body.is_empty());
+        assert!(fetch_lesson_notes(&connection).unwrap().is_empty());
+    }
+
+    #[test]
+    fn update_lesson_organization_rewrites_metadata_counts_and_search() {
+        let mut connection = test_connection();
+        insert_test_lesson(&connection);
+
+        let updated = update_lesson_organization(
+            &mut connection,
+            "lesson-test".to_string(),
+            "New Teacher".to_string(),
+            "New Course".to_string(),
+        )
+        .unwrap();
+
+        assert_ne!(updated.teacher_id, "teacher-old");
+        assert_ne!(updated.collection_id, "collection-old");
+        let new_count: i64 = connection
+            .query_row(
+                "SELECT lesson_count FROM collections WHERE id = ?1",
+                params![updated.collection_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(new_count, 1);
+        let old_collection: Option<String> = connection
+            .query_row(
+                "SELECT id FROM collections WHERE id = 'collection-old'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(old_collection.is_none());
+        let matches = search_lessons(&connection, "New Teacher").unwrap();
+        assert_eq!(matches[0].id, "lesson-test");
+    }
+
+    #[test]
+    fn infers_local_organization_from_explicit_labels_only() {
+        let bracketed = infer_local_lesson_organization(Path::new(
+            "/tmp/[Teacher Name] Course Name - Lesson One.mp4",
+        ));
+        assert_eq!(bracketed.teacher_label, "Teacher Name");
+        assert_eq!(bracketed.collection_title, "Course Name");
+        assert_eq!(bracketed.title, "Lesson One");
+
+        let dashed = infer_local_lesson_organization(Path::new(
+            "/tmp/Teacher Name - Course Name - Lesson Two.mp3",
+        ));
+        assert_eq!(dashed.teacher_label, "Teacher Name");
+        assert_eq!(dashed.collection_title, "Course Name");
+        assert_eq!(dashed.title, "Lesson Two");
+
+        let generic = infer_local_lesson_organization(Path::new(
+            "/Users/traveler/Downloads/Loose Lesson.mp4",
+        ));
+        assert_eq!(generic.teacher_label, "Personal Library");
+        assert_eq!(generic.collection_title, "Local Imports");
     }
 
     fn signed_manifest() -> Value {
@@ -7032,7 +7825,7 @@ mod tests {
     #[test]
     fn native_player_candidates_prefer_bundled_players() {
         let bundle_dir = PathBuf::from("/tmp/duroos-player-bundle");
-        let candidates = native_player_candidates(&[bundle_dir.clone()]);
+        let candidates = native_player_candidates(std::slice::from_ref(&bundle_dir));
 
         assert_eq!(candidates[0].name, "mpv");
         assert_eq!(

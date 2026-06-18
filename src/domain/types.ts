@@ -185,6 +185,12 @@ export interface WatchState {
   lastWatchedAt?: string;
 }
 
+export interface LessonNote {
+  lessonId: string;
+  body: string;
+  updatedAt: string;
+}
+
 export interface Job {
   id: string;
   kind: JobKind;
@@ -223,6 +229,7 @@ export interface AppSnapshot {
   mediaFiles: MediaFile[];
   provenanceRecords: ProvenanceRecord[];
   watchState: WatchState[];
+  lessonNotes: LessonNote[];
   jobs: Job[];
   trustedCurators: TrustedCurator[];
 }
