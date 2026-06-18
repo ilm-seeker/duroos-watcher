@@ -1303,6 +1303,7 @@ const Sidebar = ({
             className={viewMode === mode ? "nav-item nav-item-active" : "nav-item"}
             onClick={() => setViewMode(mode)}
             aria-label={label}
+            aria-current={viewMode === mode ? "page" : undefined}
             title={label}
           >
             <Icon size={18} aria-hidden="true" />

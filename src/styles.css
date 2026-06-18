@@ -72,7 +72,7 @@ button:focus-visible {
 }
 
 .app-shell-sidebar-collapsed {
-  grid-template-columns: 88px minmax(0, 1fr);
+  grid-template-columns: 72px minmax(0, 1fr);
 }
 
 .sidebar {
@@ -83,7 +83,7 @@ button:focus-visible {
   flex-direction: column;
   gap: 22px;
   border-right: 1px solid var(--line);
-  background: #fbfaf6;
+  background: #faf9f3;
   overflow: hidden;
   padding: 22px 16px;
   transition:
@@ -92,8 +92,9 @@ button:focus-visible {
 }
 
 .sidebar-collapsed {
-  gap: 18px;
-  padding: 18px 12px;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 10px;
 }
 
 .sidebar-header {
@@ -133,6 +134,13 @@ button:focus-visible {
   border-radius: 8px;
   background: var(--surface);
   color: var(--emerald);
+}
+
+.sidebar-collapsed .brand-mark {
+  width: 40px;
+  height: 40px;
+  border-color: rgba(12, 122, 91, 0.18);
+  background: var(--emerald-soft);
 }
 
 .brand-name,
@@ -203,6 +211,7 @@ button:focus-visible {
 }
 
 .nav-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -215,10 +224,30 @@ button:focus-visible {
   text-align: left;
 }
 
-.nav-item:hover,
-.nav-item-active {
+.nav-item svg {
+  flex: 0 0 auto;
+}
+
+.nav-item:hover {
   background: var(--surface-muted);
   color: var(--ink);
+}
+
+.nav-item-active {
+  background: var(--emerald-soft);
+  color: var(--emerald);
+  box-shadow: inset 0 0 0 1px rgba(12, 122, 91, 0.18);
+}
+
+.nav-item-active::before {
+  position: absolute;
+  top: 9px;
+  bottom: 9px;
+  left: 0;
+  width: 3px;
+  border-radius: 999px;
+  background: currentColor;
+  content: "";
 }
 
 .sidebar-collapsed .brand-copy,
@@ -232,8 +261,29 @@ button:focus-visible {
   justify-content: center;
 }
 
+.sidebar-collapsed .nav-stack {
+  width: 48px;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.64);
+  padding: 3px;
+}
+
 .sidebar-collapsed .nav-item {
-  padding: 10px;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+}
+
+.sidebar-collapsed .nav-item-active::before {
+  top: 11px;
+  bottom: 11px;
+  left: -4px;
+}
+
+.sidebar-collapsed .nav-item:hover {
+  transform: none;
 }
 
 .privacy-panel {
@@ -276,6 +326,10 @@ button:focus-visible {
 
 .sidebar-collapsed .privacy-rail {
   display: flex;
+  width: 40px;
+  height: 40px;
+  border-color: rgba(12, 122, 91, 0.18);
+  background: var(--emerald-soft);
 }
 
 .mode-toggle {
@@ -2912,14 +2966,15 @@ button.compact-row-active {
   }
 }
 
-@media (max-width: 1180px) {
+@media (max-width: 1080px) {
   .app-shell {
-    grid-template-columns: 88px minmax(0, 1fr);
+    grid-template-columns: 72px minmax(0, 1fr);
   }
 
   .sidebar {
-    gap: 18px;
-    padding: 18px 12px;
+    align-items: center;
+    gap: 16px;
+    padding: 16px 10px;
   }
 
   .sidebar-header {
@@ -2941,11 +2996,38 @@ button.compact-row-active {
   }
 
   .nav-item {
+    width: 40px;
+    height: 40px;
+    padding: 0;
     justify-content: center;
+  }
+
+  .nav-stack {
+    width: 48px;
+    gap: 4px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: rgba(255, 255, 255, 0.64);
+    padding: 3px;
+  }
+
+  .brand-mark {
+    width: 40px;
+    height: 40px;
+    border-color: rgba(12, 122, 91, 0.18);
+    background: var(--emerald-soft);
+  }
+
+  .nav-item-active::before {
+    top: 11px;
+    bottom: 11px;
+    left: -4px;
   }
 
   .privacy-rail {
     display: flex;
+    border-color: rgba(12, 122, 91, 0.18);
+    background: var(--emerald-soft);
   }
 
   .dashboard-grid {
@@ -3009,7 +3091,25 @@ button.compact-row-active {
 
   .nav-stack {
     display: flex;
+    width: auto;
     min-width: max-content;
+    border: 0;
+    background: transparent;
+    padding: 0;
+  }
+
+  .nav-item,
+  .sidebar-collapsed .nav-item {
+    width: auto;
+    height: auto;
+    padding: 10px 12px;
+  }
+
+  .nav-item-active::before,
+  .sidebar-collapsed .nav-item-active::before {
+    top: 9px;
+    bottom: 9px;
+    left: 0;
   }
 
   .privacy-panel,
@@ -3102,6 +3202,13 @@ button.compact-row-active {
 
   .nav-item {
     width: 42px;
+    height: 40px;
+    padding: 10px;
+  }
+
+  .sidebar-collapsed .nav-item {
+    width: 42px;
+    height: 40px;
     padding: 10px;
   }
 
