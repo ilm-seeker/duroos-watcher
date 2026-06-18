@@ -58,6 +58,61 @@ describe("parseCollectionManifest", () => {
     expect(report.errors).toEqual([]);
   });
 
+  it("allows description fields without treating them as script fields", () => {
+    const manifest = {
+      ...validManifest(),
+      collection: {
+        ...validManifest().collection,
+        description: "Weekly lessons from the teacher.",
+      },
+      lessons: [
+        {
+          ...validManifest().lessons[0],
+          description: "Recorded class notes.",
+        },
+      ],
+    };
+
+    const report = parseCollectionManifest(manifest);
+
+    expect(report.valid).toBe(true);
+    expect(report.errors).toEqual([]);
+  });
+
+  it("accepts Nostr publication metadata and Blossom retrieval refs", () => {
+    const manifest = validManifest();
+    manifest.curator = {
+      ...manifest.curator!,
+      nostrPubkey: "a".repeat(64),
+    };
+    manifest.publication = {
+      transport: "nostr",
+      naddr: "naddr1example",
+      relays: ["wss://relay.example"],
+      blossomServers: ["https://blossom.example"],
+      manifestSha256:
+        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      publishedAt: "2026-06-16T05:00:00.000Z",
+    };
+    manifest.lessons[0].retrievalRefs = [
+      {
+        kind: "direct-url",
+        url: "https://blossom.example/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.mp4",
+        service: "blossom",
+        sha256:
+          "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        sizeBytes: 2048,
+        mimeType: "video/mp4",
+        mediaType: "video/mp4",
+      },
+    ];
+
+    const report = parseCollectionManifest(manifest);
+
+    expect(report.valid).toBe(true);
+    expect(report.errors).toEqual([]);
+  });
+
   it("accepts lbry source references without treating them as retrieval URLs", () => {
     const manifest = validManifest();
     manifest.lessons[0].sourceRefs[0] = {
@@ -133,6 +188,29 @@ describe("parseCollectionManifest", () => {
 
     expect(report.valid).toBe(false);
     expect(report.errors.join(" ")).toContain("retrievalRefs");
+  });
+
+  it("rejects invalid Nostr publication metadata", () => {
+    const unsafe = validManifest();
+    unsafe.curator = {
+      ...unsafe.curator!,
+      nostrPubkey: "not-a-hex-key",
+    };
+    unsafe.publication = {
+      transport: "nostr",
+      naddr: "note1wrong",
+      relays: ["https://not-a-relay.example"],
+      blossomServers: ["file:///tmp/blossom"],
+      manifestSha256: "sha256:not-a-hash",
+      publishedAt: "not-a-date",
+    };
+
+    const report = parseCollectionManifest(unsafe);
+
+    expect(report.valid).toBe(false);
+    expect(report.errors.join(" ")).toContain("nostrPubkey");
+    expect(report.errors.join(" ")).toContain("publication.relays");
+    expect(report.errors.join(" ")).toContain("publication.blossomServers");
   });
 
   it("marks well-shaped signatures as signed but untrusted in browser validation", () => {

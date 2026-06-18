@@ -2,8 +2,28 @@ import type { TrustState } from "./types";
 
 export const MANIFEST_SCHEMA_VERSION = 2;
 
-const FORBIDDEN_KEY_PATTERN =
-  /(credential|credentials|token|accessToken|refreshToken|cookie|cookies|session|telegramSession|apiKey|secret|password|privateKey|localPath|absolutePath|command|script|hook)/i;
+const FORBIDDEN_KEY_TOKENS = new Set([
+  "credential",
+  "credentials",
+  "token",
+  "cookie",
+  "cookies",
+  "session",
+  "secret",
+  "password",
+  "command",
+  "script",
+  "hook",
+]);
+const FORBIDDEN_NORMALIZED_KEYS = new Set([
+  "accesstoken",
+  "refreshtoken",
+  "telegramsession",
+  "apikey",
+  "privatekey",
+  "localpath",
+  "absolutepath",
+]);
 
 const ABSOLUTE_PATH_PATTERN = /^(\/|~\/|[a-zA-Z]:[\\/]|file:\/\/)/;
 
@@ -11,6 +31,7 @@ export interface SharedCollectionManifest {
   schemaVersion: 1 | 2;
   exportedAt: string;
   curator?: SharedCuratorIdentity;
+  publication?: SharedPublicationRef;
   collection: {
     title: string;
     ownerLabel: string;
@@ -28,6 +49,16 @@ export interface SharedCuratorIdentity {
   id: string;
   displayName: string;
   publicKey: string;
+  nostrPubkey?: string;
+}
+
+export interface SharedPublicationRef {
+  transport: "nostr";
+  naddr: string;
+  relays: string[];
+  blossomServers: string[];
+  manifestSha256: string;
+  publishedAt: string;
 }
 
 export interface SharedLessonRef {
@@ -54,6 +85,10 @@ export type SharedRetrievalRef =
       kind: "direct-url" | "enclosure-url";
       url: string;
       mediaType?: string;
+      service?: "blossom";
+      sha256?: string;
+      sizeBytes?: number;
+      mimeType?: string;
     }
   | {
       kind: "ipfs-cid";
@@ -90,6 +125,23 @@ const isSafeRelativePath = (value: string): boolean => {
 const isEncodedCryptoPath = (path: string): boolean =>
   path.endsWith(".publicKey") || path.endsWith(".signature.value");
 
+const isForbiddenManifestKey = (key: string): boolean => {
+  const tokens = manifestKeyTokens(key);
+  const normalized = tokens.join("");
+  return (
+    FORBIDDEN_NORMALIZED_KEYS.has(normalized) ||
+    tokens.some((token) => FORBIDDEN_KEY_TOKENS.has(token))
+  );
+};
+
+const manifestKeyTokens = (key: string): string[] =>
+  key
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[^a-zA-Z0-9]+/g, " ")
+    .split(" ")
+    .map((token) => token.trim().toLowerCase())
+    .filter(Boolean);
+
 const walkForUnsafeValues = (
   value: unknown,
   path: string,
@@ -114,7 +166,7 @@ const walkForUnsafeValues = (
   Object.entries(value).forEach(([key, nested]) => {
     const nestedPath = path ? `${path}.${key}` : key;
 
-    if (FORBIDDEN_KEY_PATTERN.test(key)) {
+    if (isForbiddenManifestKey(key)) {
       errors.push(`${nestedPath} is not allowed in shared collection manifests`);
     }
 
@@ -149,8 +201,19 @@ const looksLikePublicKey = (value: string): boolean =>
 const looksLikeSignature = (value: string): boolean =>
   /^[a-f0-9]{128}$/i.test(value) || /^[A-Za-z0-9+/=_-]{64,}$/.test(value);
 
+const looksLikeNostrPubkey = (value: string): boolean => /^[a-f0-9]{64}$/i.test(value);
+
 const looksLikeIpfsCid = (value: string): boolean =>
   /^(Qm[1-9A-HJ-NP-Za-km-z]{44}|b[a-z2-7]{20,})$/i.test(value);
+
+const isValidWsUrl = (value: string): boolean => {
+  try {
+    const url = new URL(value);
+    return ["ws:", "wss:"].includes(url.protocol);
+  } catch {
+    return false;
+  }
+};
 
 export const parseCollectionManifest = (
   input: string | unknown,
@@ -206,6 +269,65 @@ export const parseCollectionManifest = (
         !looksLikePublicKey(parsed.curator.publicKey)
       ) {
         errors.push("curator.publicKey must be an Ed25519 public key");
+      }
+
+      if (
+        "nostrPubkey" in parsed.curator &&
+        (typeof parsed.curator.nostrPubkey !== "string" ||
+          !looksLikeNostrPubkey(parsed.curator.nostrPubkey))
+      ) {
+        errors.push("curator.nostrPubkey must be a 32-byte hex Nostr public key");
+      }
+    }
+  }
+
+  if ("publication" in parsed) {
+    if (!isPlainObject(parsed.publication)) {
+      errors.push("publication must be an object");
+    } else {
+      if (parsed.publication.transport !== "nostr") {
+        errors.push("publication.transport must be nostr");
+      }
+
+      if (
+        typeof parsed.publication.naddr !== "string" ||
+        !parsed.publication.naddr.startsWith("naddr")
+      ) {
+        errors.push("publication.naddr is required");
+      }
+
+      if (
+        !Array.isArray(parsed.publication.relays) ||
+        parsed.publication.relays.length === 0 ||
+        !parsed.publication.relays.every(
+          (relay): relay is string => typeof relay === "string" && isValidWsUrl(relay),
+        )
+      ) {
+        errors.push("publication.relays must contain websocket relay URLs");
+      }
+
+      if (
+        !Array.isArray(parsed.publication.blossomServers) ||
+        parsed.publication.blossomServers.length === 0 ||
+        !parsed.publication.blossomServers.every(
+          (server): server is string => typeof server === "string" && isValidHttpUrl(server),
+        )
+      ) {
+        errors.push("publication.blossomServers must contain http or https URLs");
+      }
+
+      if (
+        typeof parsed.publication.manifestSha256 !== "string" ||
+        !looksLikeHash(parsed.publication.manifestSha256)
+      ) {
+        errors.push("publication.manifestSha256 must be a sha256 hash");
+      }
+
+      if (
+        typeof parsed.publication.publishedAt !== "string" ||
+        Number.isNaN(Date.parse(parsed.publication.publishedAt))
+      ) {
+        errors.push("publication.publishedAt must be an ISO date string");
       }
     }
   }
@@ -300,6 +422,40 @@ export const parseCollectionManifest = (
               (typeof retrievalRef.url !== "string" || !isValidHttpUrl(retrievalRef.url))
             ) {
               errors.push(`${refPrefix}.url must be an http or https URL`);
+            }
+
+            if (
+              (retrievalRef.kind === "direct-url" || retrievalRef.kind === "enclosure-url") &&
+              "service" in retrievalRef &&
+              retrievalRef.service !== "blossom"
+            ) {
+              errors.push(`${refPrefix}.service is not supported`);
+            }
+
+            if (
+              (retrievalRef.kind === "direct-url" || retrievalRef.kind === "enclosure-url") &&
+              "sha256" in retrievalRef &&
+              (typeof retrievalRef.sha256 !== "string" || !looksLikeHash(retrievalRef.sha256))
+            ) {
+              errors.push(`${refPrefix}.sha256 must be a sha256 hash`);
+            }
+
+            if (
+              (retrievalRef.kind === "direct-url" || retrievalRef.kind === "enclosure-url") &&
+              "sizeBytes" in retrievalRef &&
+              (typeof retrievalRef.sizeBytes !== "number" || retrievalRef.sizeBytes <= 0)
+            ) {
+              errors.push(`${refPrefix}.sizeBytes must be positive`);
+            }
+
+            if (
+              (retrievalRef.kind === "direct-url" || retrievalRef.kind === "enclosure-url") &&
+              "mimeType" in retrievalRef &&
+              (typeof retrievalRef.mimeType !== "string" ||
+                retrievalRef.mimeType.trim() === "" ||
+                /[\r\n]/.test(retrievalRef.mimeType))
+            ) {
+              errors.push(`${refPrefix}.mimeType must be a MIME type`);
             }
 
             if (
@@ -405,7 +561,7 @@ export const sanitizeManifestForExport = (
 
     return Object.fromEntries(
       Object.entries(value)
-        .filter(([key]) => !FORBIDDEN_KEY_PATTERN.test(key))
+        .filter(([key]) => !isForbiddenManifestKey(key))
         .map(([key, nested]) => [key, clean(nested)]),
     );
   };

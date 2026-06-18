@@ -108,7 +108,7 @@ export interface TeacherRelay {
   description?: string;
 }
 
-export type LiveProvider = "youtube-live" | "mixlr" | "paltalk" | "custom-rtmp";
+export type LiveProvider = "youtube-live" | "mixlr" | "custom-rtmp";
 export type LiveSessionStatus =
   | "scheduled"
   | "live"
@@ -160,6 +160,7 @@ export interface MediaFile {
   id: string;
   lessonId: string;
   relativePath: string;
+  thumbnailRelativePath?: string;
   contentHash: string;
   sizeBytes: number;
   codec?: string;
@@ -182,6 +183,12 @@ export interface WatchState {
   progressSeconds: number;
   completed: boolean;
   lastWatchedAt?: string;
+}
+
+export interface LessonNote {
+  lessonId: string;
+  body: string;
+  updatedAt: string;
 }
 
 export interface Job {
@@ -222,6 +229,7 @@ export interface AppSnapshot {
   mediaFiles: MediaFile[];
   provenanceRecords: ProvenanceRecord[];
   watchState: WatchState[];
+  lessonNotes: LessonNote[];
   jobs: Job[];
   trustedCurators: TrustedCurator[];
 }
@@ -258,12 +266,205 @@ export interface DownloadSourceSummary {
   messages: string[];
 }
 
+export interface MediaStorageAudit {
+  scannedFiles: number;
+  referencedFiles: number;
+  staleFiles: number;
+  staleBytes: number;
+  partialFiles: number;
+  staleSamples: string[];
+  messages: string[];
+}
+
+export interface MediaStorageCleanup {
+  audit: MediaStorageAudit;
+  removedFiles: number;
+  failedRemovals: number;
+  reclaimedBytes: number;
+  messages: string[];
+}
+
+export interface NativePlaybackResult {
+  mediaFileId: string;
+  lessonId: string;
+  title: string;
+  playerName: string;
+  commandLabel: string;
+  launched: boolean;
+  messages: string[];
+}
+
 export interface RuntimeDiagnostics {
   desktopRuntimeAvailable: boolean;
   ytDlpAvailable: boolean;
   ytDlpVersion?: string;
   ytDlpCommand?: string;
+  nativePlaybackAvailable: boolean;
+  nativePlaybackPlayer?: string;
+  nativePlaybackCommand?: string;
   ytDlpCookiesConfigured: boolean;
   ytDlpCookiesFile?: string;
+  messages: string[];
+}
+
+export interface PhoneMediaScope {
+  sourceId?: string;
+  collectionId?: string;
+}
+
+export interface PhoneMediaShareItem {
+  mediaFileId: string;
+  lessonId: string;
+  title: string;
+  contentType: "video" | "audio";
+  sizeBytes: number;
+  durationSeconds?: number;
+  teacherLabel?: string;
+  collectionTitle?: string;
+}
+
+export interface PhoneMediaEndpoint {
+  label: string;
+  host: string;
+  kind: "lan" | "vpn" | "tor" | "loopback" | "other";
+  baseUrl: string;
+  playlistUrl: string;
+  preferred: boolean;
+  warning?: string;
+}
+
+export interface PhoneMediaSession {
+  id: string;
+  active: boolean;
+  baseUrl?: string;
+  playlistUrl?: string;
+  endpoints?: PhoneMediaEndpoint[];
+  startedAt?: string;
+  itemCount: number;
+  items: PhoneMediaShareItem[];
+  messages: string[];
+}
+
+export interface NostrRelayConfig {
+  url: string;
+}
+
+export interface BlossomServerConfig {
+  url: string;
+}
+
+export interface ArchiveMirrorConfig {
+  service: string;
+  url: string;
+  gatewayUrl?: string;
+  label?: string;
+}
+
+export interface PublisherProfile {
+  id: string;
+  displayName: string;
+  curatorPublicKey: string;
+  nostrPubkey: string;
+  relays: NostrRelayConfig[];
+  blossomServers: BlossomServerConfig[];
+  createdAt: string;
+  updatedAt: string;
+  vaultConfigured: boolean;
+}
+
+export interface CreatePublisherProfileRequest {
+  displayName: string;
+  passphrase: string;
+  relays: NostrRelayConfig[];
+  blossomServers: BlossomServerConfig[];
+}
+
+export interface PublishedLessonDraft {
+  title: string;
+  contentType: "video" | "audio" | "pdf";
+  path: string;
+  description?: string;
+}
+
+export interface PublishTeacherChannelRequest {
+  profileId: string;
+  passphrase: string;
+  channelTitle: string;
+  channelDescription?: string;
+  relays: NostrRelayConfig[];
+  blossomServers: BlossomServerConfig[];
+  archiveMirrors?: ArchiveMirrorConfig[];
+  lessons: PublishedLessonDraft[];
+}
+
+export interface PublisherEndpointTestRequest {
+  profileId: string;
+  passphrase: string;
+  relays: NostrRelayConfig[];
+  blossomServers: BlossomServerConfig[];
+}
+
+export interface BlossomUploadResult {
+  serverUrl: string;
+  hash: string;
+  url?: string;
+  uploaded: boolean;
+  message: string;
+}
+
+export interface NostrRelayPublishResult {
+  relayUrl: string;
+  accepted: boolean;
+  message: string;
+}
+
+export interface ArchiveMirrorResult {
+  service: string;
+  endpointUrl: string;
+  url?: string;
+  cid?: string;
+  archived: boolean;
+  verified: boolean;
+  message: string;
+}
+
+export interface ChannelPublishResult {
+  channelId: string;
+  naddr: string;
+  manifestJson: string;
+  manifestSha256: string;
+  manifestUrl: string;
+  nostrEventId: string;
+  blossomResults: BlossomUploadResult[];
+  archiveResults: ArchiveMirrorResult[];
+  relayResults: NostrRelayPublishResult[];
+  messages: string[];
+}
+
+export interface PublisherEndpointTestReport {
+  passed: boolean;
+  blossomResults: BlossomUploadResult[];
+  relayResults: NostrRelayPublishResult[];
+  messages: string[];
+}
+
+export interface NostrChannelPreview {
+  naddr: string;
+  manifestUrl: string;
+  manifestSha256: string;
+  title: string;
+  curatorDisplayName: string;
+  curatorPublicKey?: string;
+  trustState: TrustState;
+  publishedAt?: string;
+  lessonCount: number;
+  mediaCount: number;
+  relayCount: number;
+  blossomServerCount: number;
+  archiveMirrorCount: number;
+  relays: string[];
+  blossomServers: string[];
+  archiveMirrors: string[];
+  warnings: string[];
   messages: string[];
 }

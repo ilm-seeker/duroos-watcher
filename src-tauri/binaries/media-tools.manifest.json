@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "status": "pinned",
+  "policy": "Release builds that bundle or CI-fetch media tools must fetch only the pinned archives below, verify SHA-256 before extraction, and preserve upstream licenses in the final artifact.",
+  "requiredTools": ["yt-dlp", "ffmpeg", "ffprobe"],
+  "optionalPlayers": ["mpv", "vlc", "ffplay"],
+  "requiredTargets": [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu"
+  ],
+  "artifactFields": ["tool", "target", "version", "sourceUrl", "sha256", "license"],
+  "artifacts": [
+    {
+      "tool": "yt-dlp",
+      "target": "aarch64-apple-darwin",
+      "version": "2026.06.09",
+      "sourceUrl": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.06.09/yt-dlp_macos",
+      "sha256": "b82c3626952e6c14eaf654cc565866775ffd0b9ffb7021628ac59b42c2f4f244",
+      "license": "Unlicense",
+      "checksumSourceUrl": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.06.09/SHA2-256SUMS"
+    },
+    {
+      "tool": "yt-dlp",
+      "target": "x86_64-apple-darwin",
+      "version": "2026.06.09",
+      "sourceUrl": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.06.09/yt-dlp_macos",
+      "sha256": "b82c3626952e6c14eaf654cc565866775ffd0b9ffb7021628ac59b42c2f4f244",
+      "license": "Unlicense",
+      "checksumSourceUrl": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.06.09/SHA2-256SUMS"
+    },
+    {
+      "tool": "yt-dlp",
+      "target": "x86_64-pc-windows-msvc",
+      "version": "2026.06.09",
+      "sourceUrl": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.06.09/yt-dlp.exe",
+      "sha256": "3a48cb955d55c8821b60ccbdbbc6f61bc958f2f3d3b7ad5eaf3d83a543293a27",
+      "license": "Unlicense",
+      "checksumSourceUrl": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.06.09/SHA2-256SUMS"
+    },
+    {
+      "tool": "yt-dlp",
+      "target": "x86_64-unknown-linux-gnu",
+      "version": "2026.06.09",
+      "sourceUrl": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.06.09/yt-dlp_linux",
+      "sha256": "bf8aac79b72287a6d2043074415132558b43743a8f9461a22b0141e90f16ce66",
+      "license": "Unlicense",
+      "checksumSourceUrl": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.06.09/SHA2-256SUMS"
+    },
+    {
+      "tool": "ffmpeg",
+      "target": "aarch64-apple-darwin",
+      "version": "@ffmpeg-installer/darwin-arm64@4.1.5",
+      "sourceUrl": "https://registry.npmjs.org/@ffmpeg-installer/darwin-arm64/-/darwin-arm64-4.1.5.tgz",
+      "sha256": "8a4306e64ed3ba3cb5e51093266c8c72f65314bec146c899a50426f21aaa0f44",
+      "license": "https://git.ffmpeg.org/gitweb/ffmpeg.git/blob_plain/HEAD:/LICENSE.md",
+      "integrity": "sha512-hYqTiP63mXz7wSQfuqfFwfLOfwwFChUedeCVKkBtl/cliaTM7/ePI9bVzfZ2c+dWu3TqCwLDRWNSJ5pqZl8otA=="
+    },
+    {
+      "tool": "ffmpeg",
+      "target": "x86_64-apple-darwin",
+      "version": "@ffmpeg-installer/darwin-x64@4.1.0",
+      "sourceUrl": "https://registry.npmjs.org/@ffmpeg-installer/darwin-x64/-/darwin-x64-4.1.0.tgz",
+      "sha256": "4f22b9ce0c0507e3f4cd6e822fb23214abc5fb70d48eb046ff94a1484299cdbf",
+      "license": "LGPL-2.1",
+      "integrity": "sha512-Z4EyG3cIFjdhlY8wI9aLUXuH8nVt7E9SlMVZtWvSPnm2sm37/yC2CwjUzyCQbJbySnef1tQwGG2Sx+uWhd9IAw=="
+    },
+    {
+      "tool": "ffmpeg",
+      "target": "x86_64-pc-windows-msvc",
+      "version": "@ffmpeg-installer/win32-x64@4.1.0",
+      "sourceUrl": "https://registry.npmjs.org/@ffmpeg-installer/win32-x64/-/win32-x64-4.1.0.tgz",
+      "sha256": "2aa313be3585994d710197bc4196f5fcbb6a1469be1013b24d200e45d773592f",
+      "license": "GPLv3",
+      "integrity": "sha512-Drt5u2vzDnIONf4ZEkKtFlbvwj6rI3kxw1Ck9fpudmtgaZIHD4ucsWB2lCZBXRxJgXR+2IMSti+4rtM4C4rXgg=="
+    },
+    {
+      "tool": "ffmpeg",
+      "target": "x86_64-unknown-linux-gnu",
+      "version": "@ffmpeg-installer/linux-x64@4.1.0",
+      "sourceUrl": "https://registry.npmjs.org/@ffmpeg-installer/linux-x64/-/linux-x64-4.1.0.tgz",
+      "sha256": "b836abe532912ae6c3388dbe713952af293a3d005fc9e4d34d52f14da99dda71",
+      "license": "GPLv3",
+      "integrity": "sha512-Y5BWhGLU/WpQjOArNIgXD3z5mxxdV8c41C+U15nsE5yF8tVcdCGet5zPs5Zy3Ta6bU7haGpIzryutqCGQA/W8A=="
+    },
+    {
+      "tool": "ffprobe",
+      "target": "aarch64-apple-darwin",
+      "version": "@ffprobe-installer/darwin-arm64@5.0.1",
+      "sourceUrl": "https://registry.npmjs.org/@ffprobe-installer/darwin-arm64/-/darwin-arm64-5.0.1.tgz",
+      "sha256": "27069fc32879761968823c3ce5353d3c6573f5df7d83d40b60bc2d878e886d39",
+      "license": "LGPL-2.1",
+      "integrity": "sha512-vwNCNjokH8hfkbl6m95zICHwkSzhEvDC3GVBcUp5HX8+4wsX10SP3B+bGur7XUzTIZ4cQpgJmEIAx6TUwRepMg=="
+    },
+    {
+      "tool": "ffprobe",
+      "target": "x86_64-apple-darwin",
+      "version": "@ffprobe-installer/darwin-x64@5.1.0",
+      "sourceUrl": "https://registry.npmjs.org/@ffprobe-installer/darwin-x64/-/darwin-x64-5.1.0.tgz",
+      "sha256": "efe50b1fc86deb59a0263013a3f2c08ad5771ad1258a436e117e44b75ec8bd47",
+      "license": "GPL-3.0",
+      "integrity": "sha512-J+YGscZMpQclFg31O4cfVRGmDpkVsQ2fZujoUdMAAYcP0NtqpC49Hs3SWJpBdsGB4VeqOt5TTm1vSZQzs1NkhA=="
+    },
+    {
+      "tool": "ffprobe",
+      "target": "x86_64-pc-windows-msvc",
+      "version": "@ffprobe-installer/win32-x64@5.1.0",
+      "sourceUrl": "https://registry.npmjs.org/@ffprobe-installer/win32-x64/-/win32-x64-5.1.0.tgz",
+      "sha256": "97992b5e3b651c7df625831fd369eecc5ec0e9532ac98921138b1c4fbc8de96e",
+      "license": "GPL-3.0",
+      "integrity": "sha512-jMGYeAgkrdn4e2vvYt/qakgHRE3CPju4bn5TmdPfoAm1BlX1mY9cyMd8gf5vSzI8gH8Zq5WQAyAkmekX/8TSTg=="
+    },
+    {
+      "tool": "ffprobe",
+      "target": "x86_64-unknown-linux-gnu",
+      "version": "@ffprobe-installer/linux-x64@5.2.0",
+      "sourceUrl": "https://registry.npmjs.org/@ffprobe-installer/linux-x64/-/linux-x64-5.2.0.tgz",
+      "sha256": "8b6b2e34bad5ea7cfbe1914185145f514f620f24203a1a421e8d00a698bf8e61",
+      "license": "GPL-3.0",
+      "integrity": "sha512-D3UeqTLYPNs7pBWPLUYGehPdRVqU8eACox4OZy3pZUZatxye2YKlvBwEfaLdL1v2Z4FOAlLUhms0kY8m8kqSRA=="
+    }
+  ]
+}

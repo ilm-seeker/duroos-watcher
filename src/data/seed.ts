@@ -4,6 +4,7 @@ import type {
   Collection,
   Job,
   Lesson,
+  LessonNote,
   LiveSession,
   MediaFile,
   ProvenanceRecord,
@@ -30,8 +31,8 @@ export const seedSources: Source[] = sourceAdapters.map((adapter) => ({
           ? "https://example.com/feed.xml"
         : adapter.platform === "archive-org"
           ? "archive.org/details/<identifier>"
-          : adapter.platform === "teacher-relay"
-            ? "https://teacher.example/feed.xml"
+        : adapter.platform === "teacher-relay"
+            ? "https://teacher.example/duroos.json"
             : `${adapter.platform}:not-configured`,
   feedFormat:
     adapter.platform === "teacher-relay" ? "duroos-manifest" : "rss",
@@ -75,6 +76,7 @@ export const seedLessons: Lesson[] = [];
 export const seedMediaFiles: MediaFile[] = [];
 export const seedProvenance: ProvenanceRecord[] = [];
 export const seedWatchState: WatchState[] = [];
+export const seedLessonNotes: LessonNote[] = [];
 export const seedJobs: Job[] = [];
 export const seedTrustedCurators: TrustedCurator[] = [];
 
@@ -88,6 +90,7 @@ export const seedSnapshot: AppSnapshot = {
   mediaFiles: seedMediaFiles,
   provenanceRecords: seedProvenance,
   watchState: seedWatchState,
+  lessonNotes: seedLessonNotes,
   jobs: seedJobs,
   trustedCurators: seedTrustedCurators,
 };

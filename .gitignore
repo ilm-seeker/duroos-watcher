@@ -16,5 +16,6 @@ yt-dlp-cookies.txt
 src-tauri/target/
 src-tauri/gen/schemas/
 src-tauri/.tauri/
+src-tauri/binaries/vendor/
 
 duroos.collection.json
