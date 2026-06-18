@@ -82,7 +82,6 @@ struct ParsedNaddr {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct NostrEvent {
     id: String,
     pubkey: String,
@@ -2170,6 +2169,8 @@ fn clip_text(value: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use secp256k1::schnorr::Signature as SchnorrSignature;
+    use std::str::FromStr;
     use std::{net::TcpListener, sync::mpsc, thread};
     use tiny_http::{Response, Server};
 
@@ -2223,9 +2224,12 @@ mod tests {
             event.content
         ]))
         .unwrap();
+        let event_json = serde_json::to_string(&event).unwrap();
 
         assert_eq!(event.id, sha256_hex(serialized.as_bytes()));
         assert_eq!(event.sig.len(), 128);
+        assert!(event_json.contains("\"created_at\""));
+        assert!(!event_json.contains("\"createdAt\""));
     }
 
     #[test]
@@ -2343,6 +2347,42 @@ mod tests {
         assert!(headers.iter().any(|(name, value)| {
             name.eq_ignore_ascii_case("Authorization") && value.starts_with("Nostr ")
         }));
+        let auth_header = headers
+            .iter()
+            .find_map(|(name, value)| {
+                name.eq_ignore_ascii_case("Authorization")
+                    .then_some(value.strip_prefix("Nostr ").unwrap_or(value))
+            })
+            .unwrap();
+        let auth_json = general_purpose::URL_SAFE_NO_PAD.decode(auth_header).unwrap();
+        let auth_event: NostrEvent = serde_json::from_slice(&auth_json).unwrap();
+        let auth_id_material = serde_json::to_string(&json!([
+            0,
+            auth_event.pubkey,
+            auth_event.created_at,
+            auth_event.kind,
+            auth_event.tags,
+            auth_event.content
+        ]))
+        .unwrap();
+        let auth_id_bytes = Sha256::digest(auth_id_material.as_bytes());
+        assert_eq!(auth_event.id, hex_lower(&auth_id_bytes));
+        assert_eq!(auth_event.kind, BLOSSOM_AUTH_KIND);
+        assert!(auth_event.tags.iter().any(|tag| {
+            tag.first().map(String::as_str) == Some("t")
+                && tag.get(1).map(String::as_str) == Some("upload")
+        }));
+        assert!(auth_event.tags.iter().any(|tag| {
+            tag.first().map(String::as_str) == Some("x")
+                && tag.get(1).map(String::as_str) == Some(hash.as_str())
+        }));
+        let secp = Secp256k1::new();
+        let signature = SchnorrSignature::from_str(&auth_event.sig).unwrap();
+        let message = SecpMessage::from_digest_slice(&auth_id_bytes).unwrap();
+        let pubkey_bytes = decode_hex_32(&auth_event.pubkey, "Nostr pubkey").unwrap();
+        let pubkey = XOnlyPublicKey::from_slice(&pubkey_bytes).unwrap();
+        secp.verify_schnorr(&signature, &message, &pubkey)
+            .unwrap();
     }
 
     #[test]
