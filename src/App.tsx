@@ -117,6 +117,8 @@ import {
 import {
   buildLibraryLessonView,
   type ChannelSubscriptionView,
+  type LibraryAvailabilityFilter,
+  type LibraryContentTypeFilter,
   type LibraryGroup,
   type SmartScopeId,
 } from "./domain/libraryView";
@@ -345,6 +347,18 @@ const availabilityLabel = (lesson: Lesson, mediaFile?: MediaFile): string => {
     return "Needs file";
   }
 
+  if (mediaFile.importStatus === "copying") {
+    return "Copying file";
+  }
+
+  if (mediaFile.importStatus === "missing") {
+    return "File missing";
+  }
+
+  if (mediaFile.importStatus === "failed") {
+    return "Import failed";
+  }
+
   if (isPlaybackUnverified(mediaFile)) {
     return "Codec unverified";
   }
@@ -372,11 +386,15 @@ const availabilityTone = (
     return "neutral";
   }
 
+  if (!mediaFile || mediaFile.importStatus !== "ready") {
+    return "warning";
+  }
+
   if (isPlaybackUnverified(mediaFile)) {
     return "warning";
   }
 
-  return mediaFile ? "positive" : "warning";
+  return "positive";
 };
 
 const App = () => {
@@ -387,6 +405,11 @@ const App = () => {
   const [selectedTeacherId, setSelectedTeacherId] = useState("all");
   const [selectedCollectionId, setSelectedCollectionId] = useState("all");
   const [selectedSourceId, setSelectedSourceId] = useState("all");
+  const [selectedChannelId, setSelectedChannelId] = useState("all");
+  const [selectedContentType, setSelectedContentType] =
+    useState<LibraryContentTypeFilter>("all");
+  const [selectedAvailability, setSelectedAvailability] =
+    useState<LibraryAvailabilityFilter>("all");
   const [viewMode, setViewMode] = useState<ViewMode>("library");
   const [isOnlineMode, setIsOnlineMode] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(() => {
@@ -594,6 +617,8 @@ const App = () => {
     teacherGroups,
     collectionGroups,
     sourceGroups,
+    contentTypeGroups,
+    availabilityGroups,
     channelSubscriptions,
   } = useMemo(
     () =>
@@ -604,6 +629,9 @@ const App = () => {
         selectedTeacherId,
         selectedCollectionId,
         selectedSourceId,
+        selectedChannelId,
+        selectedContentType,
+        selectedAvailability,
         lessons: snapshot.lessons,
         teachers: snapshot.teachers,
         collections: snapshot.collections,
@@ -617,6 +645,9 @@ const App = () => {
       activeScopeId,
       query,
       selectedCollectionId,
+      selectedAvailability,
+      selectedChannelId,
+      selectedContentType,
       selectedLessonId,
       selectedSourceId,
       selectedTeacherId,
@@ -909,6 +940,20 @@ const App = () => {
   const sourceForChannel = (channel: ChannelSubscriptionView): Source | undefined =>
     channel.sourceId ? sourceById.get(channel.sourceId) : undefined;
 
+  const handleSelectSourceFilter = (sourceId: string) => {
+    setSelectedSourceId(sourceId);
+    if (sourceId !== "all") {
+      setSelectedChannelId("all");
+    }
+  };
+
+  const handleSelectChannelFilter = (channelId: string) => {
+    setSelectedChannelId(channelId);
+    if (channelId !== "all") {
+      setSelectedSourceId("all");
+    }
+  };
+
   const handleRefreshChannel = async (channel: ChannelSubscriptionView) => {
     if (!isOnlineMode) {
       setSystemNotice("Switch to online fetch mode before refreshing subscribed channels.");
@@ -1084,10 +1129,15 @@ const App = () => {
             teacherGroups={teacherGroups}
             collectionGroups={collectionGroups}
             sourceGroups={sourceGroups}
+            contentTypeGroups={contentTypeGroups}
+            availabilityGroups={availabilityGroups}
             channelSubscriptions={channelSubscriptions}
             selectedTeacherId={selectedTeacherId}
             selectedCollectionId={selectedCollectionId}
             selectedSourceId={selectedSourceId}
+            selectedChannelId={selectedChannelId}
+            selectedContentType={selectedContentType}
+            selectedAvailability={selectedAvailability}
             isSearchActive={isSearchActive}
             query={query}
             selectedLesson={selectedLesson}
@@ -1123,7 +1173,10 @@ const App = () => {
             onUpdateLessonOrganization={handleUpdateLessonOrganization}
             onSelectTeacher={setSelectedTeacherId}
             onSelectCollection={setSelectedCollectionId}
-            onSelectSource={setSelectedSourceId}
+            onSelectSource={handleSelectSourceFilter}
+            onSelectChannel={handleSelectChannelFilter}
+            onSelectContentType={setSelectedContentType}
+            onSelectAvailability={setSelectedAvailability}
             onStartPhoneAccess={handleStartPhoneAccess}
             onStopPhoneAccess={handleStopPhoneAccess}
             onCopyPhoneLink={handleCopyPhoneLink}
@@ -1413,10 +1466,15 @@ interface DashboardProps {
   teacherGroups: LibraryGroup[];
   collectionGroups: LibraryGroup[];
   sourceGroups: LibraryGroup[];
+  contentTypeGroups: LibraryGroup[];
+  availabilityGroups: LibraryGroup[];
   channelSubscriptions: ChannelSubscriptionView[];
   selectedTeacherId: string;
   selectedCollectionId: string;
   selectedSourceId: string;
+  selectedChannelId: string;
+  selectedContentType: LibraryContentTypeFilter;
+  selectedAvailability: LibraryAvailabilityFilter;
   isSearchActive: boolean;
   query: string;
   selectedLesson?: Lesson;
@@ -1462,6 +1520,9 @@ interface DashboardProps {
   onSelectTeacher: (teacherId: string) => void;
   onSelectCollection: (collectionId: string) => void;
   onSelectSource: (sourceId: string) => void;
+  onSelectChannel: (channelId: string) => void;
+  onSelectContentType: (contentType: LibraryContentTypeFilter) => void;
+  onSelectAvailability: (availability: LibraryAvailabilityFilter) => void;
   onStartPhoneAccess: () => void;
   onStopPhoneAccess: () => void;
   onCopyPhoneLink: (playlistUrl?: string) => void;
@@ -1478,10 +1539,15 @@ const Dashboard = ({
   teacherGroups,
   collectionGroups,
   sourceGroups,
+  contentTypeGroups,
+  availabilityGroups,
   channelSubscriptions,
   selectedTeacherId,
   selectedCollectionId,
   selectedSourceId,
+  selectedChannelId,
+  selectedContentType,
+  selectedAvailability,
   isSearchActive,
   query,
   selectedLesson,
@@ -1518,6 +1584,9 @@ const Dashboard = ({
   onSelectTeacher,
   onSelectCollection,
   onSelectSource,
+  onSelectChannel,
+  onSelectContentType,
+  onSelectAvailability,
   onStartPhoneAccess,
   onStopPhoneAccess,
   onCopyPhoneLink,
@@ -1532,6 +1601,24 @@ const Dashboard = ({
     );
   }
 
+  const selectedChannel =
+    selectedChannelId === "all"
+      ? undefined
+      : channelSubscriptions.find(
+          (channel) =>
+            channel.id === selectedChannelId ||
+            channel.relayId === selectedChannelId ||
+            channel.sourceId === selectedChannelId,
+        );
+  const selectedContentTypeGroup =
+    selectedContentType === "all"
+      ? undefined
+      : contentTypeGroups.find((group) => group.id === selectedContentType);
+  const selectedAvailabilityGroup =
+    selectedAvailability === "all"
+      ? undefined
+      : availabilityGroups.find((group) => group.id === selectedAvailability);
+
   return (
   <div className="dashboard-grid">
     <section className="content-column">
@@ -1543,10 +1630,16 @@ const Dashboard = ({
           selectedCollectionId === "all" ? undefined : collectionById.get(selectedCollectionId)
         }
         selectedSource={selectedSourceId === "all" ? undefined : sourceById.get(selectedSourceId)}
+        selectedChannel={selectedChannel}
+        selectedContentType={selectedContentTypeGroup}
+        selectedAvailability={selectedAvailabilityGroup}
         onSelectScope={setActiveScopeId}
         onClearTeacher={() => onSelectTeacher("all")}
         onClearCollection={() => onSelectCollection("all")}
         onClearSource={() => onSelectSource("all")}
+        onClearChannel={() => onSelectChannel("all")}
+        onClearContentType={() => onSelectContentType("all")}
+        onClearAvailability={() => onSelectAvailability("all")}
       />
       {selectedLesson ? (
         <PlayerPanel
@@ -1660,7 +1753,9 @@ const Dashboard = ({
             <ChannelSubscriptionCard
               key={channel.id}
               channel={channel}
+              selected={selectedChannel?.id === channel.id}
               busySourceAction={busySourceAction}
+              onSelect={onSelectChannel}
               onRefresh={onRefreshChannel}
               onDownload={onDownloadChannel}
               onUnfollow={onUnfollowChannel}
@@ -1722,6 +1817,14 @@ const Dashboard = ({
         channels={channelSubscriptions}
         lessons={snapshot.lessons}
         mediaByLessonId={mediaByLessonId}
+        contentTypeGroups={contentTypeGroups}
+        availabilityGroups={availabilityGroups}
+        selectedChannelId={selectedChannelId}
+        selectedContentType={selectedContentType}
+        selectedAvailability={selectedAvailability}
+        onSelectChannel={onSelectChannel}
+        onSelectContentType={onSelectContentType}
+        onSelectAvailability={onSelectAvailability}
       />
       <SourceReadinessPanel
         sources={snapshot.sources}
@@ -1824,20 +1927,32 @@ const SmartLibraryControls = ({
   selectedTeacher,
   selectedCollection,
   selectedSource,
+  selectedChannel,
+  selectedContentType,
+  selectedAvailability,
   onSelectScope,
   onClearTeacher,
   onClearCollection,
   onClearSource,
+  onClearChannel,
+  onClearContentType,
+  onClearAvailability,
 }: {
   scopes: { id: SmartScopeId; label: string; count: number }[];
   activeScopeId: SmartScopeId;
   selectedTeacher?: Teacher;
   selectedCollection?: Collection;
   selectedSource?: Source;
+  selectedChannel?: ChannelSubscriptionView;
+  selectedContentType?: LibraryGroup;
+  selectedAvailability?: LibraryGroup;
   onSelectScope: (scopeId: SmartScopeId) => void;
   onClearTeacher: () => void;
   onClearCollection: () => void;
   onClearSource: () => void;
+  onClearChannel: () => void;
+  onClearContentType: () => void;
+  onClearAvailability: () => void;
 }) => (
   <section className="smart-library-bar" aria-label="Smart library organization">
     <div className="smart-scope-row" role="tablist" aria-label="Library scope">
@@ -1854,7 +1969,12 @@ const SmartLibraryControls = ({
         </button>
       ))}
     </div>
-    {selectedTeacher || selectedCollection || selectedSource ? (
+    {selectedTeacher ||
+    selectedCollection ||
+    selectedSource ||
+    selectedChannel ||
+    selectedContentType ||
+    selectedAvailability ? (
       <div className="active-filter-row" aria-label="Active library filters">
         {selectedTeacher ? (
           <button type="button" className="filter-chip" onClick={onClearTeacher}>
@@ -1874,6 +1994,30 @@ const SmartLibraryControls = ({
           <button type="button" className="filter-chip" onClick={onClearSource}>
             <Database size={14} />
             <span>{selectedSource.label}</span>
+            <X size={13} />
+          </button>
+        ) : null}
+        {selectedChannel ? (
+          <button type="button" className="filter-chip" onClick={onClearChannel}>
+            <Rss size={14} />
+            <span>{selectedChannel.title}</span>
+            <X size={13} />
+          </button>
+        ) : null}
+        {selectedContentType ? (
+          <button type="button" className="filter-chip" onClick={onClearContentType}>
+            {(() => {
+              const Icon = contentTypeIcon(selectedContentType.id as ContentType);
+              return <Icon size={14} />;
+            })()}
+            <span>{selectedContentType.label}</span>
+            <X size={13} />
+          </button>
+        ) : null}
+        {selectedAvailability ? (
+          <button type="button" className="filter-chip" onClick={onClearAvailability}>
+            <HardDrive size={14} />
+            <span>{selectedAvailability.label}</span>
             <X size={13} />
           </button>
         ) : null}
@@ -2999,24 +3143,52 @@ const StorageHygienePanel = ({
 const LibraryOrganizationPanel = ({
   channels,
   lessons,
-  mediaByLessonId,
+  contentTypeGroups,
+  availabilityGroups,
+  selectedChannelId,
+  selectedContentType,
+  selectedAvailability,
+  onSelectChannel,
+  onSelectContentType,
+  onSelectAvailability,
 }: {
   channels: ChannelSubscriptionView[];
   lessons: Lesson[];
   mediaByLessonId: Map<string, MediaFile>;
+  contentTypeGroups: LibraryGroup[];
+  availabilityGroups: LibraryGroup[];
+  selectedChannelId: string;
+  selectedContentType: LibraryContentTypeFilter;
+  selectedAvailability: LibraryAvailabilityFilter;
+  onSelectChannel: (channelId: string) => void;
+  onSelectContentType: (contentType: LibraryContentTypeFilter) => void;
+  onSelectAvailability: (availability: LibraryAvailabilityFilter) => void;
 }) => {
-  const contentTypes: ContentType[] = ["video", "audio", "pdf", "post"];
-  const localFileCount = lessons.filter((lesson) => mediaByLessonId.has(lesson.id)).length;
-  const missingFileCount = lessons.filter(
-    (lesson) => isFileBackedContentType(lesson.contentType) && !mediaByLessonId.has(lesson.id),
-  ).length;
-
   return (
     <section className="side-panel library-organization-panel">
-      <SectionHeader title="Library Organization" meta={`${channels.length} channels`} />
+      <SectionHeader
+        title="Library Organization"
+        meta={`${channels.length} channels · ${lessons.length} items`}
+      />
       <div className="compact-list">
-        {channels.slice(0, 3).map((channel) => (
-          <div className="compact-row" key={channel.id}>
+        {channels.map((channel) => (
+          <button
+            type="button"
+            className={
+              selectedChannelId === channel.id ||
+              selectedChannelId === channel.relayId ||
+              selectedChannelId === channel.sourceId
+                ? "compact-row compact-row-active"
+                : "compact-row"
+            }
+            key={channel.id}
+            onClick={() => onSelectChannel(selectedChannelId === channel.id ? "all" : channel.id)}
+            aria-pressed={
+              selectedChannelId === channel.id ||
+              selectedChannelId === channel.relayId ||
+              selectedChannelId === channel.sourceId
+            }
+          >
             <div className="round-icon">
               <Rss size={16} />
             </div>
@@ -3027,25 +3199,64 @@ const LibraryOrganizationPanel = ({
                 {channel.missingFileCount} need files
               </span>
             </div>
-          </div>
+          </button>
         ))}
         {channels.length === 0 ? <p className="panel-empty">No followed channels yet.</p> : null}
       </div>
       <div className="organization-pill-grid" aria-label="Library content types">
-        {contentTypes.map((contentType) => (
-          <StatusChip
-            key={contentType}
-            label={`${contentType} ${lessons.filter((lesson) => lesson.contentType === contentType).length}`}
-            tone="neutral"
-          />
-        ))}
+        {contentTypeGroups.map((group) => {
+          const Icon = contentTypeIcon(group.id as ContentType);
+          return (
+            <button
+              type="button"
+              key={group.id}
+              className={
+                selectedContentType === group.id ? "scope-chip scope-chip-active" : "scope-chip"
+              }
+              onClick={() =>
+                onSelectContentType(
+                  selectedContentType === group.id
+                    ? "all"
+                    : (group.id as LibraryContentTypeFilter),
+                )
+              }
+              aria-pressed={selectedContentType === group.id}
+            >
+              <Icon size={14} />
+              <span>{group.label}</span>
+              <strong>{group.lessonCount}</strong>
+            </button>
+          );
+        })}
+        {contentTypeGroups.length === 0 ? (
+          <p className="panel-empty">No content type groups yet.</p>
+        ) : null}
       </div>
       <div className="organization-pill-grid" aria-label="Library availability">
-        <StatusChip label={`${localFileCount} local files`} tone="positive" />
-        <StatusChip
-          label={`${missingFileCount} need files`}
-          tone={missingFileCount > 0 ? "warning" : "positive"}
-        />
+        {availabilityGroups.map((group) => (
+          <button
+            type="button"
+            key={group.id}
+            className={
+              selectedAvailability === group.id ? "scope-chip scope-chip-active" : "scope-chip"
+            }
+            onClick={() =>
+              onSelectAvailability(
+                selectedAvailability === group.id
+                  ? "all"
+                  : (group.id as LibraryAvailabilityFilter),
+              )
+            }
+            aria-pressed={selectedAvailability === group.id}
+          >
+            <HardDrive size={14} />
+            <span>{group.label}</span>
+            <strong>{group.lessonCount}</strong>
+          </button>
+        ))}
+        {availabilityGroups.length === 0 ? (
+          <p className="panel-empty">No availability groups yet.</p>
+        ) : null}
       </div>
     </section>
   );
@@ -3093,13 +3304,17 @@ const TeacherPanel = ({
 
 const ChannelSubscriptionCard = ({
   channel,
+  selected = false,
   busySourceAction,
+  onSelect,
   onRefresh,
   onDownload,
   onUnfollow,
 }: {
   channel: ChannelSubscriptionView;
+  selected?: boolean;
   busySourceAction: BusySourceAction;
+  onSelect?: (channelId: string) => void;
   onRefresh: (channel: ChannelSubscriptionView) => void;
   onDownload: (channel: ChannelSubscriptionView) => void;
   onUnfollow: (channel: ChannelSubscriptionView) => void;
@@ -3112,7 +3327,7 @@ const ChannelSubscriptionCard = ({
     channel.missingFileCount > 0 ? "warning" : channel.localFileCount > 0 ? "positive" : "neutral";
 
   return (
-    <article className="channel-card">
+    <article className={selected ? "channel-card channel-card-active" : "channel-card"}>
       <div className="channel-card-main">
         <div className="relay-card-header">
           <div className="round-icon">
@@ -3148,6 +3363,17 @@ const ChannelSubscriptionCard = ({
         <code>{channel.feedUrl}</code>
       </div>
       <div className="channel-card-actions">
+        {onSelect ? (
+          <button
+            type="button"
+            className="secondary-action"
+            onClick={() => onSelect(selected ? "all" : channel.id)}
+            aria-pressed={selected}
+          >
+            <Search size={15} />
+            <span>{selected ? "Filtering" : "Filter"}</span>
+          </button>
+        ) : null}
         <button
           type="button"
           className="secondary-action"

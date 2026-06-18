@@ -62,6 +62,7 @@ Tauri desktop commands require Rust and Cargo:
 
 ```bash
 npm run tauri dev
+npm run tauri:build:app
 ```
 
 If `cargo` is missing, install Rust from <https://www.rust-lang.org/tools/install> before running Tauri.
@@ -127,6 +128,8 @@ same content hash is already present.
 ## Release Readiness
 
 The repo prepares cross-platform builds for macOS app/DMG, Windows NSIS/MSI, and Linux AppImage/deb through Tauri configuration and CI workflows. Production labeling still requires external proof: signed and notarized macOS artifacts, signed Windows installers, populated media-tool checksum manifests when tools are bundled or CI-fetched, clean artifact checksums, and manual smoke tests on macOS, Windows, and Linux.
+
+Use `npm run tauri:build:app` for local macOS app-only build verification. Use `npm run tauri:build:full` or the tag release workflow for full package generation; local full macOS packaging can still hit the DMG Finder/AppleScript packaging hang and is not production proof by itself.
 
 Unsigned artifacts, unnotarized builds, and builds without pinned bundled media-tool checksums are alpha/testing artifacts only.
 

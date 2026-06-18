@@ -3,8 +3,17 @@
 ## Artifact Labels
 
 - **Alpha/testing:** unsigned, unnotarized, or missing pinned bundled media-tool checksums.
-- **Production candidate:** CI passed on macOS, Windows, and Ubuntu; artifact checksums generated; no tracked secrets; media-tool manifest populated when tools are bundled or CI-fetched.
+- **Production candidate:** CI passed on macOS, Windows, and Ubuntu; artifact checksums and `artifact-audit.json` generated; no tracked secrets; media-tool manifest populated when tools are bundled or CI-fetched.
 - **Production:** production candidate plus macOS signing/notarization, Windows signing, Linux package review, and manual smoke tests on all target OSes.
+
+## Build Commands
+
+- Local app-only macOS verification: `npm run tauri:build:app`.
+- Full local packaging: `npm run tauri:build:full`.
+- Production release packaging: tag push through `.github/workflows/release.yml`.
+
+The app-only build avoids the local DMG Finder/AppleScript packaging path. Full macOS packaging still
+needs a non-hanging DMG runner plus signing/notarization proof before production labeling.
 
 ## Platform Smoke Tests
 
@@ -26,5 +35,14 @@ Run these on macOS, Windows, and Linux before production labeling:
 - Apple Developer signing identity and notarization credentials.
 - Windows code-signing certificate.
 - Release-key custody for Tauri signing if updater distribution is enabled later.
-- Populated `src-tauri/binaries/media-tools.manifest.json` entries for every bundled or CI-fetched media tool.
+- Verified extraction and license carry-forward for every entry in `src-tauri/binaries/media-tools.manifest.json`.
 - Final release notes that state third-party endpoint presets are editable, public, and not operated by Duroos.
+
+## Production Evidence Required
+
+- Successful GitHub Actions CI matrix run on macOS, Windows, and Ubuntu for the exact release commit.
+- Successful tag release workflow with artifact audit uploads for each platform.
+- macOS signed and notarized app/DMG evidence.
+- Windows signed installer evidence.
+- Linux AppImage/deb install and launch evidence.
+- Manual smoke-test notes for every item in the platform checklist above.

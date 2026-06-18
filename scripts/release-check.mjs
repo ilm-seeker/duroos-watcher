@@ -84,8 +84,16 @@ for (const file of trackedFiles) {
 if (!Array.isArray(mediaToolsManifest.artifacts)) {
   failures.push("media-tools.manifest.json must expose an artifacts array.");
 } else if (mediaToolsManifest.artifacts.length === 0) {
-  warnings.push("No bundled media tools are pinned yet; release artifacts are alpha/testing only.");
+  failures.push("media-tools.manifest.json must pin media-tool artifacts before release checks pass.");
 }
+
+if (mediaToolsManifest.status !== "pinned") {
+  failures.push("media-tools.manifest.json status must be pinned before release checks pass.");
+}
+
+const requiredMediaTools = mediaToolsManifest.requiredTools ?? [];
+const requiredMediaTargets = mediaToolsManifest.requiredTargets ?? [];
+const mediaArtifactKeys = new Set();
 
 for (const artifact of mediaToolsManifest.artifacts ?? []) {
   for (const field of mediaToolsManifest.artifactFields ?? []) {
@@ -95,6 +103,33 @@ for (const artifact of mediaToolsManifest.artifacts ?? []) {
   }
   if (artifact.sha256 && !/^[a-f0-9]{64}$/i.test(artifact.sha256)) {
     failures.push(`Invalid SHA-256 for media tool artifact ${artifact.tool ?? "unknown"}.`);
+  }
+  if (artifact.sourceUrl) {
+    try {
+      const sourceUrl = new URL(artifact.sourceUrl);
+      if (sourceUrl.protocol !== "https:") {
+        failures.push(`Media tool artifact must use HTTPS: ${artifact.sourceUrl}`);
+      }
+      if (sourceUrl.pathname.split("/").includes("latest")) {
+        failures.push(`Media tool artifact source URL must not use a mutable latest path: ${artifact.sourceUrl}`);
+      }
+    } catch {
+      failures.push(`Media tool artifact has an invalid source URL: ${artifact.sourceUrl}`);
+    }
+  }
+
+  const key = `${artifact.tool}:${artifact.target}`;
+  if (mediaArtifactKeys.has(key)) {
+    failures.push(`Duplicate media tool artifact for ${key}.`);
+  }
+  mediaArtifactKeys.add(key);
+}
+
+for (const tool of requiredMediaTools) {
+  for (const target of requiredMediaTargets) {
+    if (!mediaArtifactKeys.has(`${tool}:${target}`)) {
+      failures.push(`Missing pinned media tool artifact for ${tool} on ${target}.`);
+    }
   }
 }
 

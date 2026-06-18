@@ -9,7 +9,9 @@ V1 is designed to use managed local binaries for media work:
 
 Do not commit user cookies, source credentials, Telegram sessions, or private API tokens here.
 
-Production packaging must populate `media-tools.manifest.json` with one entry per bundled or
-CI-fetched executable. Each entry needs a target triple, upstream source URL, version, license, and
-SHA-256 checksum before an artifact can be treated as production. Unsigned builds or builds without
-pinned media-tool checksums are alpha/testing artifacts only.
+`media-tools.manifest.json` now locks the release-matrix media tools to immutable upstream package
+or release URLs with SHA-256 checksums. Packaging must fetch only those archives, verify the hash
+before extraction, and include the corresponding upstream license material in the final artifact.
+
+Unsigned builds, unnotarized builds, or builds that fetch tools outside this manifest are
+alpha/testing artifacts only.

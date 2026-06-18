@@ -1,5 +1,6 @@
 import type {
   Collection,
+  ContentType,
   Lesson,
   MediaFile,
   Source,
@@ -16,6 +17,10 @@ export type SmartScopeId =
   | "completed"
   | "needs-files"
   | "recent";
+
+export type LibraryContentTypeFilter = "all" | ContentType;
+
+export type LibraryAvailabilityFilter = "all" | "local" | "needs-files" | "saved-text";
 
 export interface SmartScopeOption {
   id: SmartScopeId;
@@ -34,6 +39,7 @@ export interface LibraryGroup {
 export interface ChannelSubscriptionView {
   id: string;
   relayId: string;
+  teacherId: string;
   sourceId?: string;
   title: string;
   curatorLabel: string;
@@ -61,6 +67,9 @@ export interface LibraryLessonViewInput {
   selectedTeacherId?: string;
   selectedCollectionId?: string;
   selectedSourceId?: string;
+  selectedChannelId?: string;
+  selectedContentType?: LibraryContentTypeFilter;
+  selectedAvailability?: LibraryAvailabilityFilter;
   lessons: Lesson[];
   teachers: Teacher[];
   collections: Collection[];
@@ -81,6 +90,8 @@ export interface LibraryLessonView {
   teacherGroups: LibraryGroup[];
   collectionGroups: LibraryGroup[];
   sourceGroups: LibraryGroup[];
+  contentTypeGroups: LibraryGroup[];
+  availabilityGroups: LibraryGroup[];
   channelSubscriptions: ChannelSubscriptionView[];
 }
 
@@ -91,6 +102,9 @@ export const buildLibraryLessonView = ({
   selectedTeacherId = "all",
   selectedCollectionId = "all",
   selectedSourceId = "all",
+  selectedChannelId = "all",
+  selectedContentType = "all",
+  selectedAvailability = "all",
   lessons,
   teachers,
   collections,
@@ -109,11 +123,24 @@ export const buildLibraryLessonView = ({
   const sourceById = new Map(sources.map((source) => [source.id, source]));
   const mediaByLessonId = new Map(mediaFiles.map((file) => [file.lessonId, file]));
   const watchByLessonId = new Map(watchState.map((state) => [state.lessonId, state]));
+  const channelSubscriptions = buildChannelSubscriptions({
+    teacherRelays,
+    teachers,
+    sources,
+    lessons,
+    mediaFiles,
+    trustedCurators,
+  });
+  const channelByFilterId = buildChannelFilterIndex(channelSubscriptions);
+  const selectedChannel = channelByFilterId.get(selectedChannelId);
   const baseLessons = lessons.filter(
     (lesson) =>
       (selectedTeacherId === "all" || lesson.teacherId === selectedTeacherId) &&
       (selectedCollectionId === "all" || lesson.collectionId === selectedCollectionId) &&
-      (selectedSourceId === "all" || lesson.sourceId === selectedSourceId),
+      (selectedSourceId === "all" || lesson.sourceId === selectedSourceId) &&
+      lessonMatchesChannel(lesson, selectedChannelId, selectedChannel) &&
+      (selectedContentType === "all" || lesson.contentType === selectedContentType) &&
+      lessonMatchesAvailability(lesson, selectedAvailability, mediaByLessonId),
   );
 
   const searchedLessons = isSearchActive
@@ -122,6 +149,8 @@ export const buildLibraryLessonView = ({
           lesson.title,
           lesson.description,
           lesson.sourceUrl,
+          contentTypeLabel(lesson.contentType),
+          availabilityLabel(availabilityForLesson(lesson, mediaByLessonId)),
           teacherById.get(lesson.teacherId)?.displayName,
           collectionById.get(lesson.collectionId)?.title,
           sourceById.get(lesson.sourceId)?.label,
@@ -180,14 +209,9 @@ export const buildLibraryLessonView = ({
     teacherGroups: buildGroups(lessons, teachers, watchByLessonId, "teacher"),
     collectionGroups: buildGroups(lessons, collections, watchByLessonId, "collection"),
     sourceGroups: buildGroups(lessons, sources, watchByLessonId, "source"),
-    channelSubscriptions: buildChannelSubscriptions({
-      teacherRelays,
-      teachers,
-      sources,
-      lessons,
-      mediaFiles,
-      trustedCurators,
-    }),
+    contentTypeGroups: buildContentTypeGroups(lessons, watchByLessonId),
+    availabilityGroups: buildAvailabilityGroups(lessons, mediaByLessonId, watchByLessonId),
+    channelSubscriptions,
   };
 };
 
@@ -210,7 +234,45 @@ const isUnwatched = (
 const needsLocalFile = (
   lesson: Lesson,
   mediaByLessonId: Map<string, MediaFile>,
-): boolean => lesson.contentType !== "post" && !mediaByLessonId.has(lesson.id);
+): boolean =>
+  lesson.contentType !== "post" && mediaByLessonId.get(lesson.id)?.importStatus !== "ready";
+
+const availabilityForLesson = (
+  lesson: Lesson,
+  mediaByLessonId: Map<string, MediaFile>,
+): Exclude<LibraryAvailabilityFilter, "all"> => {
+  if (lesson.contentType === "post") {
+    return "saved-text";
+  }
+
+  return mediaByLessonId.get(lesson.id)?.importStatus === "ready" ? "local" : "needs-files";
+};
+
+const contentTypeLabel = (contentType: ContentType): string => {
+  switch (contentType) {
+    case "video":
+      return "Video";
+    case "audio":
+      return "Audio";
+    case "pdf":
+      return "PDF";
+    case "post":
+      return "Post";
+  }
+};
+
+const availabilityLabel = (
+  availability: Exclude<LibraryAvailabilityFilter, "all">,
+): string => {
+  switch (availability) {
+    case "local":
+      return "Local file";
+    case "needs-files":
+      return "Needs file";
+    case "saved-text":
+      return "Saved text";
+  }
+};
 
 const latestDate = (values: Array<string | undefined>): string | undefined => {
   const dates = values.filter((value): value is string => Boolean(value));
@@ -271,6 +333,7 @@ const buildChannelSubscriptions = ({
       return {
         id: source?.id ?? relay.id,
         relayId: relay.id,
+        teacherId: relay.teacherId,
         sourceId: source?.id,
         title: relay.title,
         curatorLabel: teacherById.get(relay.teacherId)?.displayName ?? relay.teacherId,
@@ -297,6 +360,46 @@ const buildChannelSubscriptions = ({
         left.title.localeCompare(right.title),
     );
 };
+
+const buildChannelFilterIndex = (
+  channels: ChannelSubscriptionView[],
+): Map<string, ChannelSubscriptionView> => {
+  const index = new Map<string, ChannelSubscriptionView>();
+  for (const channel of channels) {
+    index.set(channel.id, channel);
+    index.set(channel.relayId, channel);
+    if (channel.sourceId) {
+      index.set(channel.sourceId, channel);
+    }
+  }
+  return index;
+};
+
+const lessonMatchesChannel = (
+  lesson: Lesson,
+  selectedChannelId: string,
+  selectedChannel: ChannelSubscriptionView | undefined,
+): boolean => {
+  if (selectedChannelId === "all") {
+    return true;
+  }
+
+  if (!selectedChannel) {
+    return false;
+  }
+
+  return selectedChannel.sourceId
+    ? lesson.sourceId === selectedChannel.sourceId
+    : lesson.teacherId === selectedChannel.teacherId;
+};
+
+const lessonMatchesAvailability = (
+  lesson: Lesson,
+  selectedAvailability: LibraryAvailabilityFilter,
+  mediaByLessonId: Map<string, MediaFile>,
+): boolean =>
+  selectedAvailability === "all" ||
+  availabilityForLesson(lesson, mediaByLessonId) === selectedAvailability;
 
 const lessonMatchesScope = (
   lesson: Lesson,
@@ -362,3 +465,56 @@ const buildGroups = <T extends Teacher | Collection | Source>(
     })
     .filter((group) => group.lessonCount > 0)
     .sort((left, right) => right.lessonCount - left.lessonCount || left.label.localeCompare(right.label));
+
+const buildContentTypeGroups = (
+  lessons: Lesson[],
+  watchByLessonId: Map<string, WatchState>,
+): LibraryGroup[] => {
+  const contentTypes: ContentType[] = ["video", "audio", "pdf", "post"];
+  return contentTypes
+    .map((contentType) =>
+      groupFromLessons(
+        contentType,
+        contentTypeLabel(contentType),
+        lessons.filter((lesson) => lesson.contentType === contentType),
+        watchByLessonId,
+      ),
+    )
+    .filter((group) => group.lessonCount > 0);
+};
+
+const buildAvailabilityGroups = (
+  lessons: Lesson[],
+  mediaByLessonId: Map<string, MediaFile>,
+  watchByLessonId: Map<string, WatchState>,
+): LibraryGroup[] => {
+  const availabilityIds: Array<Exclude<LibraryAvailabilityFilter, "all">> = [
+    "local",
+    "needs-files",
+    "saved-text",
+  ];
+  return availabilityIds
+    .map((availability) =>
+      groupFromLessons(
+        availability,
+        availabilityLabel(availability),
+        lessons.filter((lesson) => availabilityForLesson(lesson, mediaByLessonId) === availability),
+        watchByLessonId,
+      ),
+    )
+    .filter((group) => group.lessonCount > 0);
+};
+
+const groupFromLessons = (
+  id: string,
+  label: string,
+  groupedLessons: Lesson[],
+  watchByLessonId: Map<string, WatchState>,
+): LibraryGroup => ({
+  id,
+  label,
+  lessonCount: groupedLessons.length,
+  activeCount: groupedLessons.filter((lesson) => isInProgress(lesson, watchByLessonId)).length,
+  completedCount: groupedLessons.filter((lesson) => watchByLessonId.get(lesson.id)?.completed)
+    .length,
+});

@@ -8326,17 +8326,15 @@ mod tests {
     #[test]
     fn native_player_candidates_prefer_bundled_players() {
         let bundle_dir = PathBuf::from("/tmp/duroos-player-bundle");
+        let bundled_mpv = bundle_dir.join("mpv").to_string_lossy().to_string();
+        let bundled_mpv_exe = bundle_dir.join("mpv.exe").to_string_lossy().to_string();
         let candidates = native_player_candidates(std::slice::from_ref(&bundle_dir));
 
         assert_eq!(candidates[0].name, "mpv");
-        assert_eq!(
-            candidates[0].program,
-            bundle_dir.join("mpv").to_string_lossy().to_string()
-        );
-        assert!(candidates.iter().any(|candidate| {
-            candidate.name == "mpv"
-                && candidate.program == bundle_dir.join("mpv.exe").to_string_lossy().to_string()
-        }));
+        assert_eq!(candidates[0].program, bundled_mpv);
+        assert!(candidates
+            .iter()
+            .any(|candidate| { candidate.name == "mpv" && candidate.program == bundled_mpv_exe }));
         assert!(candidates.iter().any(|candidate| {
             candidate.name == "VLC"
                 && candidate.program == "/Applications/VLC.app/Contents/MacOS/VLC"

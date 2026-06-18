@@ -226,6 +226,74 @@ describe("buildLibraryLessonView", () => {
     ]);
   });
 
+  it("filters by content type and local availability with counted facet groups", () => {
+    const localAudio = lesson("lesson-local", "Ready Audio");
+    const missingVideo: Lesson = {
+      ...lesson("lesson-missing", "Missing Video"),
+      contentType: "video",
+    };
+    const savedPost: Lesson = {
+      ...lesson("lesson-post", "Saved Post"),
+      contentType: "post",
+    };
+
+    const result = view({
+      selectedContentType: "video",
+      selectedAvailability: "needs-files",
+      lessons: [localAudio, missingVideo, savedPost],
+      mediaFiles: [mediaFile(localAudio.id)],
+      watchState: [watch(localAudio.id), watch(missingVideo.id, true)],
+    });
+
+    expect(result.filteredLessons.map((item) => item.id)).toEqual(["lesson-missing"]);
+    expect(result.contentTypeGroups).toEqual([
+      {
+        id: "video",
+        label: "Video",
+        lessonCount: 1,
+        activeCount: 0,
+        completedCount: 1,
+      },
+      {
+        id: "audio",
+        label: "Audio",
+        lessonCount: 1,
+        activeCount: 1,
+        completedCount: 0,
+      },
+      {
+        id: "post",
+        label: "Post",
+        lessonCount: 1,
+        activeCount: 0,
+        completedCount: 0,
+      },
+    ]);
+    expect(result.availabilityGroups).toEqual([
+      {
+        id: "local",
+        label: "Local file",
+        lessonCount: 1,
+        activeCount: 1,
+        completedCount: 0,
+      },
+      {
+        id: "needs-files",
+        label: "Needs file",
+        lessonCount: 1,
+        activeCount: 0,
+        completedCount: 1,
+      },
+      {
+        id: "saved-text",
+        label: "Saved text",
+        lessonCount: 1,
+        activeCount: 0,
+        completedCount: 0,
+      },
+    ]);
+  });
+
   it("derives subscribed channel status from relays, source rows, lessons, media, and curator trust", () => {
     const channelSource: Source = {
       ...source,
@@ -288,6 +356,7 @@ describe("buildLibraryLessonView", () => {
         id: channelSource.id,
         sourceId: channelSource.id,
         relayId: relay.id,
+        teacherId: teacher.id,
         title: "Foundations",
         curatorLabel: teacher.displayName,
         itemCount: 3,
@@ -298,5 +367,51 @@ describe("buildLibraryLessonView", () => {
         trusted: true,
       }),
     ]);
+  });
+
+  it("filters lessons by subscribed channel identity", () => {
+    const channelSource: Source = {
+      ...source,
+      id: "source-channel",
+      platform: "teacher-relay",
+      label: "Channel: Foundations",
+      identifier: "https://teacher.example/duroos.json",
+    };
+    const otherSource: Source = {
+      ...source,
+      id: "source-other",
+      label: "Other Source",
+    };
+    const relay: TeacherRelay = {
+      id: "relay-foundations",
+      teacherId: teacher.id,
+      title: "Foundations",
+      feedUrl: channelSource.identifier,
+      feedFormat: "duroos-manifest",
+      feedTransport: "nostr",
+      trustState: "signed-trusted",
+      trustPolicy: "signed-feed",
+      visibility: "public",
+      autoDownload: false,
+      subscriberCount: 4,
+    };
+    const channelLesson: Lesson = {
+      ...lesson("lesson-channel", "Channel Lesson"),
+      sourceId: channelSource.id,
+    };
+    const outsideLesson: Lesson = {
+      ...lesson("lesson-outside", "Outside Lesson"),
+      sourceId: otherSource.id,
+    };
+
+    const result = view({
+      selectedChannelId: relay.id,
+      sources: [source, channelSource, otherSource],
+      teacherRelays: [relay],
+      lessons: [channelLesson, outsideLesson],
+      mediaFiles: [],
+    });
+
+    expect(result.filteredLessons.map((item) => item.id)).toEqual(["lesson-channel"]);
   });
 });

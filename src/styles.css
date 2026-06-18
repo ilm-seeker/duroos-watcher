@@ -1803,6 +1803,12 @@ button.compact-row-active {
   padding: 14px;
 }
 
+.channel-card-active {
+  border-color: var(--line-strong);
+  background: #fbfaf6;
+  box-shadow: inset 3px 0 0 var(--emerald);
+}
+
 .channel-card-main,
 .channel-title-block {
   display: grid;
