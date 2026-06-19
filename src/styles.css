@@ -359,7 +359,7 @@ button:focus-visible {
 .top-bar {
   position: sticky;
   top: 0;
-  z-index: 2;
+  z-index: 4;
   display: grid;
   gap: 14px;
   border-bottom: 1px solid rgba(221, 216, 202, 0.75);
@@ -846,6 +846,7 @@ button:focus-visible {
 
 .lesson-thumb {
   position: relative;
+  isolation: isolate;
   display: flex;
   min-height: 90px;
   align-items: center;
@@ -1013,6 +1014,7 @@ button:focus-visible {
 
 .player-frame {
   position: relative;
+  isolation: isolate;
   display: flex;
   min-height: 214px;
   align-items: center;
