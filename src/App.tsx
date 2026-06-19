@@ -74,6 +74,10 @@ import {
   validateCollectionManifest,
 } from "./lib/tauri";
 import type { ManifestValidationReport } from "./domain/collectionManifest";
+import {
+  buildChannelInvite,
+  canonicalizeChannelRef,
+} from "./domain/channelInvite";
 import { displayJobDetail } from "./domain/jobDisplay";
 import {
   filterQueueJobs,
@@ -86,6 +90,7 @@ import type {
   AppSnapshot,
   ArchiveMirrorConfig,
   CapabilityLevel,
+  ChannelPublishResult,
   Collection,
   ContentType,
   Job,
@@ -260,11 +265,6 @@ const trustTone = (trustState: TrustState): "neutral" | "positive" | "warning" |
     case "tampered":
       return "danger";
   }
-};
-
-const isNostrChannelRef = (value: string): boolean => {
-  const trimmed = value.trim();
-  return trimmed.startsWith("naddr1") || trimmed.startsWith("nostr:naddr1");
 };
 
 const normalizeSearch = (value: string): string => value.trim().toLowerCase();
@@ -3656,7 +3656,7 @@ const TeacherPublisherPanel = ({
   const [channelTitle, setChannelTitle] = useState("");
   const [channelDescription, setChannelDescription] = useState("");
   const [lessonDrafts, setLessonDrafts] = useState<PublishedLessonDraft[]>([]);
-  const [publishResult, setPublishResult] = useState("");
+  const [publishResult, setPublishResult] = useState<ChannelPublishResult | null>(null);
   const [shareQrDataUrl, setShareQrDataUrl] = useState("");
   const [panelNotice, setPanelNotice] = useState("");
   const [endpointTestReport, setEndpointTestReport] =
@@ -3827,18 +3827,22 @@ const TeacherPublisherPanel = ({
   const publisherProgressPercent = Math.round(
     (completedRequiredPublisherSteps.length / requiredPublisherSteps.length) * 100,
   );
+  const publishInvite = useMemo(
+    () => (publishResult ? buildChannelInvite(publishResult) : null),
+    [publishResult],
+  );
 
   useEffect(() => {
     let isMounted = true;
 
-    if (!publishResult) {
+    if (!publishInvite) {
       setShareQrDataUrl("");
       return () => {
         isMounted = false;
       };
     }
 
-    QRCode.toDataURL(publishResult, {
+    QRCode.toDataURL(publishInvite.canonicalChannelLink, {
       errorCorrectionLevel: "M",
       margin: 1,
       width: 148,
@@ -3861,7 +3865,7 @@ const TeacherPublisherPanel = ({
     return () => {
       isMounted = false;
     };
-  }, [publishResult]);
+  }, [publishInvite]);
 
   const createProfile = async () => {
     setIsWorking(true);
@@ -3977,7 +3981,7 @@ const TeacherPublisherPanel = ({
 
     setIsWorking(true);
     setPanelNotice("");
-    setPublishResult("");
+    setPublishResult(null);
 
     try {
       const result = await publishTeacherChannel({
@@ -3990,7 +3994,7 @@ const TeacherPublisherPanel = ({
         archiveMirrors,
         lessons: lessonDrafts,
       });
-      setPublishResult(result.naddr);
+      setPublishResult(result);
       setPanelNotice(result.messages.join(" "));
       onResult(`Published ${result.channelId}; ${result.manifestSha256}.`);
       await onProfilesChanged();
@@ -4002,15 +4006,56 @@ const TeacherPublisherPanel = ({
   };
 
   const copyChannelLink = async () => {
-    if (!publishResult) {
+    if (!publishInvite) {
       return;
     }
 
     try {
-      await navigator.clipboard.writeText(publishResult);
+      await navigator.clipboard.writeText(publishInvite.canonicalChannelLink);
       setPanelNotice("Channel link copied.");
     } catch {
       setPanelNotice("Copy failed. Select and copy the channel link manually.");
+    }
+  };
+
+  const copyInviteText = async () => {
+    if (!publishInvite) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(publishInvite.inviteText);
+      setPanelNotice("Channel invite copied.");
+    } catch {
+      setPanelNotice("Copy failed. Select and copy the invite text manually.");
+    }
+  };
+
+  const shareInvite = async () => {
+    if (!publishInvite) {
+      return;
+    }
+
+    const sharePayload = {
+      title: "Duroos channel invite",
+      text: publishInvite.inviteText,
+      url: publishInvite.canonicalChannelLink,
+    };
+
+    try {
+      if ("share" in navigator && typeof navigator.share === "function") {
+        await navigator.share(sharePayload);
+        setPanelNotice("Channel invite shared.");
+        return;
+      }
+
+      await navigator.clipboard.writeText(publishInvite.inviteText);
+      setPanelNotice("Channel invite copied.");
+    } catch (error: unknown) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return;
+      }
+      setPanelNotice("Share failed. Select and copy the invite text manually.");
     }
   };
 
@@ -4320,7 +4365,7 @@ const TeacherPublisherPanel = ({
         </div>
       </div>
 
-      {publishResult ? (
+      {publishInvite && publishResult ? (
         <div className="publisher-result">
           <div className="share-qr-frame">
             {shareQrDataUrl ? (
@@ -4331,15 +4376,33 @@ const TeacherPublisherPanel = ({
           </div>
           <div className="publisher-share-copy">
             <div>
-              <strong>Share channel link</strong>
-              <span>Learners paste this naddr into Import Content.</span>
+              <strong>Share invite</strong>
+              <span>Learners can scan the QR or paste the invite text into Teacher Feed.</span>
             </div>
-            <code>{publishResult}</code>
+            <code>{publishInvite.canonicalChannelLink}</code>
+            <div className="publisher-share-meta" aria-label="Channel invite verification">
+              <StatusChip label={publishInvite.verificationCode} tone="neutral" />
+              <StatusChip label={publishResult.manifestSha256} tone="neutral" />
+            </div>
+            <details className="publisher-advanced-link">
+              <summary>Advanced naddr</summary>
+              <code>{publishResult.naddr}</code>
+            </details>
           </div>
-          <button type="button" className="secondary-action" onClick={copyChannelLink}>
-            <Copy size={16} />
-            <span>Copy Link</span>
-          </button>
+          <div className="publisher-share-actions">
+            <button type="button" className="primary-action" onClick={shareInvite}>
+              <Copy size={16} />
+              <span>Share Invite</span>
+            </button>
+            <button type="button" className="secondary-action" onClick={copyInviteText}>
+              <Copy size={16} />
+              <span>Copy Invite Text</span>
+            </button>
+            <button type="button" className="secondary-action" onClick={copyChannelLink}>
+              <Copy size={16} />
+              <span>Copy Link</span>
+            </button>
+          </div>
         </div>
       ) : null}
 
@@ -4964,6 +5027,7 @@ const ImportDrawer = ({
   const [mode, setMode] = useState<ImportMode>(initialMode);
   const [sourceUrl, setSourceUrl] = useState("");
   const [channelPreview, setChannelPreview] = useState<NostrChannelPreview | null>(null);
+  const [previewedChannelRef, setPreviewedChannelRef] = useState("");
   const [manifestJson, setManifestJson] = useState("");
   const [validationMessage, setValidationMessage] = useState("");
   const [manifestReport, setManifestReport] = useState<ManifestValidationReport | null>(null);
@@ -4985,7 +5049,20 @@ const ImportDrawer = ({
       manifestReport.trustState === "signed-untrusted" &&
       !validatedCuratorTrusted,
   );
-  const sourceIsNostrChannel = isNostrChannelRef(sourceUrl);
+  const canonicalChannelRef = useMemo(() => canonicalizeChannelRef(sourceUrl), [sourceUrl]);
+  const sourceIsNostrChannel = Boolean(canonicalChannelRef);
+  const channelPreviewReady = Boolean(
+    channelPreview && canonicalChannelRef && previewedChannelRef === canonicalChannelRef,
+  );
+  const previewCuratorTrusted = Boolean(
+    channelPreview?.curatorPublicKey &&
+      trustedCurators.some((curator) => curator.publicKey === channelPreview.curatorPublicKey),
+  );
+  const canTrustPreviewCurator = Boolean(
+    channelPreview?.curatorPublicKey &&
+      channelPreview.trustState === "signed-untrusted" &&
+      !previewCuratorTrusted,
+  );
   const modeConfig = importModeConfig(mode);
 
   useEffect(() => {
@@ -5045,6 +5122,7 @@ const ImportDrawer = ({
 
   useEffect(() => {
     setChannelPreview(null);
+    setPreviewedChannelRef("");
   }, [sourceUrl]);
 
   const runLocalImport = async () => {
@@ -5075,9 +5153,15 @@ const ImportDrawer = ({
 
   const runSourceIngest = async () => {
     const trimmedUrl = sourceUrl.trim();
+    const sourceInput = canonicalChannelRef ?? trimmedUrl;
 
     if (!trimmedUrl) {
       setValidationMessage("Add a public feed, playlist, Telegram channel, or source URL first.");
+      return;
+    }
+
+    if (sourceIsNostrChannel && !channelPreviewReady) {
+      setValidationMessage("Preview this signed channel before following it.");
       return;
     }
 
@@ -5090,7 +5174,7 @@ const ImportDrawer = ({
     setValidationMessage("");
 
     try {
-      const result = await ingestSourceUrl(trimmedUrl);
+      const result = await ingestSourceUrl(sourceInput);
       onResult(
         `${result.discovered} discovered, ${result.imported} added, ${result.skipped} skipped, ${result.failed} failed. ${result.messages.join(" ")}`,
       );
@@ -5104,14 +5188,15 @@ const ImportDrawer = ({
 
   const runChannelPreview = async () => {
     const trimmedUrl = sourceUrl.trim();
+    const channelRef = canonicalChannelRef;
 
     if (!trimmedUrl) {
       setValidationMessage("Paste a Nostr channel link first.");
       return;
     }
 
-    if (!sourceIsNostrChannel) {
-      setValidationMessage("Channel preview expects an naddr or nostr:naddr link.");
+    if (!channelRef) {
+      setValidationMessage("Channel preview expects an naddr, nostr:naddr link, or Duroos invite text.");
       return;
     }
 
@@ -5123,10 +5208,12 @@ const ImportDrawer = ({
     setIsWorking(true);
     setValidationMessage("");
     setChannelPreview(null);
+    setPreviewedChannelRef("");
 
     try {
-      const preview = await previewNostrChannel(trimmedUrl);
+      const preview = await previewNostrChannel(channelRef);
       setChannelPreview(preview);
+      setPreviewedChannelRef(channelRef);
       setValidationMessage(
         `${preview.title} verified. ${preview.lessonCount} lesson(s), ${preview.mediaCount} media file(s).`,
       );
@@ -5135,6 +5222,27 @@ const ImportDrawer = ({
       setValidationMessage(message);
     } finally {
       setIsWorking(false);
+    }
+  };
+
+  const pasteChannelInvite = async () => {
+    if (!navigator.clipboard?.readText) {
+      setValidationMessage("Clipboard reading is unavailable. Paste the invite text manually.");
+      return;
+    }
+
+    try {
+      const clipboardText = await navigator.clipboard.readText();
+      const channelRef = canonicalizeChannelRef(clipboardText);
+      if (!channelRef) {
+        setValidationMessage("Clipboard did not contain a Duroos Nostr channel invite.");
+        return;
+      }
+
+      setSourceUrl(channelRef);
+      setValidationMessage("Channel invite pasted. Preview before following.");
+    } catch {
+      setValidationMessage("Could not read the clipboard. Paste the invite text manually.");
     }
   };
 
@@ -5201,6 +5309,35 @@ const ImportDrawer = ({
       setManualPublicKey("");
       setManualTrustNote("");
       setValidationMessage(`Trusted curator key saved for ${curator.displayName}.`);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      setValidationMessage(message);
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const trustPreviewCurator = async () => {
+    if (!channelPreview?.curatorPublicKey || !canTrustPreviewCurator) {
+      return;
+    }
+
+    setIsWorking(true);
+    try {
+      const curator = await onTrustCurator(
+        channelPreview.curatorDisplayName,
+        channelPreview.curatorPublicKey,
+        `Trusted from previewed Duroos channel ${channelPreview.title}.`,
+      );
+      setChannelPreview((current) =>
+        current
+          ? {
+              ...current,
+              trustState: "signed-trusted",
+            }
+          : current,
+      );
+      setValidationMessage(`Trusted teacher key saved for ${curator.displayName}.`);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       setValidationMessage(message);
@@ -5297,25 +5434,29 @@ const ImportDrawer = ({
               <span>
                 {mode === "feed" ? "Teacher feed or channel link" : "Source URL or identifier"}
               </span>
-              <input
-                value={sourceUrl}
-                onChange={(event) => setSourceUrl(event.target.value)}
-                placeholder={
-                  mode === "feed"
-                    ? "naddr1... or https://teacher.example/manifest.json"
-                    : "https://archive.org/details/..."
-                }
-              />
+              {mode === "feed" ? (
+                <textarea
+                  value={sourceUrl}
+                  onChange={(event) => setSourceUrl(event.target.value)}
+                  placeholder="Duroos invite, nostr:naddr..., or https://teacher.example/manifest.json"
+                />
+              ) : (
+                <input
+                  value={sourceUrl}
+                  onChange={(event) => setSourceUrl(event.target.value)}
+                  placeholder="https://archive.org/details/..."
+                />
+              )}
               <span className="field-hint">
                 {mode === "feed"
-                  ? "Paste a signed manifest URL, teacher feed, or shared Nostr naddr."
+                  ? "Paste invite text, a signed manifest URL, teacher feed, or shared Nostr channel link."
                   : "Archive item, RSS feed, t.me channel, video URL, or public source URL."}
               </span>
             </label>
 
             <div className="source-example-list" aria-label="Accepted examples">
               {(mode === "feed"
-                ? ["naddr1...", "https://teacher.example/duroos.json", "https://example.com/feed.xml"]
+                ? ["Duroos channel invite", "nostr:naddr1...", "https://teacher.example/duroos.json"]
                 : [
                     "https://archive.org/details/...",
                     "https://example.com/feed.xml",
@@ -5328,7 +5469,13 @@ const ImportDrawer = ({
             </div>
 
             {mode === "feed" || sourceIsNostrChannel ? (
-              <ChannelPreviewPanel preview={channelPreview} isLoading={isWorking} />
+              <ChannelPreviewPanel
+                preview={channelPreview}
+                isLoading={isWorking}
+                canTrustCurator={canTrustPreviewCurator}
+                curatorTrusted={previewCuratorTrusted}
+                onTrustCurator={trustPreviewCurator}
+              />
             ) : null}
 
             <div className="ingest-hint">
@@ -5341,13 +5488,27 @@ const ImportDrawer = ({
             </div>
 
             <div className="drawer-actions">
+              {mode === "feed" ? (
+                <button
+                  type="button"
+                  className="secondary-action"
+                  onClick={pasteChannelInvite}
+                  disabled={isWorking}
+                  title="Read a Duroos channel invite from the clipboard."
+                >
+                  <Copy size={17} />
+                  <span>Paste Invite</span>
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="primary-action"
                 onClick={runSourceIngest}
-                disabled={isWorking || !isOnlineMode}
+                disabled={isWorking || !isOnlineMode || (sourceIsNostrChannel && !channelPreviewReady)}
                 title={
-                  isOnlineMode
+                  sourceIsNostrChannel && !channelPreviewReady
+                    ? "Preview this signed channel before following it."
+                    : isOnlineMode
                     ? "Fetch or subscribe to the entered source."
                     : "Switch to online fetch mode before using remote subscriptions or ingest."
                 }
@@ -5505,9 +5666,15 @@ const ImportDrawer = ({
 const ChannelPreviewPanel = ({
   preview,
   isLoading,
+  canTrustCurator,
+  curatorTrusted,
+  onTrustCurator,
 }: {
   preview: NostrChannelPreview | null;
   isLoading: boolean;
+  canTrustCurator: boolean;
+  curatorTrusted: boolean;
+  onTrustCurator: () => void;
 }) => (
   <div className="channel-preview-panel">
     <div className="channel-preview-heading">
@@ -5538,6 +5705,30 @@ const ChannelPreviewPanel = ({
     {preview ? (
       <>
         <code>{preview.manifestSha256}</code>
+        {preview.curatorPublicKey ? (
+          <div className="channel-preview-key">
+            <span>Teacher key</span>
+            <code>{preview.curatorPublicKey}</code>
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={onTrustCurator}
+              disabled={!canTrustCurator}
+              title={
+                curatorTrusted || preview.trustState === "signed-trusted"
+                  ? "This teacher key is already trusted."
+                  : "Trust this key only after confirming the teacher identity outside the invite."
+              }
+            >
+              <KeyRound size={15} />
+              <span>
+                {curatorTrusted || preview.trustState === "signed-trusted"
+                  ? "Trusted Key"
+                  : "Trust Teacher Key"}
+              </span>
+            </button>
+          </div>
+        ) : null}
         <div className="channel-preview-endpoints">
           {preview.relays.slice(0, 2).map((relay) => (
             <span key={relay}>{relay}</span>

@@ -431,6 +431,9 @@ export interface ArchiveMirrorResult {
 export interface ChannelPublishResult {
   channelId: string;
   naddr: string;
+  canonicalChannelLink: string;
+  inviteText: string;
+  verificationCode: string;
   manifestJson: string;
   manifestSha256: string;
   manifestUrl: string;

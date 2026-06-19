@@ -468,6 +468,9 @@ pub struct ArchiveMirrorResult {
 pub struct ChannelPublishResult {
     pub channel_id: String,
     pub naddr: String,
+    pub canonical_channel_link: String,
+    pub invite_text: String,
+    pub verification_code: String,
     pub manifest_json: String,
     pub manifest_sha256: String,
     pub manifest_url: String,

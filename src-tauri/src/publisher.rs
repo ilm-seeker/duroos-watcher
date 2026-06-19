@@ -326,6 +326,16 @@ pub fn publish_teacher_channel(
         .iter()
         .filter(|result| !result.verified)
         .count();
+    let formatted_manifest_sha256 = format!("sha256:{manifest_sha256}");
+    let canonical_channel_link = canonical_channel_link(&naddr);
+    let verification_code = manifest_verification_code(&manifest_sha256);
+    let invite_text = channel_invite_text(
+        &channel_title,
+        &profile.display_name,
+        &canonical_channel_link,
+        &formatted_manifest_sha256,
+        &verification_code,
+    );
     let event_content = json!({
         "app": APP_TAG,
         "schemaVersion": 1,
@@ -333,7 +343,7 @@ pub fn publish_teacher_channel(
         "title": channel_title,
         "manifestUrl": manifest_url,
         "manifestUrls": manifest_urls.clone(),
-        "manifestSha256": format!("sha256:{manifest_sha256}"),
+        "manifestSha256": formatted_manifest_sha256.clone(),
         "manifestPayloadSha256": format!("sha256:{manifest_payload_sha256}"),
         "archiveMirrors": archive_refs.clone(),
         "curatorPublicKey": profile.curator_public_key,
@@ -384,8 +394,11 @@ pub fn publish_teacher_channel(
     Ok(ChannelPublishResult {
         channel_id,
         naddr,
+        canonical_channel_link,
+        invite_text,
+        verification_code,
         manifest_json,
-        manifest_sha256: format!("sha256:{manifest_sha256}"),
+        manifest_sha256: formatted_manifest_sha256,
         manifest_url,
         nostr_event_id: event.id,
         blossom_results,
@@ -1680,6 +1693,47 @@ fn decode_naddr(input: &str) -> Result<ParsedNaddr, String> {
     })
 }
 
+fn canonical_channel_link(naddr: &str) -> String {
+    let raw = naddr.trim().strip_prefix("nostr:").unwrap_or(naddr.trim());
+    format!("nostr:{raw}")
+}
+
+fn manifest_verification_code(manifest_sha256: &str) -> String {
+    let hash = manifest_sha256
+        .trim()
+        .strip_prefix("sha256:")
+        .unwrap_or(manifest_sha256.trim());
+    if !looks_like_sha256(manifest_sha256.trim()) {
+        return "DW-UNVERIFIED".to_string();
+    }
+    let prefix = hash[..12].to_ascii_uppercase();
+    format!(
+        "DW-{}-{}-{}",
+        &prefix[0..4],
+        &prefix[4..8],
+        &prefix[8..12]
+    )
+}
+
+fn channel_invite_text(
+    channel_title: &str,
+    teacher_display_name: &str,
+    canonical_channel_link: &str,
+    manifest_sha256: &str,
+    verification_code: &str,
+) -> String {
+    [
+        "Duroos channel invite".to_string(),
+        format!("Channel: {channel_title}"),
+        format!("Teacher: {teacher_display_name}"),
+        format!("Open in Duroos Watcher: {canonical_channel_link}"),
+        format!("Manifest: {manifest_sha256}"),
+        format!("Check code: {verification_code}"),
+        "Preview before trusting this teacher key.".to_string(),
+    ]
+    .join("\n")
+}
+
 fn push_tlv(out: &mut Vec<u8>, tag: u8, value: &[u8]) -> Result<(), String> {
     if value.len() > u8::MAX as usize {
         return Err("Nostr naddr value is too long.".to_string());
@@ -2191,6 +2245,28 @@ mod tests {
         assert_eq!(parsed.author, author);
         assert_eq!(parsed.kind, DUROOS_CHANNEL_KIND);
         assert_eq!(parsed.relays, relays);
+    }
+
+    #[test]
+    fn channel_invite_uses_canonical_nostr_uri_and_hash_check_code() {
+        let naddr = "naddr1qqqqtest";
+        let manifest_hash = "sha256:83829c50baca669812884d16505873dd9d7318c8ab88e9630c9bfcd1d970570b";
+        let canonical = canonical_channel_link(naddr);
+        let code = manifest_verification_code(manifest_hash);
+        let invite = channel_invite_text(
+            "Foundations",
+            "Example Teacher",
+            &canonical,
+            manifest_hash,
+            &code,
+        );
+
+        assert_eq!(canonical, "nostr:naddr1qqqqtest");
+        assert_eq!(code, "DW-8382-9C50-BACA");
+        assert!(invite.contains("Channel: Foundations"));
+        assert!(invite.contains("Teacher: Example Teacher"));
+        assert!(invite.contains("Open in Duroos Watcher: nostr:naddr1qqqqtest"));
+        assert!(invite.contains("Check code: DW-8382-9C50-BACA"));
     }
 
     #[test]
