@@ -1777,7 +1777,8 @@ button.compact-row-active {
   min-width: 0;
 }
 
-.relays-heading {
+.relays-heading,
+.publish-heading {
   align-items: flex-end;
   border-bottom: 1px solid var(--line);
   padding-bottom: 16px;
@@ -1789,13 +1790,6 @@ button.compact-row-active {
   flex-wrap: wrap;
   gap: 8px 12px;
   justify-content: flex-end;
-}
-
-.channel-mode-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 16px;
 }
 
 .relay-aside {

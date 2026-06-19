@@ -129,7 +129,7 @@ import {
 } from "./domain/libraryView";
 import { seedSnapshot } from "./data/seed";
 
-type ViewMode = "library" | "relays" | "sources" | "queue";
+type ViewMode = "library" | "relays" | "publish" | "sources" | "queue";
 type ImportMode = "local" | "source" | "feed" | "manifest" | "keys";
 type BusySourceAction = { sourceId: string; action: "clear" | "download" } | null;
 type PhoneAccessBusyAction = "start" | "stop" | null;
@@ -279,7 +279,7 @@ const includesQuery = (query: string, values: Array<string | undefined>): boolea
 
 const searchConfigForView = (
   viewMode: ViewMode,
-): { ariaLabel: string; placeholder: string } => {
+): { ariaLabel: string; placeholder: string } | null => {
   switch (viewMode) {
     case "library":
       return {
@@ -288,9 +288,11 @@ const searchConfigForView = (
       };
     case "relays":
       return {
-        ariaLabel: "Search channels, publisher support, and live lessons",
+        ariaLabel: "Search channels and live lessons",
         placeholder: "Search channels, curators, live lessons",
       };
+    case "publish":
+      return null;
     case "sources":
       return {
         ariaLabel: "Search source types, added sources, or curator keys",
@@ -1190,11 +1192,16 @@ const App = () => {
             teachers={teacherById}
             query={query}
             busySourceAction={busySourceAction}
-            publisherProfiles={publisherProfiles}
             onOpenImport={openImport}
             onRefreshChannel={handleRefreshChannel}
             onDownloadChannel={handleDownloadChannel}
             onUnfollowChannel={handleUnfollowChannel}
+          />
+        ) : null}
+
+        {viewMode === "publish" ? (
+          <PublishView
+            publisherProfiles={publisherProfiles}
             onPublisherProfilesChanged={refreshPublisherProfiles}
             onPublisherResult={setSystemNotice}
           />
@@ -1261,6 +1268,7 @@ const Sidebar = ({
   const navItems: { mode: ViewMode; label: string; icon: typeof Library }[] = [
     { mode: "library", label: "Library", icon: Library },
     { mode: "relays", label: "Channels", icon: Rss },
+    { mode: "publish", label: "Publish", icon: UploadCloud },
     { mode: "sources", label: "Sources", icon: Database },
     { mode: "queue", label: "Update Queue", icon: History },
   ];
@@ -1428,17 +1436,19 @@ const TopBar = ({
           </button>
         </div>
       </div>
-      <div className="top-bar-search">
-        <div className="search-wrap">
-          <Search size={18} />
-          <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            aria-label={searchConfig.ariaLabel}
-            placeholder={searchConfig.placeholder}
-          />
+      {searchConfig ? (
+        <div className="top-bar-search">
+          <div className="search-wrap">
+            <Search size={18} />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              aria-label={searchConfig.ariaLabel}
+              placeholder={searchConfig.placeholder}
+            />
+          </div>
         </div>
-      </div>
+      ) : null}
     </header>
   );
 };
@@ -1449,6 +1459,8 @@ const viewTitle = (viewMode: ViewMode): string => {
       return "Media Library";
     case "relays":
       return "Channels";
+    case "publish":
+      return "Publish";
     case "sources":
       return "Source Control";
     case "queue":
@@ -3452,29 +3464,22 @@ const RelaysView = ({
   teachers,
   query,
   busySourceAction,
-  publisherProfiles,
   onOpenImport,
   onRefreshChannel,
   onDownloadChannel,
   onUnfollowChannel,
-  onPublisherProfilesChanged,
-  onPublisherResult,
 }: {
   channelSubscriptions: ChannelSubscriptionView[];
   liveSessions: LiveSession[];
   teachers: Map<string, Teacher>;
   query: string;
   busySourceAction: BusySourceAction;
-  publisherProfiles: PublisherProfile[];
   onOpenImport: (mode?: ImportMode) => void;
   onRefreshChannel: (channel: ChannelSubscriptionView) => void;
   onDownloadChannel: (channel: ChannelSubscriptionView) => void;
   onUnfollowChannel: (channel: ChannelSubscriptionView) => void;
-  onPublisherProfilesChanged: () => Promise<void>;
-  onPublisherResult: (notice: string) => void;
 }) => {
   const relayQuery = normalizeSearch(query);
-  const [channelMode, setChannelMode] = useState<"following" | "publish">("following");
   const visibleChannels = channelSubscriptions.filter((channel) =>
     includesQuery(relayQuery, [
       channel.title,
@@ -3505,8 +3510,8 @@ const RelaysView = ({
         <div>
           <h2>Channels</h2>
           <p>
-            Follow signed teacher and curator channels, or publish a local signed channel without a
-            central catalog.
+            Follow signed teacher and curator channels, review trust, and download approved lessons
+            into the local library.
           </p>
         </div>
         <div className="relays-heading-status">
@@ -3515,77 +3520,48 @@ const RelaysView = ({
         </div>
       </div>
 
-      <div className="channel-mode-tabs" role="tablist" aria-label="Channels mode">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={channelMode === "following"}
-          className={channelMode === "following" ? "scope-chip scope-chip-active" : "scope-chip"}
-          onClick={() => setChannelMode("following")}
-        >
-          Following
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={channelMode === "publish"}
-          className={channelMode === "publish" ? "scope-chip scope-chip-active" : "scope-chip"}
-          onClick={() => setChannelMode("publish")}
-        >
-          Publish
-        </button>
-      </div>
-
       <div className="relay-layout">
         <section className="relay-main">
-          {channelMode === "following" ? (
-            <section className="feed-follow-panel" aria-label="Followed channels">
-              <div className="feed-follow-copy">
-                <SectionHeader
-                  title="Following"
-                  meta={`${visibleChannels.length} channel${visibleChannels.length === 1 ? "" : "s"}`}
-                />
-                <p>
-                  Follow a Duroos manifest or Nostr channel link, review trust, then download only
-                  what belongs in the local library.
-                </p>
-              </div>
-              <button type="button" className="secondary-action" onClick={() => onOpenImport("feed")}>
-                <Rss size={16} />
-                <span>Follow Channel</span>
-              </button>
-              <div className="channel-card-list">
-                {visibleChannels.length ? (
-                  visibleChannels.map((channel) => (
-                    <ChannelSubscriptionCard
-                      key={channel.id}
-                      channel={channel}
-                      busySourceAction={busySourceAction}
-                      onRefresh={onRefreshChannel}
-                      onDownload={onDownloadChannel}
-                      onUnfollow={onUnfollowChannel}
-                    />
-                  ))
-                ) : (
-                  <EmptyState
-                    icon={Rss}
-                    title={relayQuery ? "No matching channels" : "No followed channels"}
-                    detail={
-                      relayQuery
-                        ? "Clear search or try a curator, channel URL, media state, or trust state."
-                        : "Follow a signed teacher channel or curator manifest when one is available."
-                    }
+          <section className="feed-follow-panel" aria-label="Followed channels">
+            <div className="feed-follow-copy">
+              <SectionHeader
+                title="Following"
+                meta={`${visibleChannels.length} channel${visibleChannels.length === 1 ? "" : "s"}`}
+              />
+              <p>
+                Follow shared channel links here. Review trust and file availability before
+                refreshing or downloading lessons.
+              </p>
+            </div>
+            <button type="button" className="secondary-action" onClick={() => onOpenImport("feed")}>
+              <Rss size={16} />
+              <span>Follow Channel</span>
+            </button>
+            <div className="channel-card-list">
+              {visibleChannels.length ? (
+                visibleChannels.map((channel) => (
+                  <ChannelSubscriptionCard
+                    key={channel.id}
+                    channel={channel}
+                    busySourceAction={busySourceAction}
+                    onRefresh={onRefreshChannel}
+                    onDownload={onDownloadChannel}
+                    onUnfollow={onUnfollowChannel}
                   />
-                )}
-              </div>
-            </section>
-          ) : (
-            <TeacherPublisherPanel
-              profiles={publisherProfiles}
-              onProfilesChanged={onPublisherProfilesChanged}
-              onResult={onPublisherResult}
-            />
-          )}
+                ))
+              ) : (
+                <EmptyState
+                  icon={Rss}
+                  title={relayQuery ? "No matching channels" : "No followed channels"}
+                  detail={
+                    relayQuery
+                      ? "Clear search or try a curator, channel URL, media state, or trust state."
+                      : "Follow a signed teacher channel or curator manifest when one is available."
+                  }
+                />
+              )}
+            </div>
+          </section>
         </section>
 
         <aside className="relay-aside">
@@ -3635,6 +3611,38 @@ const RelaysView = ({
     </div>
   );
 };
+
+const PublishView = ({
+  publisherProfiles,
+  onPublisherProfilesChanged,
+  onPublisherResult,
+}: {
+  publisherProfiles: PublisherProfile[];
+  onPublisherProfilesChanged: () => Promise<void>;
+  onPublisherResult: (notice: string) => void;
+}) => (
+  <div className="wide-page publish-page">
+    <div className="page-heading publish-heading">
+      <div>
+        <h2>Publish</h2>
+        <p>
+          Create a teacher-owned signed channel, publish verified lesson media, and share one link
+          with learners.
+        </p>
+      </div>
+      <div className="relays-heading-status">
+        <StatusChip label="Local signing key" tone="positive" />
+        <StatusChip label="Share link" tone="neutral" />
+        <StatusChip label="No central catalog" tone="neutral" />
+      </div>
+    </div>
+    <TeacherPublisherPanel
+      profiles={publisherProfiles}
+      onProfilesChanged={onPublisherProfilesChanged}
+      onResult={onPublisherResult}
+    />
+  </div>
+);
 
 const TeacherPublisherPanel = ({
   profiles,
@@ -3808,11 +3816,11 @@ const TeacherPublisherPanel = ({
       complete: lessonDrafts.length > 0,
     },
     {
-      title: "Review",
+      title: "Mirrors",
       detail: archiveMirrors.length
         ? "Archive mirrors will be announced only after hash match."
-        : "Archive mirrors are optional and can stay empty.",
-      complete: true,
+        : "Optional archive mirrors can stay empty.",
+      complete: archiveMirrors.length > 0,
       optional: true,
     },
     {
