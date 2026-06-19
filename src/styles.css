@@ -1846,8 +1846,8 @@ button.compact-row-active {
 
 .channel-card {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 14px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
   padding: 14px;
 }
 
@@ -1864,12 +1864,18 @@ button.compact-row-active {
   min-width: 0;
 }
 
+.channel-card .relay-card-header {
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+
 .channel-title-block h3 {
   margin: 0;
   color: var(--ink);
   font-size: 16px;
   font-weight: 850;
   line-height: 1.25;
+  overflow-wrap: break-word;
 }
 
 .channel-title-block span,
@@ -1883,6 +1889,7 @@ button.compact-row-active {
 
 .channel-card p {
   margin: 0;
+  max-width: 72ch;
   font-size: 13px;
   font-weight: 600;
 }
@@ -1912,14 +1919,19 @@ button.compact-row-active {
 }
 
 .channel-card-actions {
-  min-width: 150px;
+  min-width: 0;
   align-content: start;
-  justify-content: flex-end;
+  justify-content: flex-start;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
 }
 
 .channel-card-actions .secondary-action,
 .channel-card-actions .danger-action {
-  width: 100%;
+  width: auto;
+  min-height: 34px;
+  padding: 0 11px;
+  font-size: 12px;
   justify-content: center;
 }
 
@@ -3001,6 +3013,17 @@ button.compact-row-active {
   }
 }
 
+@media (max-width: 1280px) {
+  .dashboard-grid,
+  .first-run-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .detail-column {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 1080px) {
   .app-shell {
     grid-template-columns: 72px minmax(0, 1fr);
@@ -3065,14 +3088,6 @@ button.compact-row-active {
     background: var(--emerald-soft);
   }
 
-  .dashboard-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .first-run-layout {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
   .relay-layout {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -3082,10 +3097,6 @@ button.compact-row-active {
   .publish-draft-row,
   .channel-preview-key {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .detail-column {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .player-panel {
@@ -3208,19 +3219,6 @@ button.compact-row-active {
     justify-content: flex-start;
   }
 
-  .channel-card {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .channel-card-actions {
-    min-width: 0;
-    justify-content: flex-start;
-  }
-
-  .channel-card-actions .secondary-action,
-  .channel-card-actions .danger-action {
-    width: auto;
-  }
 }
 
 @media (max-width: 620px) {
