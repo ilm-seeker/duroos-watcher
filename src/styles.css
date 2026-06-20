@@ -1653,6 +1653,11 @@ button.compact-row-active {
   margin-bottom: 16px;
 }
 
+.page-intro > p {
+  max-width: 680px;
+  font-weight: 650;
+}
+
 .page-heading h2 {
   font-size: 24px;
   font-weight: 900;
@@ -1868,6 +1873,10 @@ button.compact-row-active {
   justify-content: flex-end;
 }
 
+.feed-follow-copy .relays-heading-status {
+  justify-content: flex-start;
+}
+
 .relay-aside {
   display: grid;
   gap: 14px;
@@ -2042,6 +2051,7 @@ button.compact-row-active {
   justify-content: center;
 }
 
+.publisher-owner-panel,
 .publisher-panel {
   display: grid;
   gap: 18px;
@@ -2050,6 +2060,10 @@ button.compact-row-active {
   border-radius: var(--radius);
   background: #fffdf8;
   padding: 18px;
+}
+
+.publisher-owner-panel {
+  background: var(--surface);
 }
 
 .publisher-panel-header {
@@ -2173,6 +2187,93 @@ button.compact-row-active {
   justify-content: flex-start;
 }
 
+.publisher-channel-dashboard {
+  display: grid;
+  gap: 12px;
+}
+
+.publisher-channel-card {
+  display: grid;
+  gap: 13px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fffdf8;
+  padding: 14px;
+}
+
+.publisher-channel-card-main {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.publisher-channel-card-main p {
+  max-width: 78ch;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.publisher-channel-card-meta,
+.publisher-channel-card-actions,
+.publisher-inventory-meta {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 7px;
+  align-items: center;
+}
+
+.publisher-channel-card-actions {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.publisher-channel-card-actions .primary-action,
+.publisher-channel-card-actions .secondary-action,
+.publisher-manifest-details summary {
+  width: auto;
+  min-height: 34px;
+  padding: 0 11px;
+  font-size: 12px;
+  justify-content: center;
+}
+
+.publisher-manifest-details {
+  min-width: 0;
+}
+
+.publisher-manifest-details summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: #39413f;
+  cursor: pointer;
+  font-weight: 800;
+  list-style: none;
+}
+
+.publisher-manifest-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.publisher-manifest-details summary:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-muted);
+}
+
+.publisher-manifest-body {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+}
+
 .archive-ipfs-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2249,6 +2350,62 @@ button.compact-row-active {
   display: grid;
   gap: 9px;
   min-width: 0;
+}
+
+.publisher-inventory {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  border-top: 1px solid var(--line);
+  padding-top: 11px;
+}
+
+.publisher-inventory-list {
+  display: grid;
+  gap: 8px;
+}
+
+.publisher-inventory-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(140px, 0.35fr);
+  gap: 8px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.62);
+  padding: 9px;
+}
+
+.publisher-inventory-row > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.publisher-inventory-row strong {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 850;
+  line-height: 1.25;
+}
+
+.publisher-inventory-row span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.publisher-inventory .empty-state {
+  min-height: 96px;
+  grid-template-columns: auto minmax(0, 1fr);
+  place-items: center start;
+  text-align: left;
+}
+
+.publisher-inventory .empty-state svg {
+  grid-row: 1 / span 2;
 }
 
 .publish-draft-heading {
@@ -2331,6 +2488,7 @@ button.compact-row-active {
   line-height: 1.35;
 }
 
+.publisher-channel-card code,
 .publish-draft-row code,
 .publisher-result code {
   overflow-wrap: anywhere;
@@ -3275,6 +3433,7 @@ button.compact-row-active {
 
   .publisher-grid,
   .archive-ipfs-grid,
+  .publisher-inventory-row,
   .publish-draft-row,
   .publish-post-composer,
   .publish-post-row,

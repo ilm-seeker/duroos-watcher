@@ -1,4 +1,4 @@
-import type { ChannelPublishResult } from "./types";
+import type { ChannelPublishResult, PublisherChannel } from "./types";
 
 const NADDR_PATTERN = /(?:nostr:)?(naddr1[023456789acdefghjklmnpqrstuvwxyz]+)/i;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
@@ -51,6 +51,37 @@ export const buildChannelInvite = (result: ChannelPublishResult): ChannelInvite 
     canonicalChannelLink,
     inviteText,
     rawNaddr,
+    verificationCode,
+  };
+};
+
+export const buildPublisherChannelInvite = (
+  channel: PublisherChannel,
+): ChannelInvite | null => {
+  const rawNaddr = extractChannelRef(channel.naddr ?? channel.canonicalChannelLink ?? "");
+  const canonicalChannelLink =
+    channel.canonicalChannelLink ||
+    (rawNaddr ? canonicalizeChannelRef(rawNaddr) : null);
+
+  if (!canonicalChannelLink) {
+    return null;
+  }
+
+  const manifestSha256 = channel.lastManifestSha256 ?? "";
+  const verificationCode = verificationCodeFromManifestHash(manifestSha256);
+  const inviteText = [
+    "Duroos channel invite",
+    `Channel: ${channel.title}`,
+    `Open in Duroos Watcher: ${canonicalChannelLink}`,
+    `Manifest: ${manifestSha256 || "unavailable"}`,
+    `Check code: ${verificationCode}`,
+    "Preview before trusting this teacher key.",
+  ].join("\n");
+
+  return {
+    canonicalChannelLink,
+    inviteText,
+    rawNaddr: rawNaddr ?? canonicalChannelLink,
     verificationCode,
   };
 };

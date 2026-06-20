@@ -10,9 +10,10 @@ use models::{
     DownloadSourceSummary, ImportSummary, IngestSummary, Lesson, LessonNote,
     ManifestValidationReport, MediaStorageAudit, MediaStorageCleanup, NativePlaybackResult,
     NostrChannelPreview, OpenMediaResult, PhoneMediaScope, PhoneMediaSession,
-    PublishTeacherChannelRequest, PublisherChannel, PublisherEndpointTestReport,
-    PublisherEndpointTestRequest, PublisherProfile, RuntimeDiagnostics,
-    SavePublisherChannelRequest, TrustCuratorSummary, TrustedCurator, WatchState,
+    PublishTeacherChannelRequest, PublishedChannelItem, PublisherChannel,
+    PublisherEndpointTestReport, PublisherEndpointTestRequest, PublisherProfile,
+    RuntimeDiagnostics, SavePublisherChannelRequest, TrustCuratorSummary, TrustedCurator,
+    WatchState,
 };
 use phone_access::PhoneAccessState;
 
@@ -211,6 +212,14 @@ fn list_publisher_channels(app: tauri::AppHandle) -> Result<Vec<PublisherChannel
 }
 
 #[tauri::command]
+fn list_published_channel_items(
+    app: tauri::AppHandle,
+    channel_id: String,
+) -> Result<Vec<PublishedChannelItem>, String> {
+    publisher::list_published_channel_items(&app, channel_id)
+}
+
+#[tauri::command]
 fn save_publisher_channel(
     app: tauri::AppHandle,
     request: SavePublisherChannelRequest,
@@ -309,6 +318,7 @@ pub fn run() {
             remove_trusted_curator,
             list_publisher_profiles,
             list_publisher_channels,
+            list_published_channel_items,
             save_publisher_channel,
             create_publisher_profile,
             unlock_publisher_profile,

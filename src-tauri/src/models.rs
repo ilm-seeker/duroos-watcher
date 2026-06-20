@@ -426,6 +426,23 @@ pub struct PublisherChannel {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct PublishedChannelItem {
+    pub id: String,
+    pub channel_id: String,
+    pub item_type: String,
+    pub title: String,
+    pub content_type: String,
+    pub description: Option<String>,
+    pub origin_url: String,
+    pub retrieval_url: Option<String>,
+    pub sha256: String,
+    pub size_bytes: Option<i64>,
+    pub mime_type: Option<String>,
+    pub published_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct CreatePublisherProfileRequest {
     pub display_name: String,
     pub passphrase: String,

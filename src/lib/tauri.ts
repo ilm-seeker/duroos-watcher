@@ -18,6 +18,7 @@ import type {
   OpenMediaResult,
   PhoneMediaScope,
   PhoneMediaSession,
+  PublishedChannelItem,
   PublishTeacherChannelRequest,
   PublisherChannel,
   PublisherEndpointTestReport,
@@ -442,6 +443,16 @@ export const listPublisherChannels = async (): Promise<PublisherChannel[]> => {
   }
 
   return invoke<PublisherChannel[]>("list_publisher_channels");
+};
+
+export const listPublishedChannelItems = async (
+  channelId: string,
+): Promise<PublishedChannelItem[]> => {
+  if (!isTauriRuntime()) {
+    return [];
+  }
+
+  return invoke<PublishedChannelItem[]>("list_published_channel_items", { channelId });
 };
 
 export const savePublisherChannel = async (

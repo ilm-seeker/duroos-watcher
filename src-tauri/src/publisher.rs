@@ -4,8 +4,9 @@ use crate::{
         ArchiveMirrorConfig, ArchiveMirrorResult, BlossomServerConfig, BlossomUploadResult,
         ChannelPublishResult, CreatePublisherProfileRequest, IngestSummary, NostrChannelPreview,
         NostrRelayConfig, NostrRelayPublishResult, PublishTeacherChannelRequest,
-        PublishedLessonDraft, PublishedPostDraft, PublisherChannel, PublisherEndpointTestReport,
-        PublisherEndpointTestRequest, PublisherProfile, SavePublisherChannelRequest,
+        PublishedChannelItem, PublishedLessonDraft, PublishedPostDraft, PublisherChannel,
+        PublisherEndpointTestReport, PublisherEndpointTestRequest, PublisherProfile,
+        SavePublisherChannelRequest,
     },
 };
 use argon2::Argon2;
@@ -122,22 +123,6 @@ struct PublishedBlob {
     mime_type: String,
 }
 
-#[derive(Debug, Clone)]
-struct PublishedChannelItem {
-    id: String,
-    channel_id: String,
-    item_type: String,
-    title: String,
-    content_type: String,
-    description: Option<String>,
-    origin_url: String,
-    retrieval_url: Option<String>,
-    sha256: String,
-    size_bytes: Option<i64>,
-    mime_type: Option<String>,
-    published_at: String,
-}
-
 struct PublisherChannelUpsert<'a> {
     id: &'a str,
     profile_id: &'a str,
@@ -174,6 +159,14 @@ pub fn list_publisher_profiles(app: &AppHandle) -> Result<Vec<PublisherProfile>,
 pub fn list_publisher_channels(app: &AppHandle) -> Result<Vec<PublisherChannel>, String> {
     let connection = db::open_connection(app)?;
     fetch_publisher_channels(&connection)
+}
+
+pub fn list_published_channel_items(
+    app: &AppHandle,
+    channel_id: String,
+) -> Result<Vec<PublishedChannelItem>, String> {
+    let connection = db::open_connection(app)?;
+    fetch_published_channel_items_for_existing_channel(&connection, channel_id.trim())
 }
 
 pub fn save_publisher_channel(
@@ -1038,6 +1031,15 @@ fn publisher_channel_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Publi
         created_at: row.get(12)?,
         updated_at: row.get(13)?,
     })
+}
+
+fn fetch_published_channel_items_for_existing_channel(
+    connection: &Connection,
+    channel_id: &str,
+) -> Result<Vec<PublishedChannelItem>, String> {
+    publisher_channel_for_id(connection, channel_id)?
+        .ok_or_else(|| "Publisher channel was not found.".to_string())?;
+    fetch_published_channel_items(connection, channel_id)
 }
 
 fn resolve_publish_channel_identity(
@@ -3424,5 +3426,145 @@ mod tests {
             tag.first().map(String::as_str) == Some("r")
                 && tag.get(1).map(String::as_str) == Some("https://blossom.example/probe.txt")
         }));
+    }
+
+    fn publisher_inventory_test_connection() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE publisher_channels (
+                   id TEXT PRIMARY KEY,
+                   profile_id TEXT NOT NULL,
+                   title TEXT NOT NULL,
+                   description TEXT,
+                   channel_identifier TEXT NOT NULL UNIQUE,
+                   naddr TEXT,
+                   canonical_channel_link TEXT,
+                   last_manifest_sha256 TEXT,
+                   last_manifest_url TEXT,
+                   last_published_at TEXT,
+                   media_count INTEGER NOT NULL DEFAULT 0,
+                   post_count INTEGER NOT NULL DEFAULT 0,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 CREATE TABLE publisher_channel_items (
+                   id TEXT PRIMARY KEY,
+                   channel_id TEXT NOT NULL,
+                   item_type TEXT NOT NULL,
+                   title TEXT NOT NULL,
+                   content_type TEXT NOT NULL,
+                   description TEXT,
+                   origin_url TEXT NOT NULL,
+                   retrieval_url TEXT,
+                   sha256 TEXT NOT NULL,
+                   size_bytes INTEGER,
+                   mime_type TEXT,
+                   published_at TEXT NOT NULL
+                 );",
+            )
+            .unwrap();
+        connection
+    }
+
+    fn insert_test_publisher_channel(connection: &Connection, channel_id: &str) {
+        connection
+            .execute(
+                "INSERT INTO publisher_channels
+                 (id, profile_id, title, description, channel_identifier, naddr,
+                  canonical_channel_link, last_manifest_sha256, last_manifest_url,
+                  last_published_at, media_count, post_count, created_at, updated_at)
+                 VALUES (?1, 'profile-test', 'Lessons', NULL, ?2, NULL, NULL, NULL, NULL,
+                         NULL, 0, 0, '2026-06-20T10:00:00Z', '2026-06-20T10:00:00Z')",
+                params![channel_id, format!("duroos-channel:{channel_id}")],
+            )
+            .unwrap();
+    }
+
+    fn insert_test_published_item(
+        connection: &Connection,
+        id: &str,
+        channel_id: &str,
+        title: &str,
+        published_at: &str,
+    ) {
+        connection
+            .execute(
+                "INSERT INTO publisher_channel_items
+                 (id, channel_id, item_type, title, content_type, description, origin_url,
+                  retrieval_url, sha256, size_bytes, mime_type, published_at)
+                 VALUES (?1, ?2, 'media', ?3, 'audio', NULL, ?4, ?4, ?5, 1024,
+                         'audio/mpeg', ?6)",
+                params![
+                    id,
+                    channel_id,
+                    title,
+                    format!("https://blossom.example/{id}.mp3"),
+                    format!("{:0>64}", id.replace("item-", "")),
+                    published_at
+                ],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn published_channel_items_are_listed_by_publish_time_then_title() {
+        let connection = publisher_inventory_test_connection();
+        insert_test_publisher_channel(&connection, "channel-test");
+        insert_test_published_item(
+            &connection,
+            "item-later",
+            "channel-test",
+            "B later",
+            "2026-06-20T12:00:00Z",
+        );
+        insert_test_published_item(
+            &connection,
+            "item-same-b",
+            "channel-test",
+            "B same",
+            "2026-06-20T10:00:00Z",
+        );
+        insert_test_published_item(
+            &connection,
+            "item-same-a",
+            "channel-test",
+            "A same",
+            "2026-06-20T10:00:00Z",
+        );
+
+        let items = fetch_published_channel_items_for_existing_channel(&connection, "channel-test")
+            .unwrap();
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["item-same-a", "item-same-b", "item-later"]
+        );
+    }
+
+    #[test]
+    fn published_channel_items_return_empty_for_known_channel_without_items() {
+        let connection = publisher_inventory_test_connection();
+        insert_test_publisher_channel(&connection, "channel-empty");
+
+        let items =
+            fetch_published_channel_items_for_existing_channel(&connection, "channel-empty")
+                .unwrap();
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn published_channel_items_reject_unknown_channels() {
+        let connection = publisher_inventory_test_connection();
+
+        let error =
+            fetch_published_channel_items_for_existing_channel(&connection, "channel-missing")
+                .unwrap_err();
+
+        assert_eq!(error, "Publisher channel was not found.");
     }
 }

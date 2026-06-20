@@ -58,6 +58,7 @@ import {
   ingestSourceUrl,
   importLocalFiles,
   isTauriRuntime,
+  listPublishedChannelItems,
   listPublisherChannels,
   listPublisherProfiles,
   openPdfFile,
@@ -85,6 +86,7 @@ import {
 import type { ManifestValidationReport } from "./domain/collectionManifest";
 import {
   buildChannelInvite,
+  buildPublisherChannelInvite,
   canonicalizeChannelRef,
 } from "./domain/channelInvite";
 import {
@@ -120,6 +122,7 @@ import type {
   MediaFile,
   NostrChannelPreview,
   PhoneMediaSession,
+  PublishedChannelItem,
   PublishedLessonDraft,
   PublishedPostDraft,
   PublisherChannel,
@@ -1680,7 +1683,7 @@ const viewTitle = (viewMode: ViewMode): string => {
     case "relays":
       return "Channels";
     case "publish":
-      return "Teacher Channel";
+      return "Teacher Publishing";
     case "sources":
       return "Source Control";
     case "queue":
@@ -3847,20 +3850,6 @@ const RelaysView = ({
 
   return (
     <div className="wide-page relays-page">
-      <div className="page-heading relays-heading">
-        <div>
-          <h2>Channels</h2>
-          <p>
-            Follow signed teacher and curator channels, review trust, and download approved lessons
-            into the local library.
-          </p>
-        </div>
-        <div className="relays-heading-status">
-          <StatusChip label="Signed manifests" tone="positive" />
-          <StatusChip label="No central catalog" tone="neutral" />
-        </div>
-      </div>
-
       <div className="relay-layout">
         <section className="relay-main">
           <section className="feed-follow-panel" aria-label="Followed channels">
@@ -3873,6 +3862,10 @@ const RelaysView = ({
                 Follow shared channel links here. Review trust and file availability before
                 refreshing or downloading lessons.
               </p>
+              <div className="relays-heading-status">
+                <StatusChip label="Signed manifests" tone="positive" />
+                <StatusChip label="No central catalog" tone="neutral" />
+              </div>
             </div>
             <button type="button" className="secondary-action" onClick={() => onOpenImport("feed")}>
               <Rss size={16} />
@@ -4024,7 +4017,13 @@ const TeacherPublisherPanel = ({
   const [endpointTestReport, setEndpointTestReport] =
     useState<PublisherEndpointTestReport | null>(null);
   const [testedEndpointSignature, setTestedEndpointSignature] = useState("");
+  const [publishedItemsByChannel, setPublishedItemsByChannel] = useState<
+    Record<string, PublishedChannelItem[]>
+  >({});
+  const [isLoadingPublishedItems, setIsLoadingPublishedItems] = useState(false);
+  const [publishedItemsError, setPublishedItemsError] = useState("");
   const [isWorking, setIsWorking] = useState(false);
+  const publisherComposerRef = useRef<HTMLElement | null>(null);
   const selectedProfile = profiles.find((profile) => profile.id === profileId);
   const profileChannels = useMemo(
     () =>
@@ -4091,6 +4090,48 @@ const TeacherPublisherPanel = ({
     setChannelTitle(selectedChannel.title);
     setChannelDescription(selectedChannel.description ?? "");
   }, [selectedChannel]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    if (!profileChannels.length) {
+      setPublishedItemsByChannel({});
+      setPublishedItemsError("");
+      setIsLoadingPublishedItems(false);
+      return () => {
+        isMounted = false;
+      };
+    }
+
+    setIsLoadingPublishedItems(true);
+    setPublishedItemsError("");
+
+    Promise.all(
+      profileChannels.map(async (channel) => {
+        const items = await listPublishedChannelItems(channel.id);
+        return [channel.id, items] as const;
+      }),
+    )
+      .then((entries) => {
+        if (isMounted) {
+          setPublishedItemsByChannel(Object.fromEntries(entries));
+        }
+      })
+      .catch((error: unknown) => {
+        if (isMounted) {
+          setPublishedItemsError(error instanceof Error ? error.message : String(error));
+        }
+      })
+      .finally(() => {
+        if (isMounted) {
+          setIsLoadingPublishedItems(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [profileChannels]);
 
   const relays = endpointLines(relayText).map((url) => ({ url }));
   const blossomServers = endpointLines(blossomText).map((url) => ({ url }));
@@ -4261,6 +4302,12 @@ const TeacherPublisherPanel = ({
   const publishInvite = useMemo(
     () => (publishResult ? buildChannelInvite(publishResult) : null),
     [publishResult],
+  );
+  const publishedProfileChannels = profileChannels.filter(
+    (channel) =>
+      Boolean(channel.lastPublishedAt) ||
+      Boolean(channel.lastManifestSha256) ||
+      channel.mediaCount + channel.postCount > 0,
   );
 
   useEffect(() => {
@@ -4535,17 +4582,29 @@ const TeacherPublisherPanel = ({
     }
   };
 
+  const copyTextToClipboard = async (
+    value: string,
+    successMessage: string,
+    failureMessage: string,
+  ) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setPanelNotice(successMessage);
+    } catch {
+      setPanelNotice(failureMessage);
+    }
+  };
+
   const copyChannelLink = async () => {
     if (!publishInvite) {
       return;
     }
 
-    try {
-      await navigator.clipboard.writeText(publishInvite.canonicalChannelLink);
-      setPanelNotice("Channel link copied.");
-    } catch {
-      setPanelNotice("Copy failed. Select and copy the channel link manually.");
-    }
+    await copyTextToClipboard(
+      publishInvite.canonicalChannelLink,
+      "Channel link copied.",
+      "Copy failed. Select and copy the channel link manually.",
+    );
   };
 
   const copyInviteText = async () => {
@@ -4553,12 +4612,45 @@ const TeacherPublisherPanel = ({
       return;
     }
 
-    try {
-      await navigator.clipboard.writeText(publishInvite.inviteText);
-      setPanelNotice("Channel invite copied.");
-    } catch {
-      setPanelNotice("Copy failed. Select and copy the invite text manually.");
+    await copyTextToClipboard(
+      publishInvite.inviteText,
+      "Channel invite copied.",
+      "Copy failed. Select and copy the invite text manually.",
+    );
+  };
+
+  const startChannelUpdate = (channel: PublisherChannel) => {
+    selectPublisherChannel(channel.id);
+    setPanelNotice(`Ready to publish another update to ${channel.title}.`);
+    publisherComposerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const copyPublishedChannelLink = async (channel: PublisherChannel) => {
+    const invite = buildPublisherChannelInvite(channel);
+    if (!invite) {
+      setPanelNotice("Publish this channel once before sharing its subscriber link.");
+      return;
     }
+
+    await copyTextToClipboard(
+      invite.canonicalChannelLink,
+      `Copied ${channel.title} subscriber link.`,
+      "Copy failed. Select and copy the channel link manually.",
+    );
+  };
+
+  const copyPublishedChannelInvite = async (channel: PublisherChannel) => {
+    const invite = buildPublisherChannelInvite(channel);
+    if (!invite) {
+      setPanelNotice("Publish this channel once before copying an invite.");
+      return;
+    }
+
+    await copyTextToClipboard(
+      invite.inviteText,
+      `Copied ${channel.title} invite.`,
+      "Copy failed. Select and copy the invite text manually.",
+    );
   };
 
   const shareInvite = async () => {
@@ -4598,7 +4690,76 @@ const TeacherPublisherPanel = ({
   };
 
   return (
-    <section className="publisher-panel">
+    <>
+      <section className="publisher-owner-panel" aria-label="Published channel management">
+        <div className="publisher-panel-header">
+          <div className="publisher-title-copy">
+            <span className="publisher-kicker">Owned channels</span>
+            <h2>My Published Channels</h2>
+            <p>
+              Manage local channel records, share subscriber links, and start the next signed
+              update from the channel learners already follow.
+            </p>
+          </div>
+          <div className="publisher-trust-stack" aria-label="Owned channel summary">
+            <StatusChip
+              label={selectedProfile ? selectedProfile.displayName : "No profile"}
+              tone={selectedProfile ? "positive" : "warning"}
+            />
+            <StatusChip
+              label={`${profileChannels.length} saved channel${profileChannels.length === 1 ? "" : "s"}`}
+              tone="neutral"
+            />
+            <StatusChip
+              label={`${publishedProfileChannels.length} published`}
+              tone={publishedProfileChannels.length ? "positive" : "neutral"}
+            />
+          </div>
+        </div>
+
+        {!selectedProfile ? (
+          <EmptyState
+            icon={KeyRound}
+            title="No publisher profile"
+            detail="Create a local publisher profile below before managing teacher channels."
+          />
+        ) : profileChannels.length ? (
+          <>
+            {isLoadingPublishedItems ? (
+              <p className="publisher-inline-note" role="status">
+                Loading published content inventory...
+              </p>
+            ) : null}
+            {publishedItemsError ? (
+              <p className="publisher-notice" role="alert">
+                {publishedItemsError}
+              </p>
+            ) : null}
+            <div className="publisher-channel-dashboard">
+              {profileChannels.map((channel) => (
+                <PublishedChannelCard
+                  key={channel.id}
+                  channel={channel}
+                  profile={selectedProfile}
+                  items={publishedItemsByChannel[channel.id] ?? []}
+                  isLoading={isLoadingPublishedItems}
+                  onCopyInvite={copyPublishedChannelInvite}
+                  onCopyLink={copyPublishedChannelLink}
+                  onUpdate={startChannelUpdate}
+                />
+              ))}
+            </div>
+          </>
+        ) : (
+          <EmptyState
+            icon={Rss}
+            title="No owned channels"
+            detail="Save a channel below, then publish media or text posts to create the subscriber link."
+          />
+        )}
+      </section>
+
+      <section className="publisher-panel" ref={publisherComposerRef}>
       <div className="publisher-panel-header">
         <div className="publisher-title-copy">
           <span className="publisher-kicker">Teacher publisher</span>
@@ -5092,7 +5253,161 @@ const TeacherPublisherPanel = ({
         </div>
       ) : null}
 
-    </section>
+      </section>
+    </>
+  );
+};
+
+const PublishedChannelCard = ({
+  channel,
+  profile,
+  items,
+  isLoading,
+  onCopyInvite,
+  onCopyLink,
+  onUpdate,
+}: {
+  channel: PublisherChannel;
+  profile: PublisherProfile;
+  items: PublishedChannelItem[];
+  isLoading: boolean;
+  onCopyInvite: (channel: PublisherChannel) => void;
+  onCopyLink: (channel: PublisherChannel) => void;
+  onUpdate: (channel: PublisherChannel) => void;
+}) => {
+  const invite = buildPublisherChannelInvite(channel);
+  const totalItems = channel.mediaCount + channel.postCount;
+  const hasPublishMetadata =
+    Boolean(channel.lastPublishedAt) || Boolean(channel.lastManifestSha256) || totalItems > 0;
+  const manifestHash = compactHashReference(channel.lastManifestSha256 ?? "");
+  const manifestUrl = channel.lastManifestUrl
+    ? compactUrlReference(channel.lastManifestUrl)
+    : null;
+
+  return (
+    <article className="publisher-channel-card">
+      <div className="publisher-channel-card-main">
+        <div className="channel-title-block">
+          <h3>{channel.title}</h3>
+          <span>{profile.displayName}</span>
+        </div>
+        {channel.description ? <p>{channel.description}</p> : null}
+        <div className="publisher-channel-card-meta">
+          <StatusChip label={`${totalItems} signed items`} tone={totalItems ? "positive" : "neutral"} />
+          <StatusChip label={`${channel.mediaCount} media`} tone={channel.mediaCount ? "positive" : "neutral"} />
+          <StatusChip label={`${channel.postCount} posts`} tone={channel.postCount ? "positive" : "neutral"} />
+          <StatusChip
+            label={channel.lastPublishedAt ? `Published ${formatDate(channel.lastPublishedAt)}` : "Not published"}
+            tone={channel.lastPublishedAt ? "positive" : "warning"}
+          />
+          <StatusChip
+            label={invite ? "Shareable link" : "No subscriber link"}
+            tone={invite ? "positive" : "warning"}
+          />
+        </div>
+      </div>
+
+      <div className="publisher-channel-card-actions">
+        <button type="button" className="primary-action" onClick={() => onUpdate(channel)}>
+          <UploadCloud size={16} />
+          <span>Update</span>
+        </button>
+        <button
+          type="button"
+          className="secondary-action"
+          onClick={() => onCopyLink(channel)}
+          disabled={!invite}
+          title={invite ? "Copy the subscriber link." : "Publish this channel before sharing it."}
+        >
+          <Copy size={16} />
+          <span>Copy Link</span>
+        </button>
+        <button
+          type="button"
+          className="secondary-action"
+          onClick={() => onCopyInvite(channel)}
+          disabled={!invite}
+          title={invite ? "Copy a shareable channel invite." : "Publish this channel before copying an invite."}
+        >
+          <Copy size={16} />
+          <span>Copy Invite</span>
+        </button>
+        {channel.lastManifestUrl || channel.lastManifestSha256 ? (
+          <details className="publisher-manifest-details">
+            <summary>
+              <FileText size={16} />
+              <span>Show Manifest</span>
+            </summary>
+            <div className="publisher-manifest-body">
+              {manifestUrl ? (
+                <code title={manifestUrl.full}>{manifestUrl.label}</code>
+              ) : null}
+              {channel.lastManifestSha256 ? (
+                <code title={manifestHash.full}>{manifestHash.label}</code>
+              ) : null}
+              {channel.naddr ? <code title={channel.naddr}>{compactUrlReference(channel.naddr).label}</code> : null}
+            </div>
+          </details>
+        ) : (
+          <button
+            type="button"
+            className="secondary-action"
+            disabled
+            title="Publish this channel before a manifest is available."
+          >
+            <FileText size={16} />
+            <span>Show Manifest</span>
+          </button>
+        )}
+      </div>
+
+      <div className="publisher-inventory" aria-label={`${channel.title} published content`}>
+        <div className="publish-draft-heading">
+          <strong>Published content</strong>
+          <span>{items.length} recorded</span>
+        </div>
+        {isLoading ? (
+          <p className="publisher-inline-note">Loading inventory...</p>
+        ) : items.length ? (
+          <div className="publisher-inventory-list">
+            {items.map((item) => {
+              const itemHash = compactHashReference(item.sha256);
+              return (
+                <div className="publisher-inventory-row" key={item.id}>
+                  <div>
+                    <strong>{item.title}</strong>
+                    <span>
+                      {item.contentType.replace(/-/g, " ")} · {formatDate(item.publishedAt)}
+                    </span>
+                  </div>
+                  <div className="publisher-inventory-meta">
+                    <StatusChip
+                      label={item.itemType === "post" ? "Text post" : "Media"}
+                      tone={item.itemType === "post" ? "neutral" : "positive"}
+                    />
+                    {item.sizeBytes ? (
+                      <StatusChip label={formatBytes(item.sizeBytes)} tone="neutral" />
+                    ) : null}
+                    {item.mimeType ? <StatusChip label={item.mimeType} tone="neutral" /> : null}
+                  </div>
+                  <code title={itemHash.full}>{itemHash.label}</code>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <EmptyState
+            icon={ListVideo}
+            title={hasPublishMetadata ? "No item inventory" : "No published content yet"}
+            detail={
+              hasPublishMetadata
+                ? "This channel has publish metadata, but no item rows are recorded locally."
+                : "Publish media files or text posts to record the channel content history."
+            }
+          />
+        )}
+      </div>
+    </article>
   );
 };
 
@@ -5355,7 +5670,7 @@ const SourcesView = ({
     <div className="wide-page">
       <div className="page-heading">
         <div>
-          <h2>Source Capability Matrix</h2>
+          <h2>Capability Matrix</h2>
           <p>Platform-level support is separate from playlists, feeds, and channels you add.</p>
         </div>
         <StatusChip label="No credentials in exports" tone="positive" />
@@ -5573,11 +5888,8 @@ const QueueView = ({
 
   return (
     <div className="wide-page">
-      <div className="page-heading">
-        <div>
-          <h2>Update Queue</h2>
-          <p>Refreshes and downloads are visible, reversible, and source-aware.</p>
-        </div>
+      <div className="page-heading page-intro">
+        <p>Refreshes and downloads are visible, reversible, and source-aware.</p>
         <button
           type="button"
           className="secondary-action"

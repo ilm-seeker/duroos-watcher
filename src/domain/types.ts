@@ -400,6 +400,21 @@ export interface PublisherChannel {
   updatedAt: string;
 }
 
+export interface PublishedChannelItem {
+  id: string;
+  channelId: string;
+  itemType: string;
+  title: string;
+  contentType: string;
+  description?: string;
+  originUrl: string;
+  retrievalUrl?: string;
+  sha256: string;
+  sizeBytes?: number;
+  mimeType?: string;
+  publishedAt: string;
+}
+
 export interface CreatePublisherProfileRequest {
   displayName: string;
   passphrase: string;
