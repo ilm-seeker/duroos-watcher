@@ -16,13 +16,15 @@ if (!existsSync(sourceApp)) {
   fail(`Build artifact is missing: ${sourceApp}\nRun npm run tauri:build:app first.`);
 }
 
-const runningApp = spawnSync("pgrep", ["-x", "Duroos Watcher"], { encoding: "utf8" });
-if (runningApp.status === 0) {
-  fail("Duroos Watcher is running. Quit it before replacing the app in /Applications.");
-}
+for (const processName of ["Duroos Watcher", "duroos-watcher"]) {
+  const runningApp = spawnSync("pgrep", ["-x", processName], { encoding: "utf8" });
+  if (runningApp.status === 0) {
+    fail("Duroos Watcher is running. Quit it before replacing the app in /Applications.");
+  }
 
-if (runningApp.error) {
-  fail(`Could not check whether Duroos Watcher is running: ${runningApp.error.message}`);
+  if (runningApp.error) {
+    fail(`Could not check whether Duroos Watcher is running: ${runningApp.error.message}`);
+  }
 }
 
 rmSync(tempApp, { force: true, recursive: true });
