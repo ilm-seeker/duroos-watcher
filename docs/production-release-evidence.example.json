@@ -3,7 +3,17 @@
   "release": {
     "version": "0.1.0",
     "tag": "v0.1.0",
-    "commit": "REPLACE_WITH_RELEASE_COMMIT_SHA"
+    "commit": "REPLACE_WITH_RELEASE_COMMIT_SHA",
+    "productionPlatforms": ["macos", "windows"],
+    "alphaPlatforms": ["linux"],
+    "knownPlatformBlockers": [
+      {
+        "platform": "linux",
+        "id": "GHSA-wrw7-89jp-8q8g",
+        "status": "upstream glib advisory tracked; Linux artifact remains alpha until resolved or accepted",
+        "evidence": ["Dependabot alert and cargo tree evidence pointer"]
+      }
+    ]
   },
   "ci": {
     "runId": "REPLACE_WITH_CI_RUN_ID",
@@ -102,8 +112,8 @@
       ]
     },
     "dependabot": {
-      "openAlerts": 0,
-      "openAlertIds": [],
+      "openAlerts": 1,
+      "openAlertIds": ["GHSA-wrw7-89jp-8q8g"],
       "evidence": [
         "gh api repos/ilm-seeker/duroos-watcher/dependabot/alerts --paginate output pointer"
       ]
@@ -127,8 +137,8 @@
       "evidence": ["signtool verify output pointer"]
     },
     "linux": {
-      "packageReviewPassed": true,
-      "evidence": ["AppImage/deb install, metadata, dependency, and launch review output pointer"]
+      "packageReviewPassed": false,
+      "evidence": ["Linux AppImage/deb artifact, dependency, and launch smoke-test evidence pointer; alpha only"]
     }
   },
   "manualQa": [
@@ -158,27 +168,6 @@
       "date": "2026-06-18",
       "tester": "REPLACE_WITH_TESTER",
       "artifact": "REPLACE_WITH_SIGNED_WINDOWS_ARTIFACT",
-      "result": "pass",
-      "checks": {
-        "installAndLaunch": true,
-        "importVideoAudioPdf": true,
-        "followSignedChannel": true,
-        "refreshFollowedChannel": true,
-        "downloadMissingMedia": true,
-        "publishChannelWithRelayAndBlossom": true,
-        "offlineModeBlocksRemoteFetch": true,
-        "webviewPlayback": true,
-        "nativePlayerFallback": true,
-        "phoneSharingStartStop": true,
-        "privacyLeakInspection": true
-      },
-      "notes": ["manual QA notes or log pointer"]
-    },
-    {
-      "platform": "linux",
-      "date": "2026-06-18",
-      "tester": "REPLACE_WITH_TESTER",
-      "artifact": "REPLACE_WITH_LINUX_ARTIFACT",
       "result": "pass",
       "checks": {
         "installAndLaunch": true,

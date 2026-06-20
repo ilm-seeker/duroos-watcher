@@ -632,6 +632,39 @@ button:focus-visible {
   line-height: 1.55;
 }
 
+.first-run-path-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.first-run-path {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fbfcf8;
+  padding: 14px;
+}
+
+.first-run-path > div:nth-child(2) {
+  display: grid;
+  gap: 6px;
+}
+
+.first-run-path strong {
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 850;
+}
+
+.first-run-path span {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .first-run-actions,
 .first-run-trust-row {
   display: flex;
@@ -3021,6 +3054,10 @@ button.compact-row-active {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .first-run-path-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .detail-column {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -3224,6 +3261,17 @@ button.compact-row-active {
 }
 
 @media (max-width: 620px) {
+  body {
+    overflow-x: hidden;
+  }
+
+  .app-shell,
+  .sidebar,
+  .workspace {
+    width: 100vw;
+    max-width: 100vw;
+  }
+
   .sidebar {
     gap: 10px;
     padding: 12px;
@@ -3246,6 +3294,67 @@ button.compact-row-active {
     width: 42px;
     height: 40px;
     padding: 10px;
+  }
+
+  .workspace,
+  .top-bar,
+  .top-bar-main,
+  .top-actions,
+  .first-run-layout,
+  .first-run-panel,
+  .first-run-path,
+  .first-run-side {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .top-actions,
+  .runtime-status-group {
+    align-items: flex-start;
+    justify-content: flex-start;
+  }
+
+  .top-actions {
+    display: grid;
+    width: 100%;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .runtime-status-group {
+    display: flex;
+    flex-wrap: wrap;
+    width: 100%;
+  }
+
+  .mode-toggle,
+  .primary-action,
+  .secondary-action {
+    max-width: 100%;
+  }
+
+  .first-run-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .first-run-actions .primary-action,
+  .first-run-actions .secondary-action {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .first-run-panel {
+    padding: 18px;
+  }
+
+  .first-run-copy p,
+  .first-run-path span {
+    overflow-wrap: anywhere;
+  }
+
+  .first-run-copy h2 {
+    font-size: 24px;
+    overflow-wrap: anywhere;
   }
 
   .lesson-row,

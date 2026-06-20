@@ -53,6 +53,9 @@ export const getRuntimeDiagnostics = async (): Promise<RuntimeDiagnostics> => {
     return {
       desktopRuntimeAvailable: false,
       ytDlpAvailable: false,
+      requiredMediaToolsAvailable: false,
+      mediaToolSource: "missing",
+      missingMediaTools: ["yt-dlp", "ffmpeg", "ffprobe"],
       nativePlaybackAvailable: false,
       ytDlpCookiesConfigured: false,
       messages: ["Open the desktop app to check local downloader tools."],

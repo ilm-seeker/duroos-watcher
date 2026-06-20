@@ -17,7 +17,8 @@ src-tauri/target/
 src-tauri/gen/schemas/
 src-tauri/.tauri/
 src-tauri/tauri.windows.conf.json
-src-tauri/binaries/vendor/
+src-tauri/binaries/vendor/*
+!src-tauri/binaries/vendor/.gitkeep
 
 duroos.collection.json
 artifact-audit.json

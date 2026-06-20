@@ -32,17 +32,89 @@ requireString(release.tag, "release.tag is required.");
 if (release.tag && !release.tag.startsWith(`v${packageJson.version}`)) {
   failures.push(`release.tag must start with v${packageJson.version}.`);
 }
+const platformScope = releasePlatformScope(release);
 
 validateCi(evidence.ci);
 validateReleaseWorkflow(evidence.releaseWorkflow, release.tag);
 validateArtifactAudits(evidence.artifactAudits);
 validateMediaToolReports(evidence.mediaToolReports);
-validateSecurityAlerts(evidence.securityAlerts);
-validateSigning(evidence.signing);
-validateManualQa(evidence.manualQa);
+validateSecurityAlerts(evidence.securityAlerts, platformScope);
+validateSigning(evidence.signing, platformScope);
+validateManualQa(evidence.manualQa, platformScope);
 
 failIfNeeded();
 console.log("Production release evidence gate passed.");
+
+function releasePlatformScope(release) {
+  const production = normalizePlatforms(release.productionPlatforms, "release.productionPlatforms");
+  const alpha = normalizePlatforms(release.alphaPlatforms ?? [], "release.alphaPlatforms");
+  const productionSet = new Set(production);
+  const alphaSet = new Set(alpha);
+
+  if (!productionSet.has("macos")) {
+    failures.push("release.productionPlatforms must include macos.");
+  }
+  if (!productionSet.has("windows")) {
+    failures.push("release.productionPlatforms must include windows.");
+  }
+  if (!productionSet.has("linux") && !alphaSet.has("linux")) {
+    failures.push("release.alphaPlatforms must include linux when linux is not production.");
+  }
+
+  for (const platform of alphaSet) {
+    if (productionSet.has(platform)) {
+      failures.push(`release platform ${platform} cannot be both production and alpha.`);
+    }
+  }
+
+  const knownPlatformBlockers = Array.isArray(release.knownPlatformBlockers)
+    ? release.knownPlatformBlockers
+    : [];
+  if (release.knownPlatformBlockers !== undefined && !Array.isArray(release.knownPlatformBlockers)) {
+    failures.push("release.knownPlatformBlockers must be an array when present.");
+  }
+
+  for (const blocker of knownPlatformBlockers) {
+    requireKnownPlatform(blocker?.platform, "release.knownPlatformBlockers.platform");
+    requireString(blocker?.id, "release.knownPlatformBlockers.id is required.");
+    requireString(blocker?.status, "release.knownPlatformBlockers.status is required.");
+    requireEvidenceList(blocker?.evidence, "release.knownPlatformBlockers.evidence");
+    if (productionSet.has(blocker?.platform)) {
+      failures.push(`release.knownPlatformBlockers cannot apply to production platform ${blocker.platform}.`);
+    }
+  }
+
+  return { production, alpha, knownPlatformBlockers };
+}
+
+function normalizePlatforms(value, label) {
+  const knownPlatforms = new Set(["macos", "windows", "linux"]);
+  if (!Array.isArray(value) || value.length === 0) {
+    failures.push(`${label} must be a non-empty array.`);
+    return [];
+  }
+
+  const platforms = [];
+  const seen = new Set();
+  for (const platform of value) {
+    requireKnownPlatform(platform, label);
+    if (seen.has(platform)) {
+      failures.push(`${label} contains duplicate platform ${platform}.`);
+      continue;
+    }
+    if (knownPlatforms.has(platform)) {
+      platforms.push(platform);
+      seen.add(platform);
+    }
+  }
+  return platforms;
+}
+
+function requireKnownPlatform(platform, label) {
+  if (!["macos", "windows", "linux"].includes(platform)) {
+    failures.push(`${label} must be one of macos, windows, or linux.`);
+  }
+}
 
 function validateCi(ci) {
   if (!ci || typeof ci !== "object") {
@@ -198,7 +270,7 @@ function validateMediaToolReports(reports) {
   }
 }
 
-function validateSecurityAlerts(securityAlerts) {
+function validateSecurityAlerts(securityAlerts, platformScope) {
   if (!securityAlerts || typeof securityAlerts !== "object") {
     failures.push("securityAlerts evidence is required.");
     return;
@@ -213,57 +285,111 @@ function validateSecurityAlerts(securityAlerts) {
     `securityAlerts.commit must match expected commit ${expectedCommit}.`,
   );
 
-  validateAlertGroup(securityAlerts.codeScanning, "securityAlerts.codeScanning");
-  validateAlertGroup(securityAlerts.dependabot, "securityAlerts.dependabot");
+  validateAlertGroup(securityAlerts.codeScanning, "securityAlerts.codeScanning", []);
+  validateAlertGroup(
+    securityAlerts.dependabot,
+    "securityAlerts.dependabot",
+    allowedAlphaSecurityAlertIds(platformScope),
+  );
 }
 
-function validateAlertGroup(alertGroup, label) {
+function allowedAlphaSecurityAlertIds(platformScope) {
+  const alphaPlatforms = new Set(platformScope.alpha);
+  const productionPlatforms = new Set(platformScope.production);
+  return platformScope.knownPlatformBlockers
+    .filter((blocker) => alphaPlatforms.has(blocker.platform) && !productionPlatforms.has(blocker.platform))
+    .map((blocker) => blocker.id);
+}
+
+function validateAlertGroup(alertGroup, label, allowedOpenAlertIds) {
   if (!alertGroup || typeof alertGroup !== "object") {
     failures.push(`${label} evidence is required.`);
     return;
   }
 
   requireNonNegativeInteger(alertGroup.openAlerts, `${label}.openAlerts`);
-  if (alertGroup.openAlerts !== 0) {
-    failures.push(`${label}.openAlerts must be 0 for production release. Actual: ${alertGroup.openAlerts}.`);
-  }
   requireEvidenceList(alertGroup.evidence, `${label}.evidence`);
+
+  if (alertGroup.openAlerts === 0) {
+    if (alertGroup.openAlertIds !== undefined) {
+      if (!Array.isArray(alertGroup.openAlertIds)) {
+        failures.push(`${label}.openAlertIds must be an array when present.`);
+      } else if (alertGroup.openAlertIds.length > 0) {
+        failures.push(`${label}.openAlertIds must be empty when openAlerts is 0.`);
+      }
+    }
+    return;
+  }
+
+  if (!allowedOpenAlertIds.length) {
+    failures.push(`${label}.openAlerts must be 0 for production release. Actual: ${alertGroup.openAlerts}.`);
+    return;
+  }
 
   if (alertGroup.openAlertIds !== undefined) {
     if (!Array.isArray(alertGroup.openAlertIds)) {
       failures.push(`${label}.openAlertIds must be an array when present.`);
-    } else if (alertGroup.openAlertIds.length > 0) {
-      failures.push(`${label}.openAlertIds must be empty for production release.`);
+    }
+  } else {
+    failures.push(`${label}.openAlertIds must list each allowed alpha-platform alert.`);
+    return;
+  }
+
+  if (!Array.isArray(alertGroup.openAlertIds)) {
+    return;
+  }
+
+  if (alertGroup.openAlertIds.length !== alertGroup.openAlerts) {
+    failures.push(`${label}.openAlertIds count must match ${label}.openAlerts.`);
+  }
+
+  for (const alertId of alertGroup.openAlertIds) {
+    if (typeof alertId !== "string" || !alertId.trim()) {
+      failures.push(`${label}.openAlertIds entries must be non-empty strings.`);
+      continue;
+    }
+    if (!allowedOpenAlertIds.some((allowedId) => alertId === allowedId || alertId.includes(allowedId))) {
+      failures.push(`${label}.openAlertIds contains unapproved production blocker: ${alertId}.`);
     }
   }
 }
 
-function validateSigning(signing) {
+function validateSigning(signing, platformScope) {
   if (!signing || typeof signing !== "object") {
     failures.push("signing evidence is required.");
     return;
   }
 
-  requireTrue(signing.macos?.appSigned, "signing.macos.appSigned must be true.");
-  requireTrue(signing.macos?.dmgSigned, "signing.macos.dmgSigned must be true.");
-  requireTrue(signing.macos?.notarized, "signing.macos.notarized must be true.");
-  requireTrue(signing.macos?.stapled, "signing.macos.stapled must be true.");
-  requireEvidenceList(signing.macos?.evidence, "signing.macos.evidence");
+  const production = new Set(platformScope.production);
 
-  requireTrue(signing.windows?.installerSigned, "signing.windows.installerSigned must be true.");
-  requireEvidenceList(signing.windows?.evidence, "signing.windows.evidence");
+  if (production.has("macos")) {
+    requireTrue(signing.macos?.appSigned, "signing.macos.appSigned must be true.");
+    requireTrue(signing.macos?.dmgSigned, "signing.macos.dmgSigned must be true.");
+    requireTrue(signing.macos?.notarized, "signing.macos.notarized must be true.");
+    requireTrue(signing.macos?.stapled, "signing.macos.stapled must be true.");
+    requireEvidenceList(signing.macos?.evidence, "signing.macos.evidence");
+  }
 
-  requireTrue(signing.linux?.packageReviewPassed, "signing.linux.packageReviewPassed must be true.");
-  requireEvidenceList(signing.linux?.evidence, "signing.linux.evidence");
+  if (production.has("windows")) {
+    requireTrue(signing.windows?.installerSigned, "signing.windows.installerSigned must be true.");
+    requireEvidenceList(signing.windows?.evidence, "signing.windows.evidence");
+  }
+
+  if (production.has("linux")) {
+    requireTrue(signing.linux?.packageReviewPassed, "signing.linux.packageReviewPassed must be true.");
+    requireEvidenceList(signing.linux?.evidence, "signing.linux.evidence");
+  } else if (platformScope.alpha.includes("linux") && signing.linux !== undefined) {
+    requireEvidenceList(signing.linux?.evidence, "signing.linux.evidence");
+  }
 }
 
-function validateManualQa(manualQa) {
+function validateManualQa(manualQa, platformScope) {
   if (!Array.isArray(manualQa)) {
     failures.push("manualQa must be an array.");
     return;
   }
 
-  const platforms = ["macos", "windows", "linux"];
+  const platforms = platformScope.production;
   const requiredChecks = [
     "installAndLaunch",
     "importVideoAudioPdf",

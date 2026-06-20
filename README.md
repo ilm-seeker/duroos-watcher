@@ -118,7 +118,7 @@ Platform setup:
 
 ## Media Tools
 
-Downloading source media uses direct HTTP for feed enclosures such as audio, video, and PDFs when available. Platform video pages use `yt-dlp`; the app checks common install paths plus `python3 -m yt_dlp` and surfaces readiness in the UI.
+Downloading source media uses direct HTTP for feed enclosures such as audio, video, and PDFs when available. Platform video pages use `yt-dlp`; media validation, thumbnails, and WebView-compatible transcodes use `ffmpeg` and `ffprobe`. The app checks bundled release tools first, then common system install paths and `python3 -m yt_dlp`, and surfaces whether required tools are bundled, system-provided, mixed, or missing.
 
 Keep `yt-dlp` current. On macOS with Homebrew:
 
@@ -135,7 +135,7 @@ Release media tools are pinned in `src-tauri/binaries/media-tools.manifest.json`
 npm run media-tools:fetch -- --target=aarch64-apple-darwin
 ```
 
-The generated `src-tauri/binaries/vendor/<target>/media-tools-report.json` is release evidence and must match the manifest before those binaries are copied into a production artifact.
+The generated `src-tauri/binaries/vendor/<target>/media-tools-report.json` is release evidence and must match the manifest before those binaries are bundled into a production artifact.
 
 ## Watch On Phone
 
@@ -145,14 +145,15 @@ Phone access is media-only in v1. PDFs and saved posts are not included in the p
 
 ## Release Readiness
 
-The repo prepares cross-platform builds for macOS app/DMG, Windows NSIS/MSI, and Linux AppImage/deb through Tauri configuration and CI workflows. Production labeling still requires external proof:
+The repo prepares cross-platform builds for macOS app/DMG, Windows NSIS/MSI, and Linux AppImage/deb through Tauri configuration and CI workflows. For `v0.1.0`, production labeling is macOS + Windows only; Linux artifacts remain alpha until the upstream `glib` advisory path is resolved or explicitly accepted. Production labeling still requires external proof:
 
 - signed and notarized macOS artifacts
 - signed Windows installers
 - populated media-tool checksum manifests when tools are bundled or CI-fetched
 - clean artifact checksums
 - no open release-blocking GitHub alerts for the release commit
-- manual smoke tests on macOS, Windows, and Linux
+- manual smoke tests on macOS and Windows
+- Linux alpha artifact audit, bundled media-tool report, and launch smoke evidence
 
 Use `npm run tauri:build:app` for local macOS app-only build verification. Use `npm run tauri:build:full` or the tag release workflow for full package generation; local full macOS packaging can still hit the DMG Finder/AppleScript packaging hang and is not production proof by itself.
 

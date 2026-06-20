@@ -86,6 +86,7 @@ import {
   queueFilters,
   type QueueFilter,
 } from "./domain/jobQueue";
+import { recordOnboardingLane } from "./domain/onboardingState";
 import type {
   AppSnapshot,
   ArchiveMirrorConfig,
@@ -140,6 +141,9 @@ const sidebarCollapsedStorageKey = "duroos.sidebarCollapsed";
 const defaultRuntimeDiagnostics: RuntimeDiagnostics = {
   desktopRuntimeAvailable: isTauriRuntime(),
   ytDlpAvailable: false,
+  requiredMediaToolsAvailable: false,
+  mediaToolSource: "missing",
+  missingMediaTools: ["yt-dlp", "ffmpeg", "ffprobe"],
   nativePlaybackAvailable: false,
   ytDlpCookiesConfigured: false,
   messages: ["Runtime diagnostics have not been checked yet."],
@@ -167,9 +171,21 @@ const downloaderStatus = (
     return { label: "Desktop check", tone: "neutral" };
   }
 
-  return runtimeDiagnostics.ytDlpAvailable
-    ? { label: "yt-dlp ready", tone: "positive" }
-    : { label: "yt-dlp needed", tone: "warning" };
+  if (runtimeDiagnostics.requiredMediaToolsAvailable) {
+    if (runtimeDiagnostics.mediaToolSource === "bundled") {
+      return { label: "Bundled tools ready", tone: "positive" };
+    }
+    if (runtimeDiagnostics.mediaToolSource === "system") {
+      return { label: "System tools ready", tone: "positive" };
+    }
+    return { label: "Media tools ready", tone: "positive" };
+  }
+
+  const missing = runtimeDiagnostics.missingMediaTools.join(", ");
+  return {
+    label: missing ? `${missing} needed` : "Media tools needed",
+    tone: "warning",
+  };
 };
 
 const formatDuration = (seconds?: number): string => {
@@ -483,6 +499,9 @@ const App = () => {
           setRuntimeDiagnostics({
             desktopRuntimeAvailable: isTauriRuntime(),
             ytDlpAvailable: false,
+            requiredMediaToolsAvailable: false,
+            mediaToolSource: "missing",
+            missingMediaTools: ["yt-dlp", "ffmpeg", "ffprobe"],
             nativePlaybackAvailable: false,
             ytDlpCookiesConfigured: false,
             messages: [message],
@@ -838,8 +857,14 @@ const App = () => {
   };
 
   const openImport = (mode: ImportMode = "local") => {
+    recordOnboardingLane("study");
     setInitialImportMode(mode);
     setIsImportOpen(true);
+  };
+
+  const openPublishFromFirstRun = () => {
+    recordOnboardingLane("publish");
+    setViewMode("publish");
   };
 
   const handleClearSource = async (source: Source) => {
@@ -1156,6 +1181,7 @@ const App = () => {
             watchByLessonId={watchByLessonId}
             setSelectedLessonId={setSelectedLessonId}
             onOpenImport={openImport}
+            onOpenPublish={openPublishFromFirstRun}
             onClearSearch={() => setQuery("")}
             runtimeDiagnostics={runtimeDiagnostics}
             phoneSession={phoneSession}
@@ -1504,6 +1530,7 @@ interface DashboardProps {
   watchByLessonId: Map<string, WatchState>;
   setSelectedLessonId: (lessonId: string) => void;
   onOpenImport: (mode?: ImportMode) => void;
+  onOpenPublish: () => void;
   onClearSearch: () => void;
   runtimeDiagnostics: RuntimeDiagnostics;
   phoneSession: PhoneMediaSession | null;
@@ -1577,6 +1604,7 @@ const Dashboard = ({
   watchByLessonId,
   setSelectedLessonId,
   onOpenImport,
+  onOpenPublish,
   onClearSearch,
   runtimeDiagnostics,
   phoneSession,
@@ -1610,6 +1638,7 @@ const Dashboard = ({
         sources={snapshot.sources}
         runtimeDiagnostics={runtimeDiagnostics}
         onOpenImport={onOpenImport}
+        onOpenPublish={onOpenPublish}
       />
     );
   }
@@ -1870,38 +1899,70 @@ const FirstRunDashboard = ({
   sources,
   runtimeDiagnostics,
   onOpenImport,
+  onOpenPublish,
 }: {
   sources: Source[];
   runtimeDiagnostics: RuntimeDiagnostics;
   onOpenImport: (mode?: ImportMode) => void;
+  onOpenPublish: () => void;
 }) => {
   const downloader = downloaderStatus(runtimeDiagnostics);
 
   return (
     <div className="first-run-layout">
-      <section className="first-run-panel" aria-label="First import">
+      <section className="first-run-panel" aria-label="Choose Duroos Watcher setup path">
         <div className="first-run-copy">
           <StatusChip label="Local-first" tone="positive" />
-          <h2>Build your local study library</h2>
+          <h2>Choose how you want to start</h2>
           <p>
-            Import lessons you are allowed to save, or follow a teacher channel. Duroos stores your
-            library locally and keeps remote fetching under your control.
+            Start as a learner building a private study library, or as a teacher publishing a
+            signed channel for learners to follow. Both paths keep accounts and telemetry out of
+            the app.
           </p>
         </div>
-        <div className="first-run-actions" aria-label="Choose first import path">
-          <button type="button" className="primary-action" onClick={() => onOpenImport("local")}>
-            <FolderOpen size={17} />
-            <span>Add Local Files</span>
-          </button>
-          <button type="button" className="secondary-action" onClick={() => onOpenImport("source")}>
-            <Globe2 size={17} />
-            <span>Add Source URL</span>
-          </button>
-          <button type="button" className="secondary-action" onClick={() => onOpenImport("feed")}>
-            <Rss size={17} />
-            <span>Follow Channel</span>
-          </button>
+
+        <div className="first-run-path-grid">
+          <article className="first-run-path">
+            <div className="round-icon">
+              <Library size={17} />
+            </div>
+            <div>
+              <strong>Study Library</strong>
+              <span>Import lessons, follow sources, resume playback, keep notes, and use phone access.</span>
+            </div>
+            <div className="first-run-actions" aria-label="Start learner path">
+              <button type="button" className="primary-action" onClick={() => onOpenImport("local")}>
+                <FolderOpen size={17} />
+                <span>Add Local Files</span>
+              </button>
+              <button type="button" className="secondary-action" onClick={() => onOpenImport("source")}>
+                <Globe2 size={17} />
+                <span>Add Source URL</span>
+              </button>
+              <button type="button" className="secondary-action" onClick={() => onOpenImport("feed")}>
+                <Rss size={17} />
+                <span>Follow Channel</span>
+              </button>
+            </div>
+          </article>
+
+          <article className="first-run-path">
+            <div className="round-icon">
+              <UploadCloud size={17} />
+            </div>
+            <div>
+              <strong>Teacher Channel</strong>
+              <span>Create a local signing profile, test relays and storage, then share one signed invite.</span>
+            </div>
+            <div className="first-run-actions" aria-label="Start publisher path">
+              <button type="button" className="secondary-action" onClick={onOpenPublish}>
+                <UploadCloud size={17} />
+                <span>Set Up Publishing</span>
+              </button>
+            </div>
+          </article>
         </div>
+
         <div className="first-run-trust-row">
           <StatusChip label="No account" tone="positive" />
           <StatusChip label="No telemetry" tone="positive" />
@@ -3026,23 +3087,23 @@ const sourceReadiness = (
     case "youtube":
       return {
         label: runtimeDiagnostics.desktopRuntimeAvailable
-          ? runtimeDiagnostics.ytDlpAvailable
+          ? runtimeDiagnostics.requiredMediaToolsAvailable
             ? "User pull"
             : "Needs tool"
           : "Desktop check",
-        tone: runtimeDiagnostics.desktopRuntimeAvailable && runtimeDiagnostics.ytDlpAvailable
+        tone: runtimeDiagnostics.desktopRuntimeAvailable && runtimeDiagnostics.requiredMediaToolsAvailable
           ? "positive"
           : runtimeDiagnostics.desktopRuntimeAvailable
             ? "warning"
             : "neutral",
         detail: runtimeDiagnostics.desktopRuntimeAvailable
-          ? "Metadata via feeds/API; permitted downloads use local yt-dlp."
-          : "Desktop app checks local yt-dlp before media downloads.",
+          ? "Metadata via feeds/API; permitted downloads use verified local media tools."
+          : "Desktop app checks local media tools before downloads.",
       };
     case "rumble":
       return {
         label: runtimeDiagnostics.desktopRuntimeAvailable
-          ? runtimeDiagnostics.ytDlpAvailable
+          ? runtimeDiagnostics.requiredMediaToolsAvailable
             ? runtimeDiagnostics.ytDlpCookiesConfigured
               ? "Cookie fallback"
               : "Best effort"

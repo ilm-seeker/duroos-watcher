@@ -1,5 +1,5 @@
 use crate::{
-    manifest,
+    manifest, media_tools,
     models::{
         AppSnapshot, ClearSourceSummary, Collection, DownloadSourceSummary, ImportSummary,
         IngestSummary, Job, Lesson, LessonNote, LiveSession, ManifestValidationReport, MediaFile,
@@ -179,6 +179,8 @@ struct ContentTypeInference {
 }
 
 pub fn initialize(app: &AppHandle) -> Result<(), String> {
+    media_tools::prepare_bundled_media_tool_path(app);
+
     let data_dir = app_data_dir(app)?;
     fs::create_dir_all(data_dir.join("library/imports")).map_err(|error| error.to_string())?;
 
@@ -214,6 +216,8 @@ pub fn fetch_snapshot(connection: &Connection) -> Result<AppSnapshot, String> {
 }
 
 pub fn runtime_diagnostics(app: &AppHandle) -> RuntimeDiagnostics {
+    media_tools::prepare_bundled_media_tool_path(app);
+
     let cookies_file = app_data_dir(app)
         .ok()
         .and_then(|data_dir| yt_dlp_cookie_file(&data_dir));
@@ -225,6 +229,7 @@ pub fn runtime_diagnostics(app: &AppHandle) -> RuntimeDiagnostics {
     let native_player = native_player_command_for_app(app);
     let native_player_name = native_player.as_ref().map(|player| player.name.clone());
     let native_player_command = native_player.as_ref().map(native_player_command_label);
+    let required_media_tools = media_tools::required_media_tool_status(app);
 
     match find_yt_dlp_command() {
         Ok(command) => {
@@ -249,6 +254,7 @@ pub fn runtime_diagnostics(app: &AppHandle) -> RuntimeDiagnostics {
                     .map(|value| format!(" ({value})"))
                     .unwrap_or_default()
             )];
+            messages.extend(media_tool_messages(&required_media_tools));
 
             if let Some(file_name) = cookies_file_name.as_deref() {
                 messages.push(format!(
@@ -276,6 +282,9 @@ pub fn runtime_diagnostics(app: &AppHandle) -> RuntimeDiagnostics {
                 yt_dlp_available: true,
                 yt_dlp_version: version.clone(),
                 yt_dlp_command: Some(command_label.clone()),
+                required_media_tools_available: required_media_tools.available,
+                media_tool_source: required_media_tools.source,
+                missing_media_tools: required_media_tools.missing,
                 native_playback_available: native_player.is_some(),
                 native_playback_player: native_player_name,
                 native_playback_command: native_player_command,
@@ -286,6 +295,7 @@ pub fn runtime_diagnostics(app: &AppHandle) -> RuntimeDiagnostics {
         }
         Err(error) => {
             let mut messages = vec![error];
+            messages.extend(media_tool_messages(&required_media_tools));
             if let Some(player_name) = native_player_name.as_deref() {
                 messages.push(format!(
                     "Native playback is available through {player_name}."
@@ -302,6 +312,9 @@ pub fn runtime_diagnostics(app: &AppHandle) -> RuntimeDiagnostics {
                 yt_dlp_available: false,
                 yt_dlp_version: None,
                 yt_dlp_command: None,
+                required_media_tools_available: required_media_tools.available,
+                media_tool_source: required_media_tools.source,
+                missing_media_tools: required_media_tools.missing,
                 native_playback_available: native_player.is_some(),
                 native_playback_player: native_player_name,
                 native_playback_command: native_player_command,
@@ -311,6 +324,20 @@ pub fn runtime_diagnostics(app: &AppHandle) -> RuntimeDiagnostics {
             }
         }
     }
+}
+
+fn media_tool_messages(status: &media_tools::RequiredMediaToolStatus) -> Vec<String> {
+    if status.available {
+        return vec![format!(
+            "Required media tools are available from {} sources.",
+            status.source
+        )];
+    }
+
+    vec![format!(
+        "Required media tools missing: {}.",
+        status.missing.join(", ")
+    )]
 }
 
 pub fn validate_collection_manifest(
@@ -5060,13 +5087,7 @@ fn find_media_tool(tool_name: &str) -> Option<String> {
 }
 
 fn native_player_command_for_app(app: &AppHandle) -> Option<NativePlayerCommand> {
-    let search_dirs = app
-        .path()
-        .resource_dir()
-        .ok()
-        .map(|resource_dir| vec![resource_dir.join("binaries"), resource_dir])
-        .unwrap_or_default();
-
+    let search_dirs = media_tools::bundled_media_tool_dirs(app);
     find_native_player_command(&search_dirs)
 }
 

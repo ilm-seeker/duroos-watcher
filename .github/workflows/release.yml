@@ -19,18 +19,22 @@ jobs:
           - name: macOS Apple Silicon
             os: macos-latest
             rust_target: aarch64-apple-darwin
+            media_tools_target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin
           - name: macOS Intel
             os: macos-latest
             rust_target: x86_64-apple-darwin
+            media_tools_target: x86_64-apple-darwin
             args: --target x86_64-apple-darwin
           - name: Windows
             os: windows-latest
             rust_target: ""
+            media_tools_target: x86_64-pc-windows-msvc
             args: ""
           - name: Ubuntu
             os: ubuntu-22.04
             rust_target: ""
+            media_tools_target: x86_64-unknown-linux-gnu
             args: ""
 
     steps:
@@ -79,6 +83,9 @@ jobs:
 
       - name: Release repo checks
         run: npm run release:check
+
+      - name: Fetch pinned media tools
+        run: npm run media-tools:fetch -- --target=${{ matrix.platform.media_tools_target }}
 
       - name: Import Windows signing certificate
         if: runner.os == 'Windows'
@@ -150,3 +157,4 @@ jobs:
           path: |
             artifact-checksums.txt
             artifact-audit.json
+            src-tauri/binaries/vendor/${{ matrix.platform.media_tools_target }}/media-tools-report.json

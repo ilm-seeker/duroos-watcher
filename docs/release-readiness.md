@@ -4,7 +4,8 @@
 
 - **Alpha/testing:** unsigned, unnotarized, or missing pinned bundled media-tool checksums.
 - **Production candidate:** CI passed on macOS, Windows, and Ubuntu; artifact checksums and `artifact-audit.json` generated; no tracked secrets; media-tool manifest populated when tools are bundled or CI-fetched.
-- **Production:** production candidate plus macOS signing/notarization, Windows signing, Linux package review, and manual smoke tests on all target OSes.
+- **Production:** production candidate plus macOS signing/notarization, Windows signing, and manual smoke tests on macOS and Windows.
+- **Linux alpha:** Linux AppImage/deb artifacts may be built and audited, but they are not production while the upstream `glib` advisory path remains open.
 
 ## Build Commands
 
@@ -21,7 +22,7 @@ needs a non-hanging DMG runner plus signing/notarization proof before production
 
 ## Platform Smoke Tests
 
-Run these on macOS, Windows, and Linux before production labeling:
+Run these on macOS and Windows before production labeling. Run the install/launch and media-tool checks on Linux as alpha evidence, but do not use Linux proof to claim production readiness while the `glib` blocker remains open.
 
 - Install and launch the desktop app.
 - Import local video, audio, and PDF files.
@@ -79,17 +80,19 @@ verifies that GitHub reports the expected names. It does not print secret values
 - Successful GitHub Actions CI matrix run on macOS, Windows, and Ubuntu for the exact release commit.
 - Successful tag release workflow with artifact audit uploads for each platform.
 - `media-tools-report.json` for each target whose package includes bundled media tools.
-- No open GitHub code scanning or Dependabot alerts for the exact release commit.
+- No open GitHub code scanning alerts for the exact release commit.
+- No open Dependabot alerts affecting macOS or Windows production. A Linux-only `glib` alert is allowed only when listed under `release.knownPlatformBlockers` and Linux is declared in `release.alphaPlatforms`.
 - macOS signed and notarized app/DMG evidence.
 - Windows signed installer evidence.
-- Linux AppImage/deb install and launch evidence.
-- Manual smoke-test notes for every item in the platform checklist above.
+- Linux AppImage/deb artifact audit, bundled media-tool report, and launch smoke evidence for alpha labeling.
+- Manual smoke-test notes for every macOS and Windows item in the platform checklist above.
 
 The current `glib` Dependabot alert is a Linux production blocker, not a local application-code bug:
 `cargo update --manifest-path src-tauri/Cargo.toml -p glib --precise 0.20.12 --dry-run` fails because
 the Tauri Linux stack requires `gtk 0.18.x`, which requires `glib ^0.18`. Do not mark Linux production
 ready until that upstream dependency path is patched or Linux production distribution is explicitly
-removed from scope.
+removed from production scope. For `v0.1.0`, Linux is intentionally alpha-scoped in
+`docs/production-release-evidence.example.json`.
 
 Keep real production evidence in `docs/production-release-evidence.json` and downloaded artifact proof
 under `release-evidence/`; both are ignored by Git because manual QA notes, signing proof, and package

@@ -299,6 +299,9 @@ export interface RuntimeDiagnostics {
   ytDlpAvailable: boolean;
   ytDlpVersion?: string;
   ytDlpCommand?: string;
+  requiredMediaToolsAvailable: boolean;
+  mediaToolSource: "bundled" | "system" | "mixed" | "missing";
+  missingMediaTools: string[];
   nativePlaybackAvailable: boolean;
   nativePlaybackPlayer?: string;
   nativePlaybackCommand?: string;

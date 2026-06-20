@@ -1,5 +1,6 @@
 mod db;
 mod manifest;
+mod media_tools;
 mod models;
 mod phone_access;
 mod publisher;

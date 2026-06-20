@@ -6,6 +6,7 @@ const tauriConfig = readJson("src-tauri/tauri.conf.json");
 const releaseWorkflow = readText(".github/workflows/release.yml");
 const expectedTagPrefix = `v${packageJson.version}`;
 const expectedEvidencePath = "docs/production-release-evidence.json";
+const productionEvidence = existsSync(expectedEvidencePath) ? readJson(expectedEvidencePath) : null;
 const repo = resolveRepo();
 const headSha = run("git", ["rev-parse", "HEAD"], { required: true }).stdout.trim();
 
@@ -133,7 +134,15 @@ function checkGithubState() {
   if (dependabotAlerts === null) {
     blockers.push("Could not read GitHub Dependabot alerts with gh.");
   } else if (dependabotAlerts.length) {
-    blockers.push(`Open Dependabot alerts remain: ${dependabotAlerts.join(", ")}.`);
+    const allowedAlertIds = allowedAlphaDependabotAlertIds();
+    const blockingAlerts = dependabotAlerts.filter(
+      (alert) => !allowedAlertIds.some((allowedId) => alert.includes(allowedId)),
+    );
+    if (blockingAlerts.length) {
+      blockers.push(`Open production-blocking Dependabot alerts remain: ${blockingAlerts.join(", ")}.`);
+    } else {
+      warnings.push(`Open Dependabot alerts are limited to documented alpha-platform blockers: ${dependabotAlerts.join(", ")}.`);
+    }
   } else {
     passes.push("No open GitHub Dependabot alerts.");
   }
@@ -146,6 +155,20 @@ function checkGithubState() {
   } else {
     passes.push(`A GitHub release exists for ${expectedTagPrefix}*.`);
   }
+}
+
+function allowedAlphaDependabotAlertIds() {
+  const release = productionEvidence?.release ?? {};
+  const alphaPlatforms = new Set(Array.isArray(release.alphaPlatforms) ? release.alphaPlatforms : []);
+  const productionPlatforms = new Set(Array.isArray(release.productionPlatforms) ? release.productionPlatforms : []);
+  if (!alphaPlatforms.size) {
+    return [];
+  }
+
+  return (Array.isArray(release.knownPlatformBlockers) ? release.knownPlatformBlockers : [])
+    .filter((blocker) => alphaPlatforms.has(blocker.platform) && !productionPlatforms.has(blocker.platform))
+    .map((blocker) => blocker.id)
+    .filter((id) => typeof id === "string" && id.trim());
 }
 
 function checkProductionEvidence() {

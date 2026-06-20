@@ -31,6 +31,7 @@
   "bundle": {
     "active": true,
     "targets": ["app", "dmg", "nsis", "msi", "appimage", "deb"],
+    "resources": ["binaries/vendor/"],
     "publisher": "Duroos Watcher",
     "category": "Education",
     "shortDescription": "Local-first study library for educational media",

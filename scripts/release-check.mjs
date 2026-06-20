@@ -38,6 +38,10 @@ for (const target of requiredBundleTargets) {
 if (tauriConfig.bundle?.active !== true) {
   failures.push("Tauri bundle.active must be true for release builds.");
 }
+const bundleResources = tauriConfig.bundle?.resources ?? [];
+if (!bundleResources.includes("binaries/vendor/")) {
+  failures.push("Tauri bundle.resources must include binaries/vendor/ for pinned media tools.");
+}
 if (!existsSync("src-tauri/icons/icon.png")) {
   failures.push("Missing Tauri PNG app icon: src-tauri/icons/icon.png");
 }
@@ -140,6 +144,19 @@ for (const tool of requiredMediaTools) {
       failures.push(`Missing pinned media tool artifact for ${tool} on ${target}.`);
     }
   }
+}
+
+const releaseWorkflow = existsSync(".github/workflows/release.yml")
+  ? readFileSync(".github/workflows/release.yml", "utf8")
+  : "";
+if (!releaseWorkflow.includes("media_tools_target")) {
+  failures.push("Release workflow matrix must define media_tools_target for each platform.");
+}
+if (!releaseWorkflow.includes("npm run media-tools:fetch")) {
+  failures.push("Release workflow must fetch pinned media tools before building Tauri artifacts.");
+}
+if (!releaseWorkflow.includes("media-tools-report.json")) {
+  failures.push("Release workflow must upload media-tools-report.json with release evidence.");
 }
 
 if (warnings.length) {
