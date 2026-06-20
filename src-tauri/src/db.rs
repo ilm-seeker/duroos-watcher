@@ -3,9 +3,9 @@ use crate::{
     models::{
         AppSnapshot, ClearSourceSummary, Collection, DownloadSourceSummary, ImportSummary,
         IngestSummary, Job, Lesson, LessonNote, LiveSession, ManifestValidationReport, MediaFile,
-        MediaStorageAudit, MediaStorageCleanup, NativePlaybackResult, ProvenanceRecord,
-        RuntimeDiagnostics, Source, SourceCapability, Teacher, TeacherRelay, TrustCuratorSummary,
-        TrustedCurator, WatchState,
+        MediaStorageAudit, MediaStorageCleanup, NativePlaybackResult, OpenMediaResult,
+        ProvenanceRecord, RuntimeDiagnostics, Source, SourceCapability, Teacher, TeacherRelay,
+        TrustCuratorSummary, TrustedCurator, WatchState,
     },
     publisher,
 };
@@ -760,6 +760,78 @@ pub fn play_media_file_native(
         launched: true,
         messages: vec![format!("Opened \"{title}\" in {}.", player.name)],
     })
+}
+
+pub fn open_pdf_file(app: &AppHandle, media_file_id: String) -> Result<OpenMediaResult, String> {
+    let (media_file_id, media_path, lesson_id, title) =
+        resolve_validated_pdf_record(app, &media_file_id)?;
+
+    tauri_plugin_opener::open_path(&media_path, None::<&str>)
+        .map_err(|error| format!("Could not open PDF in the system viewer: {error}"))?;
+
+    Ok(OpenMediaResult {
+        media_file_id,
+        lesson_id,
+        title: title.clone(),
+        opened: true,
+        messages: vec![format!("Opened \"{title}\" in the system PDF viewer.")],
+    })
+}
+
+fn resolve_validated_pdf_record(
+    app: &AppHandle,
+    media_file_id: &str,
+) -> Result<(String, PathBuf, String, String), String> {
+    let media_file_id = media_file_id.trim();
+
+    if media_file_id.is_empty() {
+        return Err("Media file id is required.".to_string());
+    }
+
+    let data_dir = app_data_dir(app)?;
+    let connection = open_connection(app)?;
+    resolve_validated_pdf_record_from_connection(&connection, &data_dir, media_file_id)
+}
+
+fn resolve_validated_pdf_record_from_connection(
+    connection: &Connection,
+    data_dir: &Path,
+    media_file_id: &str,
+) -> Result<(String, PathBuf, String, String), String> {
+    let record: Option<(String, String, String, String, String)> = connection
+        .query_row(
+            "SELECT m.id, m.relative_path, l.id, l.title, l.content_type
+             FROM media_files m
+             JOIN lessons l ON l.id = m.lesson_id
+             WHERE m.id = ?1",
+            params![media_file_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let (media_file_id, relative_path, lesson_id, title, content_type) =
+        record.ok_or_else(|| "Media file was not found.".to_string())?;
+
+    if content_type != "pdf" {
+        return Err("Open PDF is available only for PDF lessons.".to_string());
+    }
+
+    let media_path = resolve_library_media_path(data_dir, &relative_path)
+        .ok_or_else(|| "Media file path is outside the app library.".to_string())?;
+    if !media_path.is_file() {
+        return Err("PDF file is missing from disk. Re-download this lesson.".to_string());
+    }
+    validate_downloaded_media_file(&media_path, &content_type)?;
+
+    Ok((media_file_id, media_path, lesson_id, title))
 }
 
 pub fn resolve_media_file_path(app: &AppHandle, media_file_id: String) -> Result<String, String> {
@@ -7218,6 +7290,31 @@ mod tests {
             .unwrap();
     }
 
+    fn attach_test_media_record(
+        connection: &Connection,
+        media_file_id: &str,
+        content_type: &str,
+        relative_path: &str,
+    ) {
+        connection
+            .execute(
+                "UPDATE lessons
+                 SET content_type = ?1, media_file_id = ?2
+                 WHERE id = 'lesson-test'",
+                params![content_type, media_file_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO media_files
+                 (id, lesson_id, relative_path, thumbnail_relative_path, content_hash,
+                  size_bytes, codec, import_status, hash_verification_state)
+                 VALUES (?1, 'lesson-test', ?2, NULL, 'sha256:test', 12, NULL, 'ready', 'verified')",
+                params![media_file_id, relative_path],
+            )
+            .unwrap();
+    }
+
     #[test]
     fn save_watch_state_upserts_progress_duration_and_completion() {
         let connection = test_connection();
@@ -7264,6 +7361,63 @@ mod tests {
 
         assert!(cleared.body.is_empty());
         assert!(fetch_lesson_notes(&connection).unwrap().is_empty());
+    }
+
+    #[test]
+    fn pdf_open_resolver_accepts_valid_library_pdf() {
+        let connection = test_connection();
+        insert_test_lesson(&connection);
+        let data_dir = test_temp_dir("duroos-pdf-open");
+        let relative_path = "library/imports/lesson.pdf";
+        let pdf_path = data_dir.join(relative_path);
+        fs::create_dir_all(pdf_path.parent().unwrap()).unwrap();
+        fs::write(&pdf_path, b"%PDF-1.4\n%test").unwrap();
+        attach_test_media_record(&connection, "media-pdf", "pdf", relative_path);
+
+        let (_media_id, resolved_path, lesson_id, title) =
+            resolve_validated_pdf_record_from_connection(&connection, &data_dir, "media-pdf")
+                .unwrap();
+
+        assert_eq!(resolved_path, pdf_path);
+        assert_eq!(lesson_id, "lesson-test");
+        assert_eq!(title, "Opening Class");
+        fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[test]
+    fn pdf_open_resolver_rejects_non_pdf_lessons() {
+        let connection = test_connection();
+        insert_test_lesson(&connection);
+        attach_test_media_record(
+            &connection,
+            "media-video",
+            "video",
+            "library/imports/lesson.mp4",
+        );
+
+        let error = resolve_validated_pdf_record_from_connection(
+            &connection,
+            Path::new("/tmp"),
+            "media-video",
+        )
+        .unwrap_err();
+
+        assert!(error.contains("only for PDF lessons"));
+    }
+
+    #[test]
+    fn pdf_open_resolver_rejects_paths_outside_library() {
+        let connection = test_connection();
+        insert_test_lesson(&connection);
+        let data_dir = test_temp_dir("duroos-pdf-outside");
+        attach_test_media_record(&connection, "media-pdf", "pdf", "../lesson.pdf");
+
+        let error =
+            resolve_validated_pdf_record_from_connection(&connection, &data_dir, "media-pdf")
+                .unwrap_err();
+
+        assert!(error.contains("outside the app library"));
+        fs::remove_dir_all(data_dir).ok();
     }
 
     #[test]

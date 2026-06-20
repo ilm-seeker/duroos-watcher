@@ -294,6 +294,14 @@ export interface NativePlaybackResult {
   messages: string[];
 }
 
+export interface OpenMediaResult {
+  mediaFileId: string;
+  lessonId: string;
+  title: string;
+  opened: boolean;
+  messages: string[];
+}
+
 export interface RuntimeDiagnostics {
   desktopRuntimeAvailable: boolean;
   ytDlpAvailable: boolean;

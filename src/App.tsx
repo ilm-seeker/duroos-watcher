@@ -57,6 +57,7 @@ import {
   importLocalFiles,
   isTauriRuntime,
   listPublisherProfiles,
+  openPdfFile,
   playMediaFileNative,
   previewNostrChannel,
   publishTeacherChannel,
@@ -78,6 +79,11 @@ import {
   buildChannelInvite,
   canonicalizeChannelRef,
 } from "./domain/channelInvite";
+import {
+  compactHashReference,
+  compactKeyFingerprint,
+  compactUrlReference,
+} from "./domain/displayIdentity";
 import { displayJobDetail } from "./domain/jobDisplay";
 import {
   filterQueueJobs,
@@ -1044,6 +1050,19 @@ const App = () => {
     }
   };
 
+  const handleOpenPdf = async (mediaFile: MediaFile) => {
+    try {
+      setBusyNativeMediaId(mediaFile.id);
+      const result = await openPdfFile(mediaFile.id);
+      setSystemNotice(result.messages.join(" "));
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSystemNotice(message);
+    } finally {
+      setBusyNativeMediaId(null);
+    }
+  };
+
   const handleAddTrustedCurator = async (
     displayName: string,
     publicKey: string,
@@ -1199,6 +1218,7 @@ const App = () => {
             onDownloadChannel={handleDownloadChannel}
             onUnfollowChannel={handleUnfollowChannel}
             onNativePlayback={handleNativePlayback}
+            onOpenPdf={handleOpenPdf}
             onMediaPlaybackError={setSelectedMediaError}
             onSaveWatchState={handleSaveWatchState}
             onSaveLessonNote={handleSaveLessonNote}
@@ -1548,6 +1568,7 @@ interface DashboardProps {
   onDownloadChannel: (channel: ChannelSubscriptionView) => void;
   onUnfollowChannel: (channel: ChannelSubscriptionView) => void;
   onNativePlayback: (mediaFile: MediaFile) => void;
+  onOpenPdf: (mediaFile: MediaFile) => void;
   onMediaPlaybackError: (message: string) => void;
   onSaveWatchState: (
     lessonId: string,
@@ -1622,6 +1643,7 @@ const Dashboard = ({
   onDownloadChannel,
   onUnfollowChannel,
   onNativePlayback,
+  onOpenPdf,
   onMediaPlaybackError,
   onSaveWatchState,
   onSaveLessonNote,
@@ -1709,6 +1731,7 @@ const Dashboard = ({
           busyNativeMediaId={busyNativeMediaId}
           onDownloadSource={onDownloadSource}
           onNativePlayback={onNativePlayback}
+          onOpenPdf={onOpenPdf}
           onMediaPlaybackError={onMediaPlaybackError}
           onSaveWatchState={onSaveWatchState}
           onSaveLessonNote={onSaveLessonNote}
@@ -2255,6 +2278,7 @@ interface PlayerPanelProps {
   busyNativeMediaId: string | null;
   onDownloadSource: (source: Source) => void;
   onNativePlayback: (mediaFile: MediaFile) => void;
+  onOpenPdf: (mediaFile: MediaFile) => void;
   onMediaPlaybackError: (message: string) => void;
   onSaveWatchState: (
     lessonId: string,
@@ -2288,6 +2312,7 @@ const PlayerPanel = ({
   busyNativeMediaId,
   onDownloadSource,
   onNativePlayback,
+  onOpenPdf,
   onMediaPlaybackError,
   onSaveWatchState,
   onSaveLessonNote,
@@ -2305,7 +2330,9 @@ const PlayerPanel = ({
     Boolean(mediaFile) &&
     (lesson.contentType === "video" || lesson.contentType === "audio") &&
     runtimeDiagnostics.nativePlaybackAvailable;
+  const canOpenPdf = Boolean(mediaFile) && lesson.contentType === "pdf" && !mediaError;
   const isOpeningNativePlayer = mediaFile ? busyNativeMediaId === mediaFile.id : false;
+  const sourceRecordReference = compactUrlReference(provenance?.originUrl ?? lesson.sourceUrl);
   const activeMediaElementRef = useRef<HTMLMediaElement | null>(null);
   useEffect(() => {
     activeMediaElementRef.current = null;
@@ -2371,6 +2398,21 @@ const PlayerPanel = ({
           </span>
         </div>
       ) : null}
+      {canOpenPdf && mediaFile ? (
+        <div className="player-actions" aria-label="PDF actions">
+          <button
+            type="button"
+            className="secondary-action"
+            onClick={() => onOpenPdf(mediaFile)}
+            disabled={isOpeningNativePlayer}
+            title="Open this verified local PDF in the system viewer."
+          >
+            <FileText size={15} />
+            <span>{isOpeningNativePlayer ? "Opening" : "Open PDF"}</span>
+          </button>
+          <span>Uses your system PDF viewer. Downloaded local PDFs open even while fetching is off.</span>
+        </div>
+      ) : null}
       {needsMediaFile ? (
         <div className="player-actions" aria-label="Media actions">
           <button
@@ -2411,7 +2453,11 @@ const PlayerPanel = ({
           <strong>Source Record</strong>
         </div>
         <p>{provenance?.permissionNote ?? "No source record found."}</p>
-        <code>{provenance?.originUrl ?? lesson.sourceUrl}</code>
+        <code title={sourceRecordReference.full}>{sourceRecordReference.label}</code>
+        <details className="reference-details">
+          <summary>Full source URL</summary>
+          <code>{sourceRecordReference.full}</code>
+        </details>
       </div>
       <LessonNotesPanel
         lesson={lesson}
@@ -2669,10 +2715,16 @@ const PlayerSurface = ({
     );
   }
 
-  if (mediaUrl && lesson.contentType === "pdf") {
+  if (mediaFile && lesson.contentType === "pdf") {
     return (
-      <div className="player-frame pdf-player-frame">
-        <iframe className="pdf-player" src={mediaUrl} title={lesson.title} />
+      <div className="player-frame pdf-ready-frame">
+        <div className="pdf-ready-icon" aria-hidden="true">
+          <FileText size={38} />
+        </div>
+        <div className="pdf-ready-copy">
+          <strong>{mediaError ? "PDF needs attention" : "PDF ready"}</strong>
+          <span>{mediaError || "Open this verified local PDF in your system viewer."}</span>
+        </div>
       </div>
     );
   }
@@ -3403,6 +3455,7 @@ const ChannelSubscriptionCard = ({
     busySourceAction?.action === "clear" && busySourceAction.sourceId === channel.sourceId;
   const mediaTone =
     channel.missingFileCount > 0 ? "warning" : channel.localFileCount > 0 ? "positive" : "neutral";
+  const feedReference = compactUrlReference(channel.feedUrl);
 
   return (
     <article className={selected ? "channel-card channel-card-active" : "channel-card"}>
@@ -3438,7 +3491,14 @@ const ChannelSubscriptionCard = ({
           <span>{channel.postCount} notes</span>
           <span>Updated {formatDate(channel.latestUpdateAt)}</span>
         </div>
-        <code>{channel.feedUrl}</code>
+        <div className="compact-reference">
+          <span>Manifest</span>
+          <code title={feedReference.full}>{feedReference.label}</code>
+          <details className="reference-details">
+            <summary>Full URL</summary>
+            <code>{feedReference.full}</code>
+          </details>
+        </div>
       </div>
       <div className="channel-card-actions">
         {onSelect ? (
@@ -4837,6 +4897,7 @@ const SourcesView = ({
                 busySourceAction.action === "download";
               const isClearing =
                 busySourceAction?.sourceId === source.id && busySourceAction.action === "clear";
+              const sourceReference = compactUrlReference(source.identifier);
               const downloadBlocked = source.capability.download === "blocked";
               const downloadDisabledReason = downloadBlocked
                 ? "This source type does not currently support downloads."
@@ -4853,7 +4914,7 @@ const SourcesView = ({
                       <SourceIcon platform={source.platform} />
                       <div>
                         <strong>{source.label}</strong>
-                        <span>{source.identifier}</span>
+                        <span title={sourceReference.full}>{sourceReference.label}</span>
                       </div>
                     </div>
                     <div className="managed-source-meta">
@@ -4927,7 +4988,11 @@ const SourcesView = ({
                   <KeyRound size={18} />
                   <div>
                     <strong>{curator.displayName}</strong>
-                    <code>{curator.publicKey}</code>
+                    <code title={curator.publicKey}>{compactKeyFingerprint(curator.publicKey).label}</code>
+                    <details className="reference-details">
+                      <summary>Full key</summary>
+                      <code>{curator.publicKey}</code>
+                    </details>
                   </div>
                 </div>
                 <div className="trusted-curator-meta">
@@ -5658,34 +5723,44 @@ const ImportDrawer = ({
               <span>Validate Manifest</span>
             </button>
             {validatedCurator ? (
-              <div className="curator-trust-panel">
-                <div>
-                  <strong>{validatedCurator.displayName}</strong>
-                  <StatusChip
-                    label={
-                      validatedCuratorTrusted
-                        ? "Trusted key"
-                        : trustLabel(manifestReport?.trustState ?? "unsigned")
-                    }
-                    tone={validatedCuratorTrusted ? "positive" : "warning"}
-                  />
-                </div>
-                <code>{validatedCurator.publicKey}</code>
-                <button
-                  type="button"
-                  className="primary-action"
-                  onClick={trustValidatedCurator}
-                  disabled={isWorking || !canTrustValidatedCurator}
-                  title={
-                    validatedCuratorTrusted
-                      ? "This curator key is already trusted."
-                      : "Trust this key only after confirming the curator identity outside the manifest."
-                  }
-                >
-                  <KeyRound size={17} />
-                  <span>{validatedCuratorTrusted ? "Already Trusted" : "Trust Curator"}</span>
-                </button>
-              </div>
+              (() => {
+                const curatorKey = compactKeyFingerprint(validatedCurator.publicKey);
+
+                return (
+                  <div className="curator-trust-panel">
+                    <div>
+                      <strong>{validatedCurator.displayName}</strong>
+                      <StatusChip
+                        label={
+                          validatedCuratorTrusted
+                            ? "Trusted key"
+                            : trustLabel(manifestReport?.trustState ?? "unsigned")
+                        }
+                        tone={validatedCuratorTrusted ? "positive" : "warning"}
+                      />
+                    </div>
+                    <code title={curatorKey.full}>{curatorKey.label}</code>
+                    <details className="reference-details">
+                      <summary>Full key</summary>
+                      <code>{curatorKey.full}</code>
+                    </details>
+                    <button
+                      type="button"
+                      className="primary-action"
+                      onClick={trustValidatedCurator}
+                      disabled={isWorking || !canTrustValidatedCurator}
+                      title={
+                        validatedCuratorTrusted
+                          ? "This curator key is already trusted."
+                          : "Trust this key only after confirming the curator identity outside the manifest."
+                      }
+                    >
+                      <KeyRound size={17} />
+                      <span>{validatedCuratorTrusted ? "Already Trusted" : "Trust Curator"}</span>
+                    </button>
+                  </div>
+                );
+              })()
             ) : null}
 
             <div className="transport-reference-note">
@@ -5787,40 +5862,54 @@ const ChannelPreviewPanel = ({
     </div>
     {preview ? (
       <>
-        <code>{preview.manifestSha256}</code>
+        <code title={preview.manifestSha256}>{compactHashReference(preview.manifestSha256).label}</code>
+        <details className="reference-details">
+          <summary>Full manifest hash</summary>
+          <code>{preview.manifestSha256}</code>
+        </details>
         {preview.curatorPublicKey ? (
-          <div className="channel-preview-key">
-            <span>Teacher key</span>
-            <code>{preview.curatorPublicKey}</code>
-            <button
-              type="button"
-              className="secondary-action"
-              onClick={onTrustCurator}
-              disabled={!canTrustCurator}
-              title={
-                curatorTrusted || preview.trustState === "signed-trusted"
-                  ? "This teacher key is already trusted."
-                  : "Trust this key only after confirming the teacher identity outside the invite."
-              }
-            >
-              <KeyRound size={15} />
-              <span>
-                {curatorTrusted || preview.trustState === "signed-trusted"
-                  ? "Trusted Key"
-                  : "Trust Teacher Key"}
-              </span>
-            </button>
-          </div>
+          (() => {
+            const teacherKey = compactKeyFingerprint(preview.curatorPublicKey ?? "");
+
+            return (
+              <div className="channel-preview-key">
+                <span>Teacher key</span>
+                <code title={teacherKey.full}>{teacherKey.label}</code>
+                <button
+                  type="button"
+                  className="secondary-action"
+                  onClick={onTrustCurator}
+                  disabled={!canTrustCurator}
+                  title={
+                    curatorTrusted || preview.trustState === "signed-trusted"
+                      ? "This teacher key is already trusted."
+                      : "Trust this key only after confirming the teacher identity outside the invite."
+                  }
+                >
+                  <KeyRound size={15} />
+                  <span>
+                    {curatorTrusted || preview.trustState === "signed-trusted"
+                      ? "Trusted Key"
+                      : "Trust Teacher Key"}
+                  </span>
+                </button>
+                <details className="reference-details">
+                  <summary>Full key</summary>
+                  <code>{teacherKey.full}</code>
+                </details>
+              </div>
+            );
+          })()
         ) : null}
         <div className="channel-preview-endpoints">
           {preview.relays.slice(0, 2).map((relay) => (
-            <span key={relay}>{relay}</span>
+            <span key={relay} title={relay}>{compactUrlReference(relay).label}</span>
           ))}
           {preview.blossomServers.slice(0, 2).map((server) => (
-            <span key={server}>{server}</span>
+            <span key={server} title={server}>{compactUrlReference(server).label}</span>
           ))}
           {preview.archiveMirrors.slice(0, 2).map((mirror) => (
-            <span key={mirror}>{mirror}</span>
+            <span key={mirror} title={mirror}>{compactUrlReference(mirror).label}</span>
           ))}
         </div>
       </>

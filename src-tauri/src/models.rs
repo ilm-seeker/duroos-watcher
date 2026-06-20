@@ -276,6 +276,16 @@ pub struct NativePlaybackResult {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct OpenMediaResult {
+    pub media_file_id: String,
+    pub lesson_id: String,
+    pub title: String,
+    pub opened: bool,
+    pub messages: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeDiagnostics {
     pub desktop_runtime_available: bool,
     pub yt_dlp_available: bool,

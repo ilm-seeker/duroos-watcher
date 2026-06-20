@@ -15,6 +15,7 @@ import type {
   MediaStorageCleanup,
   NativePlaybackResult,
   NostrChannelPreview,
+  OpenMediaResult,
   PhoneMediaScope,
   PhoneMediaSession,
   PublishTeacherChannelRequest,
@@ -276,6 +277,14 @@ export const playMediaFileNative = async (
   }
 
   return invoke<NativePlaybackResult>("play_media_file_native", { mediaFileId });
+};
+
+export const openPdfFile = async (mediaFileId: string): Promise<OpenMediaResult> => {
+  if (!isTauriRuntime()) {
+    throw new Error("Opening PDFs requires the Tauri desktop runtime.");
+  }
+
+  return invoke<OpenMediaResult>("open_pdf_file", { mediaFileId });
 };
 
 export const startPhoneMediaSession = async (

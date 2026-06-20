@@ -9,9 +9,9 @@ use models::{
     AppSnapshot, ChannelPublishResult, ClearSourceSummary, CreatePublisherProfileRequest,
     DownloadSourceSummary, ImportSummary, IngestSummary, Lesson, LessonNote,
     ManifestValidationReport, MediaStorageAudit, MediaStorageCleanup, NativePlaybackResult,
-    NostrChannelPreview, PhoneMediaScope, PhoneMediaSession, PublishTeacherChannelRequest,
-    PublisherEndpointTestReport, PublisherEndpointTestRequest, PublisherProfile,
-    RuntimeDiagnostics, TrustCuratorSummary, TrustedCurator, WatchState,
+    NostrChannelPreview, OpenMediaResult, PhoneMediaScope, PhoneMediaSession,
+    PublishTeacherChannelRequest, PublisherEndpointTestReport, PublisherEndpointTestRequest,
+    PublisherProfile, RuntimeDiagnostics, TrustCuratorSummary, TrustedCurator, WatchState,
 };
 use phone_access::PhoneAccessState;
 
@@ -139,6 +139,11 @@ fn play_media_file_native(
     media_file_id: String,
 ) -> Result<NativePlaybackResult, String> {
     db::play_media_file_native(&app, media_file_id)
+}
+
+#[tauri::command]
+fn open_pdf_file(app: tauri::AppHandle, media_file_id: String) -> Result<OpenMediaResult, String> {
+    db::open_pdf_file(&app, media_file_id)
 }
 
 #[tauri::command]
@@ -280,6 +285,7 @@ pub fn run() {
             audit_media_storage,
             cleanup_media_storage,
             play_media_file_native,
+            open_pdf_file,
             start_phone_media_session,
             get_phone_media_session,
             stop_phone_media_session,
