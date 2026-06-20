@@ -407,6 +407,12 @@ export interface CreatePublisherProfileRequest {
   blossomServers: BlossomServerConfig[];
 }
 
+export interface SavePublisherChannelRequest {
+  profileId: string;
+  channelTitle: string;
+  channelDescription?: string;
+}
+
 export interface PublishedLessonDraft {
   title: string;
   contentType: "video" | "audio" | "pdf";

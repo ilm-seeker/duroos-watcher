@@ -69,6 +69,7 @@ import {
   resolveMediaFileUrl,
   resolveMediaThumbnailUrl,
   saveLessonNote,
+  savePublisherChannel,
   saveWatchState,
   startPhoneMediaSession,
   stopPhoneMediaSession,
@@ -1417,6 +1418,7 @@ const App = () => {
           <PublishView
             publisherProfiles={publisherProfiles}
             publisherChannels={publisherChannels}
+            followedChannels={channelSubscriptions}
             onPublisherProfilesChanged={refreshPublisherProfiles}
             onPublisherResult={setSystemNotice}
           />
@@ -1587,6 +1589,7 @@ const TopBar = ({
   const runningJobs = snapshot.jobs.filter((job) => job.state === "queued" || job.state === "running");
   const title = viewTitle(viewMode);
   const searchConfig = searchConfigForView(viewMode);
+  const showLibraryMeta = viewMode === "library";
 
   const downloader = downloaderStatus(runtimeDiagnostics);
   const runtimeLabel = isTauriRuntime() ? "Desktop runtime" : "Browser preview";
@@ -1598,18 +1601,20 @@ const TopBar = ({
         <div className="top-bar-title">
           <p>Duroos Watcher</p>
           <h1>{title}</h1>
-          <div className="top-bar-meta">
-            <StatusChip label={`${snapshot.lessons.length} items`} tone="neutral" />
-            <StatusChip label={`${snapshot.mediaFiles.length} local files`} tone="positive" />
-            <StatusChip
-              label={`${missingFileCount} need files`}
-              tone={missingFileCount > 0 ? "warning" : "positive"}
-            />
-            <StatusChip
-              label={`${runningJobs.length} active jobs`}
-              tone={runningJobs.length > 0 ? "warning" : "neutral"}
-            />
-          </div>
+          {showLibraryMeta ? (
+            <div className="top-bar-meta">
+              <StatusChip label={`${snapshot.lessons.length} items`} tone="neutral" />
+              <StatusChip label={`${snapshot.mediaFiles.length} local files`} tone="positive" />
+              <StatusChip
+                label={`${missingFileCount} need files`}
+                tone={missingFileCount > 0 ? "warning" : "positive"}
+              />
+              <StatusChip
+                label={`${runningJobs.length} active jobs`}
+                tone={runningJobs.length > 0 ? "warning" : "neutral"}
+              />
+            </div>
+          ) : null}
         </div>
         <div className="top-actions">
           <div
@@ -1675,7 +1680,7 @@ const viewTitle = (viewMode: ViewMode): string => {
     case "relays":
       return "Channels";
     case "publish":
-      return "Publish";
+      return "Teacher Channel";
     case "sources":
       return "Source Control";
     case "queue":
@@ -3964,32 +3969,21 @@ const RelaysView = ({
 const PublishView = ({
   publisherProfiles,
   publisherChannels,
+  followedChannels,
   onPublisherProfilesChanged,
   onPublisherResult,
 }: {
   publisherProfiles: PublisherProfile[];
   publisherChannels: PublisherChannel[];
+  followedChannels: ChannelSubscriptionView[];
   onPublisherProfilesChanged: () => Promise<void>;
   onPublisherResult: (notice: string) => void;
 }) => (
   <div className="wide-page publish-page">
-    <div className="page-heading publish-heading">
-      <div>
-        <h2>Teacher Channel</h2>
-        <p>
-          Publish media and text updates to the same signed channel link your learners already
-          follow.
-        </p>
-      </div>
-      <div className="relays-heading-status">
-        <StatusChip label="Local signing key" tone="positive" />
-        <StatusChip label="Share link" tone="neutral" />
-        <StatusChip label="No central catalog" tone="neutral" />
-      </div>
-    </div>
     <TeacherPublisherPanel
       profiles={publisherProfiles}
       channels={publisherChannels}
+      followedChannels={followedChannels}
       onProfilesChanged={onPublisherProfilesChanged}
       onResult={onPublisherResult}
     />
@@ -3999,11 +3993,13 @@ const PublishView = ({
 const TeacherPublisherPanel = ({
   profiles,
   channels,
+  followedChannels,
   onProfilesChanged,
   onResult,
 }: {
   profiles: PublisherProfile[];
   channels: PublisherChannel[];
+  followedChannels: ChannelSubscriptionView[];
   onProfilesChanged: () => Promise<void>;
   onResult: (notice: string) => void;
 }) => {
@@ -4040,6 +4036,20 @@ const TeacherPublisherPanel = ({
   const selectedChannel = useMemo(
     () => profileChannels.find((channel) => channel.id === channelId),
     [channelId, profileChannels],
+  );
+  const recoverableFollowedChannels = useMemo(
+    () =>
+      followedChannels.filter(
+        (channel) =>
+          channel.sourceId &&
+          !DEFAULT_SOURCE_IDS.has(channel.sourceId) &&
+          !profileChannels.some(
+            (publisherChannel) =>
+              publisherChannel.title.trim().toLowerCase() ===
+              channel.title.trim().toLowerCase(),
+          ),
+      ),
+    [followedChannels, profileChannels],
   );
 
   useEffect(() => {
@@ -4399,6 +4409,46 @@ const TeacherPublisherPanel = ({
     setChannelDescription("");
   };
 
+  const saveChannelDraft = async (
+    title = channelTitle,
+    description = channelDescription,
+  ) => {
+    if (!selectedProfile) {
+      setPanelNotice("Create or select a publisher profile first.");
+      return;
+    }
+
+    const trimmedTitle = title.trim();
+    if (!trimmedTitle) {
+      setPanelNotice("Add a channel title before saving it.");
+      return;
+    }
+
+    setIsWorking(true);
+    setPanelNotice("");
+
+    try {
+      const channel = await savePublisherChannel({
+        profileId: selectedProfile.id,
+        channelTitle: trimmedTitle,
+        channelDescription: description.trim() || undefined,
+      });
+      setChannelId(channel.id);
+      setChannelTitle(channel.title);
+      setChannelDescription(channel.description ?? "");
+      setPanelNotice(`Saved ${channel.title} as a publisher channel for this profile.`);
+      await onProfilesChanged();
+    } catch (error: unknown) {
+      setPanelNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const recoverFollowedChannel = async (channel: ChannelSubscriptionView) => {
+    await saveChannelDraft(channel.title, channel.description ?? "");
+  };
+
   const updateDraft = (
     index: number,
     patch: Partial<PublishedLessonDraft>,
@@ -4590,7 +4640,6 @@ const TeacherPublisherPanel = ({
           {panelNotice}
         </p>
       ) : null}
-      <PublisherSetupChecklist steps={publisherSteps} />
 
       <div className="publisher-grid">
         <div className="publisher-column">
@@ -4793,6 +4842,29 @@ const TeacherPublisherPanel = ({
               <span>Last published {formatDate(selectedChannel.lastPublishedAt)}</span>
             </div>
           ) : null}
+          {!profileChannels.length && recoverableFollowedChannels.length ? (
+            <div className="publisher-channel-recovery">
+              <div>
+                <strong>Followed channels found</strong>
+                <span>Save one to this profile before publishing another update.</span>
+              </div>
+              <div className="publisher-channel-recovery-list">
+                {recoverableFollowedChannels.slice(0, 3).map((channel) => (
+                  <button
+                    type="button"
+                    className="secondary-action"
+                    key={channel.id}
+                    onClick={() => recoverFollowedChannel(channel)}
+                    disabled={isWorking || !selectedProfile}
+                    title="Use this only for a channel originally published with the selected profile."
+                  >
+                    <Rss size={15} />
+                    <span>{channel.title}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <label className="field">
             <span>Channel title</span>
             <input
@@ -4810,6 +4882,16 @@ const TeacherPublisherPanel = ({
             <span className="field-hint">Optional source or permission note.</span>
           </label>
           <div className="publisher-actions">
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={() => saveChannelDraft()}
+              disabled={isWorking || !selectedProfile || !channelTitle.trim()}
+              title="Save this channel locally so it appears in the existing-channel menu."
+            >
+              <CheckCircle2 size={16} />
+              <span>Save Channel</span>
+            </button>
             <button
               type="button"
               className="secondary-action"
@@ -5013,27 +5095,6 @@ const TeacherPublisherPanel = ({
     </section>
   );
 };
-
-const PublisherSetupChecklist = ({
-  steps,
-}: {
-  steps: Array<{ title: string; detail: string; complete: boolean }>;
-}) => (
-  <div className="publisher-step-list" aria-label="Publisher setup steps">
-    {steps.map((step, index) => (
-      <div
-        className={step.complete ? "publisher-step publisher-step-complete" : "publisher-step"}
-        key={step.title}
-      >
-        <span>{index + 1}</span>
-        <div>
-          <strong>{step.title}</strong>
-          <p>{step.detail}</p>
-        </div>
-      </div>
-    ))}
-  </div>
-);
 
 const endpointLines = (value: string): string[] =>
   value

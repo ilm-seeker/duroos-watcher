@@ -23,6 +23,7 @@ import type {
   PublisherEndpointTestReport,
   PublisherEndpointTestRequest,
   PublisherProfile,
+  SavePublisherChannelRequest,
   TrustedCurator,
   TrustCuratorSummary,
   RuntimeDiagnostics,
@@ -441,6 +442,27 @@ export const listPublisherChannels = async (): Promise<PublisherChannel[]> => {
   }
 
   return invoke<PublisherChannel[]>("list_publisher_channels");
+};
+
+export const savePublisherChannel = async (
+  request: SavePublisherChannelRequest,
+): Promise<PublisherChannel> => {
+  if (!isTauriRuntime()) {
+    const now = new Date().toISOString();
+    return {
+      id: "browser-preview-channel",
+      profileId: request.profileId,
+      title: request.channelTitle,
+      description: request.channelDescription,
+      channelIdentifier: "duroos-channel:browser-preview-channel",
+      mediaCount: 0,
+      postCount: 0,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  return invoke<PublisherChannel>("save_publisher_channel", { request });
 };
 
 export const createPublisherProfile = async (

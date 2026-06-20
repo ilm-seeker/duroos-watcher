@@ -5,7 +5,7 @@ use crate::{
         ChannelPublishResult, CreatePublisherProfileRequest, IngestSummary, NostrChannelPreview,
         NostrRelayConfig, NostrRelayPublishResult, PublishTeacherChannelRequest,
         PublishedLessonDraft, PublishedPostDraft, PublisherChannel, PublisherEndpointTestReport,
-        PublisherEndpointTestRequest, PublisherProfile,
+        PublisherEndpointTestRequest, PublisherProfile, SavePublisherChannelRequest,
     },
 };
 use argon2::Argon2;
@@ -144,11 +144,11 @@ struct PublisherChannelUpsert<'a> {
     title: &'a str,
     description: Option<&'a str>,
     channel_identifier: &'a str,
-    naddr: &'a str,
-    canonical_channel_link: &'a str,
-    last_manifest_sha256: &'a str,
-    last_manifest_url: &'a str,
-    last_published_at: &'a str,
+    naddr: Option<&'a str>,
+    canonical_channel_link: Option<&'a str>,
+    last_manifest_sha256: Option<&'a str>,
+    last_manifest_url: Option<&'a str>,
+    last_published_at: Option<&'a str>,
     media_count: i64,
     post_count: i64,
 }
@@ -174,6 +174,62 @@ pub fn list_publisher_profiles(app: &AppHandle) -> Result<Vec<PublisherProfile>,
 pub fn list_publisher_channels(app: &AppHandle) -> Result<Vec<PublisherChannel>, String> {
     let connection = db::open_connection(app)?;
     fetch_publisher_channels(&connection)
+}
+
+pub fn save_publisher_channel(
+    app: &AppHandle,
+    request: SavePublisherChannelRequest,
+) -> Result<PublisherChannel, String> {
+    let channel_title = trimmed_required(&request.channel_title, "Channel title")?;
+    let channel_description = request
+        .channel_description
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let connection = db::open_connection(app)?;
+    let profile = publisher_profile_for_id(&connection, app, request.profile_id.trim())?
+        .ok_or_else(|| "Publisher profile was not found.".to_string())?;
+    let (channel_id, identifier) =
+        resolve_publish_channel_identity(&connection, &profile, None, &channel_title)?;
+    let existing_channel = publisher_channel_for_id(&connection, &channel_id)?;
+
+    upsert_publisher_channel(
+        &connection,
+        &PublisherChannelUpsert {
+            id: &channel_id,
+            profile_id: &profile.id,
+            title: &channel_title,
+            description: channel_description.as_deref(),
+            channel_identifier: &identifier,
+            naddr: existing_channel
+                .as_ref()
+                .and_then(|channel| channel.naddr.as_deref()),
+            canonical_channel_link: existing_channel
+                .as_ref()
+                .and_then(|channel| channel.canonical_channel_link.as_deref()),
+            last_manifest_sha256: existing_channel
+                .as_ref()
+                .and_then(|channel| channel.last_manifest_sha256.as_deref()),
+            last_manifest_url: existing_channel
+                .as_ref()
+                .and_then(|channel| channel.last_manifest_url.as_deref()),
+            last_published_at: existing_channel
+                .as_ref()
+                .and_then(|channel| channel.last_published_at.as_deref()),
+            media_count: existing_channel
+                .as_ref()
+                .map(|channel| channel.media_count)
+                .unwrap_or_default(),
+            post_count: existing_channel
+                .as_ref()
+                .map(|channel| channel.post_count)
+                .unwrap_or_default(),
+        },
+    )?;
+
+    publisher_channel_for_id(&connection, &channel_id)?
+        .ok_or_else(|| "Publisher channel could not be saved.".to_string())
 }
 
 pub fn create_publisher_profile(
@@ -449,11 +505,11 @@ pub fn publish_teacher_channel(
             title: &channel_title,
             description: request.channel_description.as_deref(),
             channel_identifier: &identifier,
-            naddr: &naddr,
-            canonical_channel_link: &canonical_channel_link,
-            last_manifest_sha256: &formatted_manifest_sha256,
-            last_manifest_url: &manifest_url,
-            last_published_at: &published_at,
+            naddr: Some(&naddr),
+            canonical_channel_link: Some(&canonical_channel_link),
+            last_manifest_sha256: Some(&formatted_manifest_sha256),
+            last_manifest_url: Some(&manifest_url),
+            last_published_at: Some(&published_at),
             media_count,
             post_count,
         },

@@ -435,6 +435,14 @@ pub struct CreatePublisherProfileRequest {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct SavePublisherChannelRequest {
+    pub profile_id: String,
+    pub channel_title: String,
+    pub channel_description: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct PublishedLessonDraft {
     pub title: String,
     pub content_type: String,
