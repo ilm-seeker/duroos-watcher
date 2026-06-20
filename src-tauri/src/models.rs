@@ -454,6 +454,7 @@ pub struct CreatePublisherProfileRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SavePublisherChannelRequest {
     pub profile_id: String,
+    pub channel_id: Option<String>,
     pub channel_title: String,
     pub channel_description: Option<String>,
 }

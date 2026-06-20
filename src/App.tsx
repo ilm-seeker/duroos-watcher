@@ -25,6 +25,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Play,
+  Plus,
   QrCode,
   RefreshCcw,
   RadioTower,
@@ -4070,6 +4071,8 @@ const TeacherPublisherPanel = ({
   useEffect(() => {
     if (!selectedProfile) {
       setChannelId("");
+      setChannelTitle("");
+      setChannelDescription("");
       return;
     }
 
@@ -4078,7 +4081,7 @@ const TeacherPublisherPanel = ({
         return current;
       }
 
-      return profileChannels[0]?.id ?? "";
+      return "";
     });
   }, [selectedProfile, profileChannels]);
 
@@ -4345,6 +4348,14 @@ const TeacherPublisherPanel = ({
     };
   }, [publishInvite]);
 
+  const selectPublisherProfile = (nextProfileId: string) => {
+    setProfileId(nextProfileId);
+    setChannelId("");
+    setChannelTitle("");
+    setChannelDescription("");
+    setPublishResult(null);
+  };
+
   const createProfile = async () => {
     setIsWorking(true);
     setPanelNotice("");
@@ -4356,7 +4367,7 @@ const TeacherPublisherPanel = ({
         relays,
         blossomServers,
       });
-      setProfileId(profile.id);
+      selectPublisherProfile(profile.id);
       setPanelNotice(`Publisher profile ready for ${profile.displayName}.`);
       await onProfilesChanged();
     } catch (error: unknown) {
@@ -4456,6 +4467,12 @@ const TeacherPublisherPanel = ({
     setChannelDescription("");
   };
 
+  const startNewChannel = () => {
+    selectPublisherChannel("");
+    setPanelNotice("Ready to create a new publisher channel.");
+    publisherComposerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
   const saveChannelDraft = async (
     title = channelTitle,
     description = channelDescription,
@@ -4475,15 +4492,21 @@ const TeacherPublisherPanel = ({
     setPanelNotice("");
 
     try {
+      const savedExistingChannel = Boolean(selectedChannel);
       const channel = await savePublisherChannel({
         profileId: selectedProfile.id,
+        channelId: selectedChannel?.id,
         channelTitle: trimmedTitle,
         channelDescription: description.trim() || undefined,
       });
       setChannelId(channel.id);
       setChannelTitle(channel.title);
       setChannelDescription(channel.description ?? "");
-      setPanelNotice(`Saved ${channel.title} as a publisher channel for this profile.`);
+      setPanelNotice(
+        savedExistingChannel
+          ? `Updated publisher channel ${channel.title}.`
+          : `Saved ${channel.title} as a publisher channel for this profile.`,
+      );
       await onProfilesChanged();
     } catch (error: unknown) {
       setPanelNotice(error instanceof Error ? error.message : String(error));
@@ -4809,7 +4832,7 @@ const TeacherPublisherPanel = ({
             <span>Publisher profile</span>
             <select
               value={profileId}
-              onChange={(event) => setProfileId(event.target.value)}
+              onChange={(event) => selectPublisherProfile(event.target.value)}
             >
               <option value="">New profile</option>
               {profiles.map((profile) => (
@@ -4986,7 +5009,7 @@ const TeacherPublisherPanel = ({
               ))}
             </select>
             <span className="field-hint">
-              Select an existing channel to keep the same subscriber link.
+              Existing channels keep their subscriber link; new channels get a separate link when published.
             </span>
           </label>
           {selectedChannel ? (
@@ -5046,12 +5069,26 @@ const TeacherPublisherPanel = ({
             <button
               type="button"
               className="secondary-action"
+              onClick={startNewChannel}
+              disabled={isWorking || !selectedProfile}
+              title="Start a separate publisher channel with a new subscriber link."
+            >
+              <Plus size={16} />
+              <span>New Channel</span>
+            </button>
+            <button
+              type="button"
+              className="secondary-action"
               onClick={() => saveChannelDraft()}
               disabled={isWorking || !selectedProfile || !channelTitle.trim()}
-              title="Save this channel locally so it appears in the existing-channel menu."
+              title={
+                selectedChannel
+                  ? "Save changes to this existing channel record."
+                  : "Save this channel locally so it appears in the existing-channel menu."
+              }
             >
               <CheckCircle2 size={16} />
-              <span>Save Channel</span>
+              <span>{selectedChannel ? "Save Changes" : "Save Channel"}</span>
             </button>
             <button
               type="button"

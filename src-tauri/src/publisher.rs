@@ -183,8 +183,12 @@ pub fn save_publisher_channel(
     let connection = db::open_connection(app)?;
     let profile = publisher_profile_for_id(&connection, app, request.profile_id.trim())?
         .ok_or_else(|| "Publisher profile was not found.".to_string())?;
-    let (channel_id, identifier) =
-        resolve_publish_channel_identity(&connection, &profile, None, &channel_title)?;
+    let (channel_id, identifier) = resolve_publish_channel_identity(
+        &connection,
+        &profile,
+        request.channel_id.as_deref(),
+        &channel_title,
+    )?;
     let existing_channel = publisher_channel_for_id(&connection, &channel_id)?;
 
     upsert_publisher_channel(
@@ -3481,6 +3485,20 @@ mod tests {
             .unwrap();
     }
 
+    fn test_publisher_profile() -> PublisherProfile {
+        PublisherProfile {
+            id: "profile-test".to_string(),
+            display_name: "Lessons Teacher".to_string(),
+            curator_public_key: "curator-public-key".to_string(),
+            nostr_pubkey: "nostr-public-key".to_string(),
+            relays: vec![],
+            blossom_servers: vec![],
+            created_at: "2026-06-20T10:00:00Z".to_string(),
+            updated_at: "2026-06-20T10:00:00Z".to_string(),
+            vault_configured: false,
+        }
+    }
+
     fn insert_test_published_item(
         connection: &Connection,
         id: &str,
@@ -3505,6 +3523,61 @@ mod tests {
                 ],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn explicit_publisher_channel_identity_preserves_existing_link() {
+        let connection = publisher_inventory_test_connection();
+        let profile = test_publisher_profile();
+        insert_test_publisher_channel(&connection, "channel-existing");
+
+        let (channel_id, identifier) = resolve_publish_channel_identity(
+            &connection,
+            &profile,
+            Some("channel-existing"),
+            "Renamed Lessons",
+        )
+        .unwrap();
+
+        assert_eq!(channel_id, "channel-existing");
+        assert_eq!(identifier, "duroos-channel:channel-existing");
+    }
+
+    #[test]
+    fn new_publisher_channel_identity_does_not_reuse_selected_channel() {
+        let connection = publisher_inventory_test_connection();
+        let profile = test_publisher_profile();
+        insert_test_publisher_channel(&connection, "channel-existing");
+        let title = "New Lessons";
+        let expected_channel_id = format!(
+            "channel-{}",
+            stable_suffix(&format!("{}:{title}", profile.id))
+        );
+
+        let (channel_id, identifier) =
+            resolve_publish_channel_identity(&connection, &profile, None, title).unwrap();
+
+        assert_eq!(channel_id, expected_channel_id);
+        assert_ne!(channel_id, "channel-existing");
+        assert_eq!(identifier, format!("duroos-channel:{channel_id}"));
+    }
+
+    #[test]
+    fn explicit_publisher_channel_identity_rejects_other_profile_channel() {
+        let connection = publisher_inventory_test_connection();
+        let mut profile = test_publisher_profile();
+        profile.id = "profile-other".to_string();
+        insert_test_publisher_channel(&connection, "channel-existing");
+
+        let error = resolve_publish_channel_identity(
+            &connection,
+            &profile,
+            Some("channel-existing"),
+            "Lessons",
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "Publisher channel belongs to a different profile.");
     }
 
     #[test]

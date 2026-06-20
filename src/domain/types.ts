@@ -424,6 +424,7 @@ export interface CreatePublisherProfileRequest {
 
 export interface SavePublisherChannelRequest {
   profileId: string;
+  channelId?: string;
   channelTitle: string;
   channelDescription?: string;
 }
