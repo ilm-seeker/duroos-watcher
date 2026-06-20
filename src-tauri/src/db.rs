@@ -1139,7 +1139,12 @@ pub fn ingest_source_url(app: &AppHandle, source_url: String) -> Result<IngestSu
     if is_nostr_reference(&normalized_input) {
         match publisher::resolve_nostr_channel_manifest_url(&normalized_input) {
             Ok(resolved) => {
-                let mut summary = ingest_source_url(app, resolved.manifest_url)?;
+                let mut summary = ingest_feed_url(
+                    &mut connection,
+                    &client,
+                    &normalized_input,
+                    &resolved.manifest_url,
+                )?;
                 summary.source_url = normalized_input;
                 summary.messages.insert(
                     0,
@@ -1195,6 +1200,10 @@ pub fn refresh_source(app: &AppHandle, source_id: String) -> Result<IngestSummar
     let mut connection = open_connection(app)?;
     let source = refreshable_source(&connection, source_id)?
         .ok_or_else(|| "Source was not found.".to_string())?;
+
+    if is_nostr_reference(&source.identifier) {
+        return ingest_source_url(app, source.identifier);
+    }
 
     if !(source.identifier.starts_with("http://") || source.identifier.starts_with("https://")) {
         let detail = format!("{} is not a refreshable remote source.", source.label);
@@ -2028,7 +2037,11 @@ fn ingest_feed_url(
     if parsed_feed.trust_state == "signed-untrusted" && trusted_curator_id.is_some() {
         parsed_feed.trust_state = "signed-trusted".to_string();
     }
-    let source_suffix = stable_suffix(feed_url);
+    let source_suffix = if is_nostr_reference(original_url) {
+        stable_suffix(original_url)
+    } else {
+        stable_suffix(feed_url)
+    };
     let source_label = match platform.as_str() {
         "youtube" => format!("YouTube: {}", parsed_feed.title),
         "archive-org" => format!("Archive.org: {}", parsed_feed.title),
@@ -2069,7 +2082,11 @@ fn ingest_feed_url(
         source_label: source_label.clone(),
         source_identifier: original_url.to_string(),
         feed_format: parsed_feed.feed_format.clone(),
-        feed_transport: "https".to_string(),
+        feed_transport: if is_nostr_reference(original_url) {
+            "nostr".to_string()
+        } else {
+            "https".to_string()
+        },
         trust_state: parsed_feed.trust_state.clone(),
         trusted_curator_id,
         last_verified_at: if parsed_feed.trust_state.starts_with("signed-") {
@@ -2097,7 +2114,7 @@ fn ingest_feed_url(
             .unwrap_or_else(|| format!("teacher-feed-{source_suffix}")),
         teacher_label,
         teacher_description,
-        teacher_source_links: vec![feed_url.to_string()],
+        teacher_source_links: vec![original_url.to_string()],
         collection_id: format!("collection-feed-{source_suffix}"),
         collection_title: parsed_feed.title.clone(),
         collection_owner_label: "Subscribed feed".to_string(),
@@ -5897,6 +5914,38 @@ fn run_migrations(connection: &Connection) -> Result<(), String> {
               vault_path TEXT NOT NULL,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS publisher_channels (
+              id TEXT PRIMARY KEY,
+              profile_id TEXT NOT NULL REFERENCES publisher_profiles(id),
+              title TEXT NOT NULL,
+              description TEXT,
+              channel_identifier TEXT NOT NULL UNIQUE,
+              naddr TEXT,
+              canonical_channel_link TEXT,
+              last_manifest_sha256 TEXT,
+              last_manifest_url TEXT,
+              last_published_at TEXT,
+              media_count INTEGER NOT NULL DEFAULT 0,
+              post_count INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS publisher_channel_items (
+              id TEXT PRIMARY KEY,
+              channel_id TEXT NOT NULL REFERENCES publisher_channels(id),
+              item_type TEXT NOT NULL,
+              title TEXT NOT NULL,
+              content_type TEXT NOT NULL,
+              description TEXT,
+              origin_url TEXT NOT NULL,
+              retrieval_url TEXT,
+              sha256 TEXT NOT NULL,
+              size_bytes INTEGER,
+              mime_type TEXT,
+              published_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS live_sessions (

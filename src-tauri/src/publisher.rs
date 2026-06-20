@@ -4,8 +4,8 @@ use crate::{
         ArchiveMirrorConfig, ArchiveMirrorResult, BlossomServerConfig, BlossomUploadResult,
         ChannelPublishResult, CreatePublisherProfileRequest, IngestSummary, NostrChannelPreview,
         NostrRelayConfig, NostrRelayPublishResult, PublishTeacherChannelRequest,
-        PublishedLessonDraft, PublisherEndpointTestReport, PublisherEndpointTestRequest,
-        PublisherProfile,
+        PublishedLessonDraft, PublishedPostDraft, PublisherChannel, PublisherEndpointTestReport,
+        PublisherEndpointTestRequest, PublisherProfile,
     },
 };
 use argon2::Argon2;
@@ -122,6 +122,37 @@ struct PublishedBlob {
     mime_type: String,
 }
 
+#[derive(Debug, Clone)]
+struct PublishedChannelItem {
+    id: String,
+    channel_id: String,
+    item_type: String,
+    title: String,
+    content_type: String,
+    description: Option<String>,
+    origin_url: String,
+    retrieval_url: Option<String>,
+    sha256: String,
+    size_bytes: Option<i64>,
+    mime_type: Option<String>,
+    published_at: String,
+}
+
+struct PublisherChannelUpsert<'a> {
+    id: &'a str,
+    profile_id: &'a str,
+    title: &'a str,
+    description: Option<&'a str>,
+    channel_identifier: &'a str,
+    naddr: &'a str,
+    canonical_channel_link: &'a str,
+    last_manifest_sha256: &'a str,
+    last_manifest_url: &'a str,
+    last_published_at: &'a str,
+    media_count: i64,
+    post_count: i64,
+}
+
 #[derive(Debug)]
 struct SignedManifestInput<'a> {
     profile: &'a PublisherProfile,
@@ -131,13 +162,18 @@ struct SignedManifestInput<'a> {
     channel_description: Option<&'a str>,
     relays: &'a [NostrRelayConfig],
     blossom_servers: &'a [BlossomServerConfig],
-    blobs: &'a [PublishedBlob],
+    items: &'a [PublishedChannelItem],
     published_at: &'a str,
 }
 
 pub fn list_publisher_profiles(app: &AppHandle) -> Result<Vec<PublisherProfile>, String> {
     let connection = db::open_connection(app)?;
     fetch_publisher_profiles(&connection, app)
+}
+
+pub fn list_publisher_channels(app: &AppHandle) -> Result<Vec<PublisherChannel>, String> {
+    let connection = db::open_connection(app)?;
+    fetch_publisher_channels(&connection)
 }
 
 pub fn create_publisher_profile(
@@ -223,24 +259,28 @@ pub fn publish_teacher_channel(
     let relays = normalize_relays(request.relays)?;
     let blossom_servers = normalize_blossom_servers(request.blossom_servers)?;
     let archive_mirrors = normalize_archive_mirrors(request.archive_mirrors)?;
-    if request.lessons.is_empty() {
-        return Err("Add at least one video, audio, or PDF before publishing.".to_string());
+    let post_drafts = normalize_post_drafts(request.posts)?;
+    if request.lessons.is_empty() && post_drafts.is_empty() {
+        return Err(
+            "Add at least one video, audio, PDF, or text post before publishing.".to_string(),
+        );
     }
 
     let connection = db::open_connection(app)?;
     let profile = publisher_profile_for_id(&connection, app, request.profile_id.trim())?
         .ok_or_else(|| "Publisher profile was not found.".to_string())?;
     let keys = unlock_profile_keys(app, &profile, &request.passphrase)?;
+    let (channel_id, identifier) = resolve_publish_channel_identity(
+        &connection,
+        &profile,
+        request.channel_id.as_deref(),
+        &channel_title,
+    )?;
     let client = Client::builder()
         .user_agent("DuroosWatcher/0.1 federated-publisher")
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|error| error.to_string())?;
-    let channel_id = format!(
-        "channel-{}",
-        stable_suffix(&format!("{}:{}", profile.id, channel_title))
-    );
-    let identifier = format!("duroos-channel:{channel_id}");
     let naddr = encode_naddr(
         &identifier,
         &profile.nostr_pubkey,
@@ -252,7 +292,7 @@ pub fn publish_teacher_channel(
     )?;
     let published_at = Utc::now().to_rfc3339();
     let mut blossom_results = Vec::new();
-    let mut published_blobs = Vec::new();
+    let mut new_items = Vec::new();
 
     for draft in &request.lessons {
         let blob = publish_lesson_blob(
@@ -262,8 +302,32 @@ pub fn publish_teacher_channel(
             &keys,
             &mut blossom_results,
         )?;
-        published_blobs.push(blob);
+        new_items.push(channel_item_from_blob(&channel_id, blob, &published_at));
     }
+
+    for post in &post_drafts {
+        new_items.push(channel_item_from_post(&channel_id, post, &published_at));
+    }
+
+    let mut channel_items = fetch_published_channel_items(&connection, &channel_id)?;
+    for item in &new_items {
+        if !channel_items.iter().any(|existing| existing.id == item.id) {
+            channel_items.push(item.clone());
+        }
+    }
+    channel_items.sort_by(|left, right| {
+        left.published_at
+            .cmp(&right.published_at)
+            .then_with(|| left.title.cmp(&right.title))
+    });
+    let media_count = channel_items
+        .iter()
+        .filter(|item| item.item_type == "media")
+        .count() as i64;
+    let post_count = channel_items
+        .iter()
+        .filter(|item| item.item_type == "post")
+        .count() as i64;
 
     let (manifest_json, manifest_payload_sha256) = signed_channel_manifest(SignedManifestInput {
         profile: &profile,
@@ -273,7 +337,7 @@ pub fn publish_teacher_channel(
         channel_description: request.channel_description.as_deref(),
         relays: &relays,
         blossom_servers: &blossom_servers,
-        blobs: &published_blobs,
+        items: &channel_items,
         published_at: &published_at,
     })?;
     let manifest_sha256 = sha256_hex(manifest_json.as_bytes());
@@ -351,7 +415,7 @@ pub fn publish_teacher_channel(
     })
     .to_string();
     let mut tags = vec![
-        vec!["d".to_string(), identifier],
+        vec!["d".to_string(), identifier.clone()],
         vec!["client".to_string(), APP_TAG.to_string()],
         vec!["x".to_string(), manifest_sha256.clone()],
         vec![
@@ -377,6 +441,25 @@ pub fn publish_teacher_channel(
         );
     }
 
+    upsert_publisher_channel(
+        &connection,
+        &PublisherChannelUpsert {
+            id: &channel_id,
+            profile_id: &profile.id,
+            title: &channel_title,
+            description: request.channel_description.as_deref(),
+            channel_identifier: &identifier,
+            naddr: &naddr,
+            canonical_channel_link: &canonical_channel_link,
+            last_manifest_sha256: &formatted_manifest_sha256,
+            last_manifest_url: &manifest_url,
+            last_published_at: &published_at,
+            media_count,
+            post_count,
+        },
+    )?;
+    upsert_published_channel_items(&connection, &new_items)?;
+
     connection
         .execute(
             "UPDATE publisher_profiles
@@ -392,7 +475,8 @@ pub fn publish_teacher_channel(
         .map_err(|error| error.to_string())?;
 
     Ok(ChannelPublishResult {
-        channel_id,
+        channel_id: channel_id.clone(),
+        channel_title,
         naddr,
         canonical_channel_link,
         invite_text,
@@ -404,15 +488,21 @@ pub fn publish_teacher_channel(
         blossom_results,
         archive_results,
         relay_results,
+        media_count,
+        post_count,
+        total_item_count: media_count + post_count,
         messages: vec![
             format!(
-                "Published {count} lesson file(s).",
-                count = published_blobs.len()
+                "Published {media_count} media item(s) and {post_count} text post(s) in this channel."
+            ),
+            format!(
+                "Channel feed now advertises {total} signed item(s).",
+                total = media_count + post_count
             ),
             format!(
                 "Advertised {archive_ref_count} archive manifest mirror(s) after SHA-256 verification; {archive_failure_count} archive mirror(s) were skipped."
             ),
-            "Share the naddr channel link with learners; no central Duroos catalog was created."
+            "Existing subscribers keep the same channel link; no central Duroos catalog was created."
                 .to_string(),
         ],
     })
@@ -510,19 +600,7 @@ fn endpoint_test_messages(
 }
 
 pub fn ingest_nostr_channel(app: &AppHandle, channel_ref: String) -> Result<IngestSummary, String> {
-    let resolved = resolve_nostr_channel_manifest_url(&channel_ref)?;
-    let mut summary = db::ingest_source_url(app, resolved.manifest_url)?;
-    summary.source_url = channel_ref;
-    summary.messages.insert(
-        0,
-        format!(
-            "Resolved Nostr channel {} to signed manifest {} across {} advertised manifest mirror(s).",
-            resolved.naddr,
-            resolved.manifest_sha256,
-            resolved.manifest_urls.len()
-        ),
-    );
-    Ok(summary)
+    db::ingest_source_url(app, channel_ref)
 }
 
 pub fn preview_nostr_channel(
@@ -850,6 +928,296 @@ fn fetch_publisher_profiles(
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
+}
+
+fn fetch_publisher_channels(connection: &Connection) -> Result<Vec<PublisherChannel>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, profile_id, title, description, channel_identifier, naddr,
+                    canonical_channel_link, last_manifest_sha256, last_manifest_url,
+                    last_published_at, media_count, post_count, created_at, updated_at
+             FROM publisher_channels
+             ORDER BY updated_at DESC, created_at DESC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], publisher_channel_from_row)
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn publisher_channel_for_id(
+    connection: &Connection,
+    channel_id: &str,
+) -> Result<Option<PublisherChannel>, String> {
+    connection
+        .query_row(
+            "SELECT id, profile_id, title, description, channel_identifier, naddr,
+                    canonical_channel_link, last_manifest_sha256, last_manifest_url,
+                    last_published_at, media_count, post_count, created_at, updated_at
+             FROM publisher_channels
+             WHERE id = ?1",
+            params![channel_id],
+            publisher_channel_from_row,
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
+fn publisher_channel_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PublisherChannel> {
+    Ok(PublisherChannel {
+        id: row.get(0)?,
+        profile_id: row.get(1)?,
+        title: row.get(2)?,
+        description: row.get(3)?,
+        channel_identifier: row.get(4)?,
+        naddr: row.get(5)?,
+        canonical_channel_link: row.get(6)?,
+        last_manifest_sha256: row.get(7)?,
+        last_manifest_url: row.get(8)?,
+        last_published_at: row.get(9)?,
+        media_count: row.get(10)?,
+        post_count: row.get(11)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
+    })
+}
+
+fn resolve_publish_channel_identity(
+    connection: &Connection,
+    profile: &PublisherProfile,
+    requested_channel_id: Option<&str>,
+    channel_title: &str,
+) -> Result<(String, String), String> {
+    if let Some(channel_id) = requested_channel_id
+        .map(str::trim)
+        .filter(|channel_id| !channel_id.is_empty())
+    {
+        let channel = publisher_channel_for_id(connection, channel_id)?
+            .ok_or_else(|| "Publisher channel was not found.".to_string())?;
+        if channel.profile_id != profile.id {
+            return Err("Publisher channel belongs to a different profile.".to_string());
+        }
+
+        return Ok((channel.id, channel.channel_identifier));
+    }
+
+    let channel_id = format!(
+        "channel-{}",
+        stable_suffix(&format!("{}:{}", profile.id, channel_title))
+    );
+    if let Some(channel) = publisher_channel_for_id(connection, &channel_id)? {
+        if channel.profile_id != profile.id {
+            return Err("Publisher channel belongs to a different profile.".to_string());
+        }
+
+        return Ok((channel.id, channel.channel_identifier));
+    }
+
+    let identifier = format!("duroos-channel:{channel_id}");
+    Ok((channel_id, identifier))
+}
+
+fn upsert_publisher_channel(
+    connection: &Connection,
+    channel: &PublisherChannelUpsert<'_>,
+) -> Result<(), String> {
+    let now = Utc::now().to_rfc3339();
+    connection
+        .execute(
+            "INSERT INTO publisher_channels
+             (id, profile_id, title, description, channel_identifier, naddr,
+              canonical_channel_link, last_manifest_sha256, last_manifest_url,
+              last_published_at, media_count, post_count, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)
+             ON CONFLICT(id) DO UPDATE SET
+               title = excluded.title,
+               description = excluded.description,
+               channel_identifier = excluded.channel_identifier,
+               naddr = excluded.naddr,
+               canonical_channel_link = excluded.canonical_channel_link,
+               last_manifest_sha256 = excluded.last_manifest_sha256,
+               last_manifest_url = excluded.last_manifest_url,
+               last_published_at = excluded.last_published_at,
+               media_count = excluded.media_count,
+               post_count = excluded.post_count,
+               updated_at = excluded.updated_at",
+            params![
+                channel.id,
+                channel.profile_id,
+                channel.title,
+                channel.description,
+                channel.channel_identifier,
+                channel.naddr,
+                channel.canonical_channel_link,
+                channel.last_manifest_sha256,
+                channel.last_manifest_url,
+                channel.last_published_at,
+                channel.media_count,
+                channel.post_count,
+                now
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn fetch_published_channel_items(
+    connection: &Connection,
+    channel_id: &str,
+) -> Result<Vec<PublishedChannelItem>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, channel_id, item_type, title, content_type, description,
+                    origin_url, retrieval_url, sha256, size_bytes, mime_type, published_at
+             FROM publisher_channel_items
+             WHERE channel_id = ?1
+             ORDER BY published_at ASC, title ASC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![channel_id], published_channel_item_from_row)
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn published_channel_item_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<PublishedChannelItem> {
+    Ok(PublishedChannelItem {
+        id: row.get(0)?,
+        channel_id: row.get(1)?,
+        item_type: row.get(2)?,
+        title: row.get(3)?,
+        content_type: row.get(4)?,
+        description: row.get(5)?,
+        origin_url: row.get(6)?,
+        retrieval_url: row.get(7)?,
+        sha256: row.get(8)?,
+        size_bytes: row.get(9)?,
+        mime_type: row.get(10)?,
+        published_at: row.get(11)?,
+    })
+}
+
+fn upsert_published_channel_items(
+    connection: &Connection,
+    items: &[PublishedChannelItem],
+) -> Result<(), String> {
+    for item in items {
+        connection
+            .execute(
+                "INSERT INTO publisher_channel_items
+                 (id, channel_id, item_type, title, content_type, description, origin_url,
+                  retrieval_url, sha256, size_bytes, mime_type, published_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 ON CONFLICT(id) DO UPDATE SET
+                   title = excluded.title,
+                   description = excluded.description,
+                   origin_url = excluded.origin_url,
+                   retrieval_url = excluded.retrieval_url,
+                   sha256 = excluded.sha256,
+                   size_bytes = excluded.size_bytes,
+                   mime_type = excluded.mime_type,
+                   published_at = excluded.published_at",
+                params![
+                    item.id,
+                    item.channel_id,
+                    item.item_type,
+                    item.title,
+                    item.content_type,
+                    item.description,
+                    item.origin_url,
+                    item.retrieval_url,
+                    item.sha256,
+                    item.size_bytes,
+                    item.mime_type,
+                    item.published_at
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn channel_item_from_blob(
+    channel_id: &str,
+    blob: PublishedBlob,
+    published_at: &str,
+) -> PublishedChannelItem {
+    PublishedChannelItem {
+        id: format!(
+            "channel-item-{}",
+            stable_suffix(&format!("{channel_id}:media:{}", blob.sha256))
+        ),
+        channel_id: channel_id.to_string(),
+        item_type: "media".to_string(),
+        title: blob.title,
+        content_type: blob.content_type,
+        description: blob.description,
+        origin_url: blob.url.clone(),
+        retrieval_url: Some(blob.url),
+        sha256: blob.sha256,
+        size_bytes: Some(blob.size_bytes),
+        mime_type: Some(blob.mime_type),
+        published_at: published_at.to_string(),
+    }
+}
+
+fn normalize_post_drafts(
+    posts: Vec<PublishedPostDraft>,
+) -> Result<Vec<PublishedPostDraft>, String> {
+    posts
+        .into_iter()
+        .map(|post| {
+            let title = clip_publish_text(&trimmed_required(&post.title, "Post title")?, 140);
+            let body = clip_publish_text(&trimmed_required(&post.body, "Post body")?, 4000);
+            Ok(PublishedPostDraft { title, body })
+        })
+        .collect()
+}
+
+fn channel_item_from_post(
+    channel_id: &str,
+    post: &PublishedPostDraft,
+    published_at: &str,
+) -> PublishedChannelItem {
+    let canonical_post = json!({
+        "title": post.title,
+        "body": post.body,
+    })
+    .to_string();
+    let post_hash = sha256_hex(canonical_post.as_bytes());
+    let origin_url = format!(
+        "https://duroos.local/channels/{}/posts/{}",
+        channel_id,
+        &post_hash[..16]
+    );
+
+    PublishedChannelItem {
+        id: format!(
+            "channel-item-{}",
+            stable_suffix(&format!("{channel_id}:post:{post_hash}"))
+        ),
+        channel_id: channel_id.to_string(),
+        item_type: "post".to_string(),
+        title: post.title.clone(),
+        content_type: "post".to_string(),
+        description: Some(post.body.clone()),
+        origin_url,
+        retrieval_url: None,
+        sha256: post_hash,
+        size_bytes: Some(post.body.len() as i64),
+        mime_type: Some("text/plain; charset=utf-8".to_string()),
+        published_at: published_at.to_string(),
+    }
+}
+
+fn clip_publish_text(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect::<String>()
 }
 
 fn publisher_profile_for_id(
@@ -1274,7 +1642,7 @@ fn signed_channel_manifest(input: SignedManifestInput<'_>) -> Result<(String, St
         channel_description,
         relays,
         blossom_servers,
-        blobs,
+        items,
         published_at,
     } = input;
 
@@ -1286,34 +1654,43 @@ fn signed_channel_manifest(input: SignedManifestInput<'_>) -> Result<(String, St
         .iter()
         .map(|server| server.url.clone())
         .collect::<Vec<_>>();
-    let lessons = blobs
+    let lessons = items
         .iter()
-        .map(|blob| {
-            json!({
-                "title": blob.title,
-                "contentType": blob.content_type,
+        .map(|item| {
+            let mut lesson = json!({
+                "title": item.title,
+                "contentType": item.content_type,
                 "sourceRefs": [{
-                    "platform": "blossom",
-                    "originUrl": blob.url,
-                    "publishedAt": published_at,
+                    "platform": if item.item_type == "post" { "duroos-post" } else { "blossom" },
+                    "originUrl": item.origin_url,
+                    "publishedAt": item.published_at,
                 }],
-                "retrievalRefs": [{
-                    "kind": "direct-url",
-                    "url": blob.url,
-                    "service": "blossom",
-                    "sha256": format!("sha256:{}", blob.sha256),
-                    "sizeBytes": blob.size_bytes,
-                    "mimeType": blob.mime_type,
-                    "mediaType": blob.mime_type,
-                }],
-                "contentHashes": [format!("sha256:{}", blob.sha256)],
+                "contentHashes": [format!("sha256:{}", item.sha256)],
                 "provenance": {
-                    "permissionNote": "Published by the teacher through Duroos federated publishing; users must still confirm rights before redistribution.",
+                    "permissionNote": if item.item_type == "post" {
+                        "Published as a signed teacher text post through Duroos federated publishing."
+                    } else {
+                        "Published by the teacher through Duroos federated publishing; users must still confirm rights before redistribution."
+                    },
                     "adapterName": "DuroosFederatedPublisher",
-                    "importedAt": published_at,
+                    "importedAt": item.published_at,
                 },
-                "description": blob.description,
-            })
+                "description": item.description,
+            });
+
+            if let Some(retrieval_url) = &item.retrieval_url {
+                lesson["retrievalRefs"] = json!([{
+                    "kind": "direct-url",
+                    "url": retrieval_url,
+                    "service": "blossom",
+                    "sha256": format!("sha256:{}", item.sha256),
+                    "sizeBytes": item.size_bytes.unwrap_or_default(),
+                    "mimeType": item.mime_type.clone().unwrap_or_else(|| "application/octet-stream".to_string()),
+                    "mediaType": item.mime_type.clone().unwrap_or_else(|| "application/octet-stream".to_string()),
+                }]);
+            }
+
+            lesson
         })
         .collect::<Vec<_>>();
     let mut manifest_value = json!({
@@ -2408,7 +2785,11 @@ mod tests {
         let blossom_servers = [BlossomServerConfig {
             url: "https://blossom.example".to_string(),
         }];
-        let blobs = [blob];
+        let items = [channel_item_from_blob(
+            "channel-test",
+            blob,
+            "2026-06-17T00:00:00Z",
+        )];
         let (manifest_json, _) = signed_channel_manifest(SignedManifestInput {
             profile: &profile,
             keys: &keys,
@@ -2417,7 +2798,7 @@ mod tests {
             channel_description: None,
             relays: &relays,
             blossom_servers: &blossom_servers,
-            blobs: &blobs,
+            items: &items,
             published_at: "2026-06-17T00:00:00Z",
         })
         .unwrap();
@@ -2427,6 +2808,83 @@ mod tests {
         assert!(!manifest_json.contains("privateKey"));
         assert!(!manifest_json.contains(local_path));
         assert!(manifest_json.contains("https://blossom.example/"));
+    }
+
+    #[test]
+    fn signed_manifest_includes_text_posts_without_retrieval_refs() {
+        let profile = PublisherProfile {
+            id: "publisher-test".to_string(),
+            display_name: "Test Teacher".to_string(),
+            curator_public_key: general_purpose::STANDARD
+                .encode(SigningKey::from_bytes(&[8_u8; 32]).verifying_key()),
+            nostr_pubkey: nostr_pubkey_from_secret(&[9_u8; 32]).unwrap(),
+            relays: vec![],
+            blossom_servers: vec![],
+            created_at: "2026-06-17T00:00:00Z".to_string(),
+            updated_at: "2026-06-17T00:00:00Z".to_string(),
+            vault_configured: true,
+        };
+        let keys = PublisherKeys {
+            curator_secret_key: [8_u8; 32],
+            nostr_secret_key: [9_u8; 32],
+        };
+        let post = PublishedPostDraft {
+            title: "Class note".to_string(),
+            body: "Read the next section before the live session.".to_string(),
+        };
+        let relays = [NostrRelayConfig {
+            url: "wss://relay.example".to_string(),
+        }];
+        let blossom_servers = [BlossomServerConfig {
+            url: "https://blossom.example".to_string(),
+        }];
+        let items = [channel_item_from_post(
+            "channel-test",
+            &post,
+            "2026-06-17T00:00:00Z",
+        )];
+        let (manifest_json, _) = signed_channel_manifest(SignedManifestInput {
+            profile: &profile,
+            keys: &keys,
+            naddr: "naddr1test",
+            channel_title: "Channel",
+            channel_description: None,
+            relays: &relays,
+            blossom_servers: &blossom_servers,
+            items: &items,
+            published_at: "2026-06-17T00:00:00Z",
+        })
+        .unwrap();
+        let manifest_value: Value = serde_json::from_str(&manifest_json).unwrap();
+        let lessons = manifest_value
+            .get("lessons")
+            .and_then(Value::as_array)
+            .unwrap();
+        let lesson = &lessons[0];
+        let source_ref = lesson
+            .get("sourceRefs")
+            .and_then(Value::as_array)
+            .and_then(|refs| refs.first())
+            .unwrap();
+
+        assert_eq!(lessons.len(), 1);
+        assert_eq!(
+            lesson.get("contentType").and_then(Value::as_str),
+            Some("post")
+        );
+        assert_eq!(
+            source_ref.get("platform").and_then(Value::as_str),
+            Some("duroos-post")
+        );
+        assert!(lesson.get("retrievalRefs").is_none());
+        assert!(lesson
+            .get("description")
+            .and_then(Value::as_str)
+            .is_some_and(|description| description.contains("Read the next section")));
+        assert!(lesson
+            .get("contentHashes")
+            .and_then(Value::as_array)
+            .is_some_and(|hashes| hashes.len() == 1));
     }
 
     #[test]

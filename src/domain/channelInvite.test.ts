@@ -12,6 +12,7 @@ const naddr =
 
 const publishResult = (): ChannelPublishResult => ({
   channelId: "channel-test",
+  channelTitle: "Foundations",
   naddr,
   canonicalChannelLink: `nostr:${naddr}`,
   inviteText: [
@@ -32,6 +33,9 @@ const publishResult = (): ChannelPublishResult => ({
   blossomResults: [],
   archiveResults: [],
   relayResults: [],
+  mediaCount: 1,
+  postCount: 0,
+  totalItemCount: 1,
   messages: [],
 });
 

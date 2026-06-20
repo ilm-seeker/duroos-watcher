@@ -10,8 +10,9 @@ use models::{
     DownloadSourceSummary, ImportSummary, IngestSummary, Lesson, LessonNote,
     ManifestValidationReport, MediaStorageAudit, MediaStorageCleanup, NativePlaybackResult,
     NostrChannelPreview, OpenMediaResult, PhoneMediaScope, PhoneMediaSession,
-    PublishTeacherChannelRequest, PublisherEndpointTestReport, PublisherEndpointTestRequest,
-    PublisherProfile, RuntimeDiagnostics, TrustCuratorSummary, TrustedCurator, WatchState,
+    PublishTeacherChannelRequest, PublisherChannel, PublisherEndpointTestReport,
+    PublisherEndpointTestRequest, PublisherProfile, RuntimeDiagnostics, TrustCuratorSummary,
+    TrustedCurator, WatchState,
 };
 use phone_access::PhoneAccessState;
 
@@ -205,6 +206,11 @@ fn list_publisher_profiles(app: tauri::AppHandle) -> Result<Vec<PublisherProfile
 }
 
 #[tauri::command]
+fn list_publisher_channels(app: tauri::AppHandle) -> Result<Vec<PublisherChannel>, String> {
+    publisher::list_publisher_channels(&app)
+}
+
+#[tauri::command]
 fn create_publisher_profile(
     app: tauri::AppHandle,
     request: CreatePublisherProfileRequest,
@@ -256,6 +262,7 @@ fn preview_nostr_channel(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(PhoneAccessState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -293,6 +300,7 @@ pub fn run() {
             add_trusted_curator,
             remove_trusted_curator,
             list_publisher_profiles,
+            list_publisher_channels,
             create_publisher_profile,
             unlock_publisher_profile,
             publish_teacher_channel,

@@ -37,3 +37,4 @@ uuid = { version = "1", features = ["v4"] }
 url = "2"
 walkdir = "2"
 zeroize = "1"
+tauri-plugin-notification = "2"

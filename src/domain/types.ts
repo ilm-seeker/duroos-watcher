@@ -383,6 +383,23 @@ export interface PublisherProfile {
   vaultConfigured: boolean;
 }
 
+export interface PublisherChannel {
+  id: string;
+  profileId: string;
+  title: string;
+  description?: string;
+  channelIdentifier: string;
+  naddr?: string;
+  canonicalChannelLink?: string;
+  lastManifestSha256?: string;
+  lastManifestUrl?: string;
+  lastPublishedAt?: string;
+  mediaCount: number;
+  postCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface CreatePublisherProfileRequest {
   displayName: string;
   passphrase: string;
@@ -397,8 +414,14 @@ export interface PublishedLessonDraft {
   description?: string;
 }
 
+export interface PublishedPostDraft {
+  title: string;
+  body: string;
+}
+
 export interface PublishTeacherChannelRequest {
   profileId: string;
+  channelId?: string;
   passphrase: string;
   channelTitle: string;
   channelDescription?: string;
@@ -406,6 +429,7 @@ export interface PublishTeacherChannelRequest {
   blossomServers: BlossomServerConfig[];
   archiveMirrors?: ArchiveMirrorConfig[];
   lessons: PublishedLessonDraft[];
+  posts?: PublishedPostDraft[];
 }
 
 export interface PublisherEndpointTestRequest {
@@ -441,6 +465,7 @@ export interface ArchiveMirrorResult {
 
 export interface ChannelPublishResult {
   channelId: string;
+  channelTitle: string;
   naddr: string;
   canonicalChannelLink: string;
   inviteText: string;
@@ -452,6 +477,9 @@ export interface ChannelPublishResult {
   blossomResults: BlossomUploadResult[];
   archiveResults: ArchiveMirrorResult[];
   relayResults: NostrRelayPublishResult[];
+  mediaCount: number;
+  postCount: number;
+  totalItemCount: number;
   messages: string[];
 }
 

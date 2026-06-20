@@ -407,6 +407,25 @@ pub struct PublisherProfile {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct PublisherChannel {
+    pub id: String,
+    pub profile_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub channel_identifier: String,
+    pub naddr: Option<String>,
+    pub canonical_channel_link: Option<String>,
+    pub last_manifest_sha256: Option<String>,
+    pub last_manifest_url: Option<String>,
+    pub last_published_at: Option<String>,
+    pub media_count: i64,
+    pub post_count: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct CreatePublisherProfileRequest {
     pub display_name: String,
     pub passphrase: String,
@@ -425,8 +444,16 @@ pub struct PublishedLessonDraft {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct PublishedPostDraft {
+    pub title: String,
+    pub body: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct PublishTeacherChannelRequest {
     pub profile_id: String,
+    pub channel_id: Option<String>,
     pub passphrase: String,
     pub channel_title: String,
     pub channel_description: Option<String>,
@@ -434,7 +461,10 @@ pub struct PublishTeacherChannelRequest {
     pub blossom_servers: Vec<BlossomServerConfig>,
     #[serde(default)]
     pub archive_mirrors: Vec<ArchiveMirrorConfig>,
+    #[serde(default)]
     pub lessons: Vec<PublishedLessonDraft>,
+    #[serde(default)]
+    pub posts: Vec<PublishedPostDraft>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -480,6 +510,7 @@ pub struct ArchiveMirrorResult {
 #[serde(rename_all = "camelCase")]
 pub struct ChannelPublishResult {
     pub channel_id: String,
+    pub channel_title: String,
     pub naddr: String,
     pub canonical_channel_link: String,
     pub invite_text: String,
@@ -491,6 +522,9 @@ pub struct ChannelPublishResult {
     pub blossom_results: Vec<BlossomUploadResult>,
     pub archive_results: Vec<ArchiveMirrorResult>,
     pub relay_results: Vec<NostrRelayPublishResult>,
+    pub media_count: i64,
+    pub post_count: i64,
+    pub total_item_count: i64,
     pub messages: Vec<String>,
 }
 

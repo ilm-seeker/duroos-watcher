@@ -1,6 +1,8 @@
 import {
   AlertTriangle,
   Archive,
+  Bell,
+  BellOff,
   BookOpen,
   CheckCircle2,
   ChevronRight,
@@ -56,6 +58,7 @@ import {
   ingestSourceUrl,
   importLocalFiles,
   isTauriRuntime,
+  listPublisherChannels,
   listPublisherProfiles,
   openPdfFile,
   playMediaFileNative,
@@ -74,6 +77,10 @@ import {
   updateLessonOrganization,
   validateCollectionManifest,
 } from "./lib/tauri";
+import {
+  ensureNotificationPermission,
+  sendChannelUpdateNotification,
+} from "./lib/notifications";
 import type { ManifestValidationReport } from "./domain/collectionManifest";
 import {
   buildChannelInvite,
@@ -113,6 +120,8 @@ import type {
   NostrChannelPreview,
   PhoneMediaSession,
   PublishedLessonDraft,
+  PublishedPostDraft,
+  PublisherChannel,
   PublisherEndpointTestReport,
   PublisherProfile,
   ProvenanceRecord,
@@ -145,8 +154,15 @@ type ImportMode = "local" | "source" | "feed" | "manifest" | "keys";
 type BusySourceAction = { sourceId: string; action: "clear" | "download" } | null;
 type PhoneAccessBusyAction = "start" | "stop" | null;
 type MediaStorageBusyAction = "audit" | "cleanup" | null;
+type ChannelNotificationPreference = {
+  enabled: boolean;
+  lastNotifiedAt?: string;
+};
+type ChannelNotificationPreferences = Record<string, ChannelNotificationPreference>;
 
 const sidebarCollapsedStorageKey = "duroos.sidebarCollapsed";
+const channelNotificationStorageKey = "duroos.channelNotifications";
+const channelNotificationRefreshMs = 5 * 60 * 1000;
 
 const defaultRuntimeDiagnostics: RuntimeDiagnostics = {
   desktopRuntimeAvailable: isTauriRuntime(),
@@ -173,6 +189,30 @@ const starterBlossomServerPresets = [
 
 const starterRelayText = starterNostrRelayPresets.map((preset) => preset.url).join("\n");
 const starterBlossomText = starterBlossomServerPresets.map((preset) => preset.url).join("\n");
+
+const loadChannelNotificationPreferences = (): ChannelNotificationPreferences => {
+  if (typeof window === "undefined") {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(
+      window.localStorage.getItem(channelNotificationStorageKey) ?? "{}",
+    ) as ChannelNotificationPreferences;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+
+const isRefreshableSourceIdentifier = (identifier: string): boolean => {
+  const trimmed = identifier.trim();
+  return (
+    trimmed.startsWith("http://") ||
+    trimmed.startsWith("https://") ||
+    Boolean(canonicalizeChannelRef(trimmed))
+  );
+};
 
 const downloaderStatus = (
   runtimeDiagnostics: RuntimeDiagnostics,
@@ -463,6 +503,10 @@ const App = () => {
     useState<PhoneAccessBusyAction>(null);
   const [phoneAccessNotice, setPhoneAccessNotice] = useState("");
   const [publisherProfiles, setPublisherProfiles] = useState<PublisherProfile[]>([]);
+  const [publisherChannels, setPublisherChannels] = useState<PublisherChannel[]>([]);
+  const [channelNotificationPreferences, setChannelNotificationPreferences] =
+    useState<ChannelNotificationPreferences>(loadChannelNotificationPreferences);
+  const [notificationBusySourceId, setNotificationBusySourceId] = useState<string | null>(null);
   const [mediaThumbnailUrls, setMediaThumbnailUrls] = useState<Record<string, string>>({});
   const [mediaStorageAudit, setMediaStorageAudit] = useState<MediaStorageAudit | null>(null);
   const [mediaStorageBusyAction, setMediaStorageBusyAction] =
@@ -471,6 +515,13 @@ const App = () => {
   useEffect(() => {
     window.localStorage.setItem(sidebarCollapsedStorageKey, String(isSidebarCollapsed));
   }, [isSidebarCollapsed]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      channelNotificationStorageKey,
+      JSON.stringify(channelNotificationPreferences),
+    );
+  }, [channelNotificationPreferences]);
 
   useEffect(() => {
     let isMounted = true;
@@ -546,7 +597,12 @@ const App = () => {
 
   const refreshPublisherProfiles = async () => {
     try {
-      setPublisherProfiles(await listPublisherProfiles());
+      const [profiles, channels] = await Promise.all([
+        listPublisherProfiles(),
+        listPublisherChannels(),
+      ]);
+      setPublisherProfiles(profiles);
+      setPublisherChannels(channels);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       setSystemNotice(message);
@@ -584,6 +640,67 @@ const App = () => {
     () => new Map(snapshot.mediaFiles.map((file) => [file.lessonId, file])),
     [snapshot.mediaFiles],
   );
+
+  useEffect(() => {
+    if (!isOnlineMode) {
+      return;
+    }
+
+    const notificationSources = snapshot.sources.filter(
+      (source) =>
+        source.enabled &&
+        source.platform === "teacher-relay" &&
+        !DEFAULT_SOURCE_IDS.has(source.id) &&
+        isRefreshableSourceIdentifier(source.identifier) &&
+        channelNotificationPreferences[source.id]?.enabled,
+    );
+
+    if (notificationSources.length === 0) {
+      return;
+    }
+
+    let isCancelled = false;
+    const refreshNotifiedChannels = async () => {
+      const notices: string[] = [];
+
+      for (const source of notificationSources) {
+        try {
+          const result = await refreshSource(source.id);
+          if (isCancelled || result.imported <= 0) {
+            continue;
+          }
+
+          const itemLabel = result.imported === 1 ? "new item" : "new items";
+          const body = `${result.imported} ${itemLabel} from ${source.label}.`;
+          sendChannelUpdateNotification("Duroos channel update", body);
+          notices.push(body);
+          setChannelNotificationPreferences((current) => ({
+            ...current,
+            [source.id]: {
+              ...current[source.id],
+              enabled: true,
+              lastNotifiedAt: new Date().toISOString(),
+            },
+          }));
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          notices.push(`${source.label}: ${message}`);
+        }
+      }
+
+      if (!isCancelled && notices.length > 0) {
+        const notice = notices.join(" ");
+        setSystemNotice(notice);
+        await refreshSnapshot(notice);
+      }
+    };
+
+    const timer = window.setInterval(refreshNotifiedChannels, channelNotificationRefreshMs);
+    return () => {
+      isCancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [channelNotificationPreferences, isOnlineMode, snapshot.sources]);
 
   useEffect(() => {
     let isMounted = true;
@@ -1017,6 +1134,50 @@ const App = () => {
     }
   };
 
+  const handleToggleChannelNotifications = async (channel: ChannelSubscriptionView) => {
+    const source = sourceForChannel(channel);
+    if (!source) {
+      setSystemNotice(`No editable source row is linked to "${channel.title}". Re-follow the channel link to manage notifications.`);
+      return;
+    }
+
+    const current = channelNotificationPreferences[source.id];
+    if (current?.enabled) {
+      setChannelNotificationPreferences((preferences) => ({
+        ...preferences,
+        [source.id]: {
+          ...preferences[source.id],
+          enabled: false,
+        },
+      }));
+      setSystemNotice(`System notifications disabled for ${channel.title}.`);
+      return;
+    }
+
+    try {
+      setNotificationBusySourceId(source.id);
+      const permissionGranted = await ensureNotificationPermission();
+      if (!permissionGranted) {
+        setSystemNotice("System notification permission was not granted. In-app channel refresh still works.");
+        return;
+      }
+
+      setChannelNotificationPreferences((preferences) => ({
+        ...preferences,
+        [source.id]: {
+          ...preferences[source.id],
+          enabled: true,
+        },
+      }));
+      setSystemNotice(`System notifications enabled for ${channel.title}. Duroos will check while the app is running and online mode is on.`);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSystemNotice(message);
+    } finally {
+      setNotificationBusySourceId(null);
+    }
+  };
+
   const handleDownloadChannel = async (channel: ChannelSubscriptionView) => {
     const source = sourceForChannel(channel);
     if (!source) {
@@ -1104,7 +1265,7 @@ const App = () => {
       (source) =>
         source.enabled &&
         !DEFAULT_SOURCE_IDS.has(source.id) &&
-        (source.identifier.startsWith("http://") || source.identifier.startsWith("https://")),
+        isRefreshableSourceIdentifier(source.identifier),
     );
 
     if (refreshableSources.length === 0) {
@@ -1242,16 +1403,20 @@ const App = () => {
             teachers={teacherById}
             query={query}
             busySourceAction={busySourceAction}
+            channelNotificationPreferences={channelNotificationPreferences}
+            notificationBusySourceId={notificationBusySourceId}
             onOpenImport={openImport}
             onRefreshChannel={handleRefreshChannel}
             onDownloadChannel={handleDownloadChannel}
             onUnfollowChannel={handleUnfollowChannel}
+            onToggleChannelNotifications={handleToggleChannelNotifications}
           />
         ) : null}
 
         {viewMode === "publish" ? (
           <PublishView
             publisherProfiles={publisherProfiles}
+            publisherChannels={publisherChannels}
             onPublisherProfilesChanged={refreshPublisherProfiles}
             onPublisherResult={setSystemNotice}
           />
@@ -3436,18 +3601,26 @@ const ChannelSubscriptionCard = ({
   channel,
   selected = false,
   busySourceAction,
+  notificationsEnabled = false,
+  notificationBusy = false,
+  notificationLastNotifiedAt,
   onSelect,
   onRefresh,
   onDownload,
   onUnfollow,
+  onToggleNotifications,
 }: {
   channel: ChannelSubscriptionView;
   selected?: boolean;
   busySourceAction: BusySourceAction;
+  notificationsEnabled?: boolean;
+  notificationBusy?: boolean;
+  notificationLastNotifiedAt?: string;
   onSelect?: (channelId: string) => void;
   onRefresh: (channel: ChannelSubscriptionView) => void;
   onDownload: (channel: ChannelSubscriptionView) => void;
   onUnfollow: (channel: ChannelSubscriptionView) => void;
+  onToggleNotifications?: (channel: ChannelSubscriptionView) => void;
 }) => {
   const isDownloading =
     busySourceAction?.action === "download" && busySourceAction.sourceId === channel.sourceId;
@@ -3484,12 +3657,21 @@ const ChannelSubscriptionCard = ({
             label={channel.autoDownload ? "Auto-download" : "Review first"}
             tone={channel.autoDownload ? "positive" : "warning"}
           />
+          {onToggleNotifications ? (
+            <StatusChip
+              label={notificationsEnabled ? "Notifications on" : "Notifications off"}
+              tone={notificationsEnabled ? "positive" : "neutral"}
+            />
+          ) : null}
         </div>
         <div className="channel-card-stats">
           <span>{channel.itemCount} items</span>
           <span>{channel.missingFileCount} need files</span>
           <span>{channel.postCount} notes</span>
           <span>Updated {formatDate(channel.latestUpdateAt)}</span>
+          {notificationsEnabled && notificationLastNotifiedAt ? (
+            <span>Last alert {formatDate(notificationLastNotifiedAt)}</span>
+          ) : null}
         </div>
         <div className="compact-reference">
           <span>Manifest</span>
@@ -3510,6 +3692,29 @@ const ChannelSubscriptionCard = ({
           >
             <Search size={15} />
             <span>{selected ? "Filtering" : "Filter"}</span>
+          </button>
+        ) : null}
+        {onToggleNotifications ? (
+          <button
+            type="button"
+            className="secondary-action"
+            onClick={() => onToggleNotifications(channel)}
+            disabled={!channel.sourceId || notificationBusy}
+            title={
+              channel.sourceId
+                ? "Check this channel while Duroos is running and online mode is on."
+                : "Re-follow this channel to manage notifications."
+            }
+            aria-pressed={notificationsEnabled}
+          >
+            {notificationsEnabled ? <BellOff size={15} /> : <Bell size={15} />}
+            <span>
+              {notificationBusy
+                ? "Saving"
+                : notificationsEnabled
+                  ? "Mute Alerts"
+                  : "Notify"}
+            </span>
           </button>
         ) : null}
         <button
@@ -3589,20 +3794,26 @@ const RelaysView = ({
   teachers,
   query,
   busySourceAction,
+  channelNotificationPreferences,
+  notificationBusySourceId,
   onOpenImport,
   onRefreshChannel,
   onDownloadChannel,
   onUnfollowChannel,
+  onToggleChannelNotifications,
 }: {
   channelSubscriptions: ChannelSubscriptionView[];
   liveSessions: LiveSession[];
   teachers: Map<string, Teacher>;
   query: string;
   busySourceAction: BusySourceAction;
+  channelNotificationPreferences: ChannelNotificationPreferences;
+  notificationBusySourceId: string | null;
   onOpenImport: (mode?: ImportMode) => void;
   onRefreshChannel: (channel: ChannelSubscriptionView) => void;
   onDownloadChannel: (channel: ChannelSubscriptionView) => void;
   onUnfollowChannel: (channel: ChannelSubscriptionView) => void;
+  onToggleChannelNotifications: (channel: ChannelSubscriptionView) => void;
 }) => {
   const relayQuery = normalizeSearch(query);
   const visibleChannels = channelSubscriptions.filter((channel) =>
@@ -3669,9 +3880,22 @@ const RelaysView = ({
                     key={channel.id}
                     channel={channel}
                     busySourceAction={busySourceAction}
+                    notificationsEnabled={Boolean(
+                      channel.sourceId &&
+                        channelNotificationPreferences[channel.sourceId]?.enabled,
+                    )}
+                    notificationBusy={
+                      Boolean(channel.sourceId) && notificationBusySourceId === channel.sourceId
+                    }
+                    notificationLastNotifiedAt={
+                      channel.sourceId
+                        ? channelNotificationPreferences[channel.sourceId]?.lastNotifiedAt
+                        : undefined
+                    }
                     onRefresh={onRefreshChannel}
                     onDownload={onDownloadChannel}
                     onUnfollow={onUnfollowChannel}
+                    onToggleNotifications={onToggleChannelNotifications}
                   />
                 ))
               ) : (
@@ -3739,20 +3963,22 @@ const RelaysView = ({
 
 const PublishView = ({
   publisherProfiles,
+  publisherChannels,
   onPublisherProfilesChanged,
   onPublisherResult,
 }: {
   publisherProfiles: PublisherProfile[];
+  publisherChannels: PublisherChannel[];
   onPublisherProfilesChanged: () => Promise<void>;
   onPublisherResult: (notice: string) => void;
 }) => (
   <div className="wide-page publish-page">
     <div className="page-heading publish-heading">
       <div>
-        <h2>Publish</h2>
+        <h2>Teacher Channel</h2>
         <p>
-          Create a teacher-owned signed channel, publish verified lesson media, and share one link
-          with learners.
+          Publish media and text updates to the same signed channel link your learners already
+          follow.
         </p>
       </div>
       <div className="relays-heading-status">
@@ -3763,6 +3989,7 @@ const PublishView = ({
     </div>
     <TeacherPublisherPanel
       profiles={publisherProfiles}
+      channels={publisherChannels}
       onProfilesChanged={onPublisherProfilesChanged}
       onResult={onPublisherResult}
     />
@@ -3771,10 +3998,12 @@ const PublishView = ({
 
 const TeacherPublisherPanel = ({
   profiles,
+  channels,
   onProfilesChanged,
   onResult,
 }: {
   profiles: PublisherProfile[];
+  channels: PublisherChannel[];
   onProfilesChanged: () => Promise<void>;
   onResult: (notice: string) => void;
 }) => {
@@ -3786,9 +4015,13 @@ const TeacherPublisherPanel = ({
   const [archiveText, setArchiveText] = useState("");
   const [ipfsApiUrl, setIpfsApiUrl] = useState("");
   const [ipfsGatewayUrl, setIpfsGatewayUrl] = useState("");
+  const [channelId, setChannelId] = useState("");
   const [channelTitle, setChannelTitle] = useState("");
   const [channelDescription, setChannelDescription] = useState("");
   const [lessonDrafts, setLessonDrafts] = useState<PublishedLessonDraft[]>([]);
+  const [postTitle, setPostTitle] = useState("");
+  const [postBody, setPostBody] = useState("");
+  const [postDrafts, setPostDrafts] = useState<PublishedPostDraft[]>([]);
   const [publishResult, setPublishResult] = useState<ChannelPublishResult | null>(null);
   const [shareQrDataUrl, setShareQrDataUrl] = useState("");
   const [panelNotice, setPanelNotice] = useState("");
@@ -3797,6 +4030,17 @@ const TeacherPublisherPanel = ({
   const [testedEndpointSignature, setTestedEndpointSignature] = useState("");
   const [isWorking, setIsWorking] = useState(false);
   const selectedProfile = profiles.find((profile) => profile.id === profileId);
+  const profileChannels = useMemo(
+    () =>
+      selectedProfile
+        ? channels.filter((channel) => channel.profileId === selectedProfile.id)
+        : [],
+    [channels, selectedProfile],
+  );
+  const selectedChannel = useMemo(
+    () => profileChannels.find((channel) => channel.id === channelId),
+    [channelId, profileChannels],
+  );
 
   useEffect(() => {
     if (!profileId && profiles[0]) {
@@ -3813,6 +4057,30 @@ const TeacherPublisherPanel = ({
     setRelayText(selectedProfile.relays.map((relay) => relay.url).join("\n"));
     setBlossomText(selectedProfile.blossomServers.map((server) => server.url).join("\n"));
   }, [selectedProfile]);
+
+  useEffect(() => {
+    if (!selectedProfile) {
+      setChannelId("");
+      return;
+    }
+
+    setChannelId((current) => {
+      if (current && profileChannels.some((channel) => channel.id === current)) {
+        return current;
+      }
+
+      return profileChannels[0]?.id ?? "";
+    });
+  }, [selectedProfile, profileChannels]);
+
+  useEffect(() => {
+    if (!selectedChannel) {
+      return;
+    }
+
+    setChannelTitle(selectedChannel.title);
+    setChannelDescription(selectedChannel.description ?? "");
+  }, [selectedChannel]);
 
   const relays = endpointLines(relayText).map((url) => ({ url }));
   const blossomServers = endpointLines(blossomText).map((url) => ({ url }));
@@ -3842,6 +4110,9 @@ const TeacherPublisherPanel = ({
         ]
       : []),
   ];
+  const contentDraftCount = lessonDrafts.length + postDrafts.length;
+  const selectedChannelItemCount =
+    (selectedChannel?.mediaCount ?? 0) + (selectedChannel?.postCount ?? 0);
   const publishReadiness = [
     {
       label: selectedProfile ? "Profile" : "Profile missing",
@@ -3876,10 +4147,18 @@ const TeacherPublisherPanel = ({
       tone: endpointHealthPassed ? "positive" : "warning",
     },
     {
-      label: lessonDrafts.length
-        ? `${lessonDrafts.length} file${lessonDrafts.length === 1 ? "" : "s"}`
-        : "Media needed",
-      tone: lessonDrafts.length ? "positive" : "warning",
+      label: selectedChannel
+        ? `Existing channel`
+        : profileChannels.length
+          ? "New channel"
+          : "First channel",
+      tone: selectedChannel ? "positive" : "neutral",
+    },
+    {
+      label: contentDraftCount
+        ? `${contentDraftCount} update item${contentDraftCount === 1 ? "" : "s"}`
+        : "Update item needed",
+      tone: contentDraftCount ? "positive" : "warning",
     },
     {
       label: channelTitle.trim() ? "Channel title" : "Title needed",
@@ -3906,8 +4185,8 @@ const TeacherPublisherPanel = ({
               ? "Add the IPFS gateway URL for local IPFS archival."
               : !channelTitle.trim()
                 ? "Add a channel title."
-                : lessonDrafts.length === 0
-                  ? "Select media to publish."
+                : contentDraftCount === 0
+                  ? "Add media or a text post to publish."
                   : "";
   const endpointTestBlockedReason = !selectedProfile
     ? "Create or select a publisher profile."
@@ -3943,11 +4222,11 @@ const TeacherPublisherPanel = ({
       complete: endpointHealthPassed,
     },
     {
-      title: "Media",
-      detail: lessonDrafts.length
-        ? `${lessonDrafts.length} publishable file(s) selected.`
-        : "Select video, audio, or PDF files.",
-      complete: lessonDrafts.length > 0,
+      title: "Updates",
+      detail: contentDraftCount
+        ? `${contentDraftCount} media/post update item(s) queued.`
+        : "Add media files or text posts.",
+      complete: contentDraftCount > 0,
     },
     {
       title: "Mirrors",
@@ -4086,18 +4365,38 @@ const TeacherPublisherPanel = ({
         setPanelNotice("No publishable media selected.");
         return;
       }
-      setLessonDrafts(
-        paths.map((path) => ({
-          path,
-          title: titleFromPath(path),
-          contentType: contentTypeFromPublishPath(path),
-        })),
-      );
+      setLessonDrafts((current) => {
+        const existingPaths = new Set(current.map((draft) => draft.path));
+        const nextDrafts = paths
+          .filter((path) => !existingPaths.has(path))
+          .map((path) => ({
+            path,
+            title: titleFromPath(path),
+            contentType: contentTypeFromPublishPath(path),
+          }));
+
+        return [...current, ...nextDrafts];
+      });
     } catch (error: unknown) {
       setPanelNotice(error instanceof Error ? error.message : String(error));
     } finally {
       setIsWorking(false);
     }
+  };
+
+  const selectPublisherChannel = (nextChannelId: string) => {
+    setChannelId(nextChannelId);
+    setPublishResult(null);
+
+    const nextChannel = profileChannels.find((channel) => channel.id === nextChannelId);
+    if (nextChannel) {
+      setChannelTitle(nextChannel.title);
+      setChannelDescription(nextChannel.description ?? "");
+      return;
+    }
+
+    setChannelTitle("");
+    setChannelDescription("");
   };
 
   const updateDraft = (
@@ -4109,6 +4408,37 @@ const TeacherPublisherPanel = ({
         draftIndex === index ? { ...draft, ...patch } : draft,
       ),
     );
+  };
+
+  const removeDraft = (index: number) => {
+    setLessonDrafts((current) => current.filter((_, draftIndex) => draftIndex !== index));
+  };
+
+  const addPostDraft = () => {
+    const title = postTitle.trim();
+    const body = postBody.trim();
+
+    if (!title || !body) {
+      setPanelNotice("Add a post title and message before queueing it.");
+      return;
+    }
+
+    setPostDrafts((current) => [...current, { title, body }]);
+    setPostTitle("");
+    setPostBody("");
+    setPanelNotice("");
+  };
+
+  const updatePostDraft = (index: number, patch: Partial<PublishedPostDraft>) => {
+    setPostDrafts((current) =>
+      current.map((draft, draftIndex) =>
+        draftIndex === index ? { ...draft, ...patch } : draft,
+      ),
+    );
+  };
+
+  const removePostDraft = (index: number) => {
+    setPostDrafts((current) => current.filter((_, draftIndex) => draftIndex !== index));
   };
 
   const publishChannel = async () => {
@@ -4128,6 +4458,7 @@ const TeacherPublisherPanel = ({
     try {
       const result = await publishTeacherChannel({
         profileId: selectedProfile.id,
+        channelId: selectedChannel?.id,
         passphrase,
         channelTitle,
         channelDescription,
@@ -4135,10 +4466,17 @@ const TeacherPublisherPanel = ({
         blossomServers,
         archiveMirrors,
         lessons: lessonDrafts,
+        posts: postDrafts,
       });
       setPublishResult(result);
+      setChannelId(result.channelId);
+      setChannelTitle(result.channelTitle);
+      setLessonDrafts([]);
+      setPostDrafts([]);
       setPanelNotice(result.messages.join(" "));
-      onResult(`Published ${result.channelId}; ${result.manifestSha256}.`);
+      onResult(
+        `Published update to ${result.channelTitle}; ${result.totalItemCount} signed item(s).`,
+      );
       await onProfilesChanged();
     } catch (error: unknown) {
       setPanelNotice(error instanceof Error ? error.message : String(error));
@@ -4214,13 +4552,14 @@ const TeacherPublisherPanel = ({
       <div className="publisher-panel-header">
         <div className="publisher-title-copy">
           <span className="publisher-kicker">Teacher publisher</span>
-          <h2>Publish a signed channel</h2>
+          <h2>Channel updates</h2>
           <p>
-            Build a local profile, test network storage, then share one signed channel link.
+            Add media or text posts, republish the signed feed, and keep one subscriber link.
           </p>
         </div>
         <div className="publisher-trust-stack" aria-label="Publisher model">
           <StatusChip label={`${profiles.length} profiles`} tone="neutral" />
+          <StatusChip label={`${channels.length} channels`} tone="neutral" />
           <StatusChip label="No central catalog" tone="positive" />
         </div>
       </div>
@@ -4421,7 +4760,39 @@ const TeacherPublisherPanel = ({
 
       <div className="publisher-grid">
         <div className="publisher-column">
-          <SectionHeader title="3. Channel Details" meta="learner-facing" />
+          <SectionHeader title="3. Channel" meta={selectedChannel ? "existing link" : "new link"} />
+          <label className="field">
+            <span>Publisher channel</span>
+            <select
+              value={channelId}
+              onChange={(event) => selectPublisherChannel(event.target.value)}
+              disabled={!selectedProfile}
+            >
+              <option value="">New channel</option>
+              {profileChannels.map((channel) => (
+                <option key={channel.id} value={channel.id}>
+                  {channel.title}
+                </option>
+              ))}
+            </select>
+            <span className="field-hint">
+              Select an existing channel to keep the same subscriber link.
+            </span>
+          </label>
+          {selectedChannel ? (
+            <div className="publisher-channel-summary">
+              <StatusChip label={`${selectedChannelItemCount} signed items`} tone="neutral" />
+              <StatusChip
+                label={`${selectedChannel.mediaCount} media`}
+                tone={selectedChannel.mediaCount ? "positive" : "neutral"}
+              />
+              <StatusChip
+                label={`${selectedChannel.postCount} posts`}
+                tone={selectedChannel.postCount ? "positive" : "neutral"}
+              />
+              <span>Last published {formatDate(selectedChannel.lastPublishedAt)}</span>
+            </div>
+          ) : null}
           <label className="field">
             <span>Channel title</span>
             <input
@@ -4456,7 +4827,7 @@ const TeacherPublisherPanel = ({
               title={publishBlockedReason || "Publish the signed channel update."}
             >
               <UploadCloud size={16} />
-              <span>{isWorking ? "Working" : "Publish Channel"}</span>
+              <span>{isWorking ? "Working" : "Publish Update"}</span>
             </button>
           </div>
           <div className="publisher-readiness" aria-label="Publish readiness">
@@ -4470,39 +4841,124 @@ const TeacherPublisherPanel = ({
         </div>
 
         <div className="publisher-column">
-          <SectionHeader title="4. Media" meta={`${lessonDrafts.length} files`} />
-          <div className="publish-draft-list">
-            {lessonDrafts.length ? (
-              lessonDrafts.map((draft, index) => (
-                <div className="publish-draft-row" key={`${draft.path}-${index}`}>
-                  <input
-                    value={draft.title}
-                    onChange={(event) => updateDraft(index, { title: event.target.value })}
-                    aria-label="Lesson title"
-                  />
-                  <select
-                    value={draft.contentType}
-                    onChange={(event) =>
-                      updateDraft(index, {
-                        contentType: event.target.value as PublishedLessonDraft["contentType"],
-                      })
-                    }
-                    aria-label="Content type"
-                  >
-                    <option value="video">Video</option>
-                    <option value="audio">Audio</option>
-                    <option value="pdf">PDF</option>
-                  </select>
-                  <code>{fileNameFromPath(draft.path)}</code>
-                </div>
-              ))
-            ) : (
-              <EmptyState
-                icon={UploadCloud}
-                title="No files selected"
-                detail="Select video, audio, or PDF lessons to publish."
-              />
-            )}
+          <SectionHeader
+            title="4. Update Content"
+            meta={`${lessonDrafts.length} media · ${postDrafts.length} posts`}
+          />
+          <div className="publish-draft-section">
+            <div className="publish-draft-heading">
+              <strong>Media files</strong>
+              <span>{lessonDrafts.length} queued</span>
+            </div>
+            <div className="publish-draft-list">
+              {lessonDrafts.length ? (
+                lessonDrafts.map((draft, index) => (
+                  <div className="publish-draft-row" key={`${draft.path}-${index}`}>
+                    <input
+                      value={draft.title}
+                      onChange={(event) => updateDraft(index, { title: event.target.value })}
+                      aria-label="Lesson title"
+                    />
+                    <select
+                      value={draft.contentType}
+                      onChange={(event) =>
+                        updateDraft(index, {
+                          contentType: event.target.value as PublishedLessonDraft["contentType"],
+                        })
+                      }
+                      aria-label="Content type"
+                    >
+                      <option value="video">Video</option>
+                      <option value="audio">Audio</option>
+                      <option value="pdf">PDF</option>
+                    </select>
+                    <code>{fileNameFromPath(draft.path)}</code>
+                    <button
+                      type="button"
+                      className="compact-danger-action"
+                      onClick={() => removeDraft(index)}
+                      aria-label={`Remove ${draft.title || fileNameFromPath(draft.path)}`}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <EmptyState
+                  icon={UploadCloud}
+                  title="No media queued"
+                  detail="Video, audio, and PDF files can be added to the next channel update."
+                />
+              )}
+            </div>
+          </div>
+
+          <div className="publish-draft-section">
+            <div className="publish-draft-heading">
+              <strong>Text posts</strong>
+              <span>{postDrafts.length} queued</span>
+            </div>
+            <div className="publish-post-composer">
+              <label className="field">
+                <span>Post title</span>
+                <input
+                  value={postTitle}
+                  onChange={(event) => setPostTitle(event.target.value)}
+                />
+              </label>
+              <label className="field">
+                <span>Post message</span>
+                <textarea
+                  value={postBody}
+                  onChange={(event) => setPostBody(event.target.value)}
+                />
+              </label>
+              <button
+                type="button"
+                className="secondary-action"
+                onClick={addPostDraft}
+                disabled={isWorking}
+              >
+                <MessageSquare size={16} />
+                <span>Add Post</span>
+              </button>
+            </div>
+            <div className="publish-draft-list">
+              {postDrafts.length ? (
+                postDrafts.map((draft, index) => (
+                  <div className="publish-post-row" key={`${draft.title}-${index}`}>
+                    <input
+                      value={draft.title}
+                      onChange={(event) =>
+                        updatePostDraft(index, { title: event.target.value })
+                      }
+                      aria-label="Queued post title"
+                    />
+                    <textarea
+                      value={draft.body}
+                      onChange={(event) =>
+                        updatePostDraft(index, { body: event.target.value })
+                      }
+                      aria-label="Queued post message"
+                    />
+                    <button
+                      type="button"
+                      className="compact-danger-action"
+                      onClick={() => removePostDraft(index)}
+                      aria-label={`Remove ${draft.title || "queued post"}`}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <EmptyState
+                  icon={MessageSquare}
+                  title="No posts queued"
+                  detail="Text posts can be published without adding a media file."
+                />
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -4518,11 +4974,17 @@ const TeacherPublisherPanel = ({
           </div>
           <div className="publisher-share-copy">
             <div>
-              <strong>Share invite</strong>
-              <span>Learners can scan the QR or paste the invite text into Teacher Feed.</span>
+              <strong>Subscriber link</strong>
+              <span>Existing subscribers refresh the same link for this channel update.</span>
             </div>
             <code>{publishInvite.canonicalChannelLink}</code>
             <div className="publisher-share-meta" aria-label="Channel invite verification">
+              <StatusChip
+                label={`${publishResult.totalItemCount} signed items`}
+                tone="positive"
+              />
+              <StatusChip label={`${publishResult.mediaCount} media`} tone="neutral" />
+              <StatusChip label={`${publishResult.postCount} posts`} tone="neutral" />
               <StatusChip label={publishInvite.verificationCode} tone="neutral" />
               <StatusChip label={publishResult.manifestSha256} tone="neutral" />
             </div>

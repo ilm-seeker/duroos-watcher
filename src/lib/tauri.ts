@@ -19,6 +19,7 @@ import type {
   PhoneMediaScope,
   PhoneMediaSession,
   PublishTeacherChannelRequest,
+  PublisherChannel,
   PublisherEndpointTestReport,
   PublisherEndpointTestRequest,
   PublisherProfile,
@@ -432,6 +433,14 @@ export const listPublisherProfiles = async (): Promise<PublisherProfile[]> => {
   }
 
   return invoke<PublisherProfile[]>("list_publisher_profiles");
+};
+
+export const listPublisherChannels = async (): Promise<PublisherChannel[]> => {
+  if (!isTauriRuntime()) {
+    return [];
+  }
+
+  return invoke<PublisherChannel[]>("list_publisher_channels");
 };
 
 export const createPublisherProfile = async (
