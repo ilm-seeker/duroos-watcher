@@ -1707,12 +1707,7 @@ fn manifest_verification_code(manifest_sha256: &str) -> String {
         return "DW-UNVERIFIED".to_string();
     }
     let prefix = hash[..12].to_ascii_uppercase();
-    format!(
-        "DW-{}-{}-{}",
-        &prefix[0..4],
-        &prefix[4..8],
-        &prefix[8..12]
-    )
+    format!("DW-{}-{}-{}", &prefix[0..4], &prefix[4..8], &prefix[8..12])
 }
 
 fn channel_invite_text(
@@ -2250,7 +2245,8 @@ mod tests {
     #[test]
     fn channel_invite_uses_canonical_nostr_uri_and_hash_check_code() {
         let naddr = "naddr1qqqqtest";
-        let manifest_hash = "sha256:83829c50baca669812884d16505873dd9d7318c8ab88e9630c9bfcd1d970570b";
+        let manifest_hash =
+            "sha256:83829c50baca669812884d16505873dd9d7318c8ab88e9630c9bfcd1d970570b";
         let canonical = canonical_channel_link(naddr);
         let code = manifest_verification_code(manifest_hash);
         let invite = channel_invite_text(
@@ -2430,7 +2426,9 @@ mod tests {
                     .then_some(value.strip_prefix("Nostr ").unwrap_or(value))
             })
             .unwrap();
-        let auth_json = general_purpose::URL_SAFE_NO_PAD.decode(auth_header).unwrap();
+        let auth_json = general_purpose::URL_SAFE_NO_PAD
+            .decode(auth_header)
+            .unwrap();
         let auth_event: NostrEvent = serde_json::from_slice(&auth_json).unwrap();
         let auth_id_material = serde_json::to_string(&json!([
             0,
@@ -2457,8 +2455,7 @@ mod tests {
         let message = SecpMessage::from_digest_slice(&auth_id_bytes).unwrap();
         let pubkey_bytes = decode_hex_32(&auth_event.pubkey, "Nostr pubkey").unwrap();
         let pubkey = XOnlyPublicKey::from_slice(&pubkey_bytes).unwrap();
-        secp.verify_schnorr(&signature, &message, &pubkey)
-            .unwrap();
+        secp.verify_schnorr(&signature, &message, &pubkey).unwrap();
     }
 
     #[test]
