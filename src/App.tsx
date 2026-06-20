@@ -87,6 +87,10 @@ import {
   type QueueFilter,
 } from "./domain/jobQueue";
 import { recordOnboardingLane } from "./domain/onboardingState";
+import {
+  endpointTestHasFailures,
+  endpointTestStatus,
+} from "./domain/publisherEndpointReport";
 import type {
   AppSnapshot,
   ArchiveMirrorConfig,
@@ -3756,6 +3760,9 @@ const TeacherPublisherPanel = ({
     relays.map((relay) => relay.url).join("|"),
     blossomServers.map((server) => server.url).join("|"),
   ].join("::");
+  const endpointHealthHasFailures = endpointTestReport
+    ? endpointTestHasFailures(endpointTestReport)
+    : false;
   const endpointHealthPassed =
     Boolean(endpointTestReport?.passed) && testedEndpointSignature === endpointSignature;
   const archiveMirrors: ArchiveMirrorConfig[] = [
@@ -3801,7 +3808,11 @@ const TeacherPublisherPanel = ({
       tone: blossomServers.length ? "positive" : "warning",
     },
     {
-      label: endpointHealthPassed ? "Network tested" : "Health check needed",
+      label: endpointHealthPassed
+        ? endpointHealthHasFailures
+          ? "Network partial pass"
+          : "Network tested"
+        : "Health check needed",
       tone: endpointHealthPassed ? "positive" : "warning",
     },
     {
@@ -3865,7 +3876,9 @@ const TeacherPublisherPanel = ({
     {
       title: "Storage",
       detail: endpointHealthPassed
-        ? "One relay and one Blossom server accepted the probe."
+        ? endpointHealthHasFailures
+          ? "Quorum passed; fix or remove endpoints that failed."
+          : "Every configured relay and Blossom server accepted the probe."
         : "Test one working Nostr relay and one Blossom server.",
       complete: endpointHealthPassed,
     },
@@ -4506,39 +4519,40 @@ const endpointLines = (value: string): string[] =>
     .map((line) => line.trim())
     .filter(Boolean);
 
-const EndpointTestReportView = ({ report }: { report: PublisherEndpointTestReport }) => (
-  <div className="endpoint-test-report" role="status">
-    <div className="endpoint-test-summary">
-      <StatusChip
-        label={report.passed ? "Endpoint test passed" : "Endpoint issues"}
-        tone={report.passed ? "positive" : "warning"}
-      />
-      <span>{report.messages.join(" ")}</span>
+const EndpointTestReportView = ({ report }: { report: PublisherEndpointTestReport }) => {
+  const status = endpointTestStatus(report);
+
+  return (
+    <div className="endpoint-test-report" role="status">
+      <div className="endpoint-test-summary">
+        <StatusChip label={status.label} tone={status.tone} />
+        <span>{report.messages.join(" ")}</span>
+      </div>
+      <div className="endpoint-test-grid">
+        {report.blossomResults.map((result) => (
+          <div className="endpoint-test-row" key={`${result.serverUrl}-${result.hash}`}>
+            <StatusChip
+              label={result.uploaded ? "Storage ok" : "Storage failed"}
+              tone={result.uploaded ? "positive" : "danger"}
+            />
+            <code>{result.serverUrl}</code>
+            <span>{result.message}</span>
+          </div>
+        ))}
+        {report.relayResults.map((result) => (
+          <div className="endpoint-test-row" key={result.relayUrl}>
+            <StatusChip
+              label={result.accepted ? "Relay ok" : "Relay failed"}
+              tone={result.accepted ? "positive" : "danger"}
+            />
+            <code>{result.relayUrl}</code>
+            <span>{result.message || "No relay message."}</span>
+          </div>
+        ))}
+      </div>
     </div>
-    <div className="endpoint-test-grid">
-      {report.blossomResults.map((result) => (
-        <div className="endpoint-test-row" key={`${result.serverUrl}-${result.hash}`}>
-          <StatusChip
-            label={result.uploaded ? "Storage ok" : "Storage failed"}
-            tone={result.uploaded ? "positive" : "danger"}
-          />
-          <code>{result.serverUrl}</code>
-          <span>{result.message}</span>
-        </div>
-      ))}
-      {report.relayResults.map((result) => (
-        <div className="endpoint-test-row" key={result.relayUrl}>
-          <StatusChip
-            label={result.accepted ? "Relay ok" : "Relay failed"}
-            tone={result.accepted ? "positive" : "danger"}
-          />
-          <code>{result.relayUrl}</code>
-          <span>{result.message || "No relay message."}</span>
-        </div>
-      ))}
-    </div>
-  </div>
-);
+  );
+};
 
 const fileNameFromPath = (path: string): string =>
   path.split(/[\\/]/).filter(Boolean).pop() ?? path;

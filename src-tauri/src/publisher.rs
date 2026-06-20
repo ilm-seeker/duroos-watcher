@@ -452,28 +452,7 @@ pub fn test_publisher_endpoints(
     let storage_ok = blossom_upload.results.iter().any(|result| result.uploaded);
     let relay_ok = relay_results.iter().any(|result| result.accepted);
     let passed = storage_ok && relay_ok;
-    let mut messages = vec![format!(
-        "Endpoint test {}: {} Blossom server(s) uploaded the probe; {} relay(s) accepted the test event.",
-        if passed { "passed" } else { "completed with issues" },
-        blossom_upload
-            .results
-            .iter()
-            .filter(|result| result.uploaded)
-            .count(),
-        relay_results
-            .iter()
-            .filter(|result| result.accepted)
-            .count()
-    )];
-    if !passed {
-        messages.push(
-            "A real publish still needs at least one working Blossom server and one accepting Nostr relay."
-                .to_string(),
-        );
-    }
-    messages.push(
-        "The probe is intentionally small and public on any endpoint that accepted it.".to_string(),
-    );
+    let messages = endpoint_test_messages(passed, &blossom_upload.results, &relay_results);
 
     Ok(PublisherEndpointTestReport {
         passed,
@@ -481,6 +460,53 @@ pub fn test_publisher_endpoints(
         relay_results,
         messages,
     })
+}
+
+fn endpoint_test_messages(
+    passed: bool,
+    blossom_results: &[BlossomUploadResult],
+    relay_results: &[NostrRelayPublishResult],
+) -> Vec<String> {
+    let uploaded_count = blossom_results
+        .iter()
+        .filter(|result| result.uploaded)
+        .count();
+    let accepted_count = relay_results
+        .iter()
+        .filter(|result| result.accepted)
+        .count();
+    let has_endpoint_failures =
+        uploaded_count < blossom_results.len() || accepted_count < relay_results.len();
+    let result_label = if passed && has_endpoint_failures {
+        "Endpoint quorum passed with failures"
+    } else if passed {
+        "Endpoint test passed"
+    } else {
+        "Endpoint test completed with issues"
+    };
+
+    let mut messages = vec![format!(
+        "{result_label}: {uploaded_count}/{storage_total} Blossom server(s) uploaded the probe; {accepted_count}/{relay_total} relay(s) accepted the test event.",
+        storage_total = blossom_results.len(),
+        relay_total = relay_results.len(),
+    )];
+
+    if passed && has_endpoint_failures {
+        messages.push(
+            "Publishing can continue through endpoints that accepted the probe, but failed endpoints should be fixed or removed before relying on them."
+                .to_string(),
+        );
+    } else if !passed {
+        messages.push(
+            "A real publish still needs at least one working Blossom server and one accepting Nostr relay."
+                .to_string(),
+        );
+    }
+
+    messages.push(
+        "The probe is intentionally small and public on any endpoint that accepted it.".to_string(),
+    );
+    messages
 }
 
 pub fn ingest_nostr_channel(app: &AppHandle, channel_ref: String) -> Result<IngestSummary, String> {
@@ -2263,6 +2289,48 @@ mod tests {
         assert!(invite.contains("Teacher: Example Teacher"));
         assert!(invite.contains("Open in Duroos Watcher: nostr:naddr1qqqqtest"));
         assert!(invite.contains("Check code: DW-8382-9C50-BACA"));
+    }
+
+    #[test]
+    fn endpoint_test_messages_distinguish_partial_quorum_from_full_pass() {
+        let blossom_results = vec![
+            BlossomUploadResult {
+                server_url: "https://blossom.ok".to_string(),
+                hash: "a".repeat(64),
+                url: Some("https://blossom.ok/a".to_string()),
+                uploaded: true,
+                message: "Blob stored by server.".to_string(),
+            },
+            BlossomUploadResult {
+                server_url: "https://blossom.failed".to_string(),
+                hash: "b".repeat(64),
+                url: None,
+                uploaded: false,
+                message: "Upload failed.".to_string(),
+            },
+        ];
+        let relay_results = vec![
+            NostrRelayPublishResult {
+                relay_url: "wss://relay.ok".to_string(),
+                accepted: true,
+                message: String::new(),
+            },
+            NostrRelayPublishResult {
+                relay_url: "wss://relay.failed".to_string(),
+                accepted: false,
+                message: "HTTP error.".to_string(),
+            },
+        ];
+
+        let messages = endpoint_test_messages(true, &blossom_results, &relay_results);
+
+        assert!(messages[0].starts_with("Endpoint quorum passed with failures"));
+        assert!(messages[0].contains("1/2 Blossom"));
+        assert!(messages[0].contains("1/2 relay"));
+        assert!(messages
+            .iter()
+            .any(|message| message.contains("failed endpoints should be fixed or removed")));
+        assert!(!messages[0].starts_with("Endpoint test passed"));
     }
 
     #[test]
