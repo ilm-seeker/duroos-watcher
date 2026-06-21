@@ -88,10 +88,11 @@ verifies that GitHub reports the expected names. It does not print secret values
 - Manual smoke-test notes for every macOS and Windows item in the platform checklist above.
 
 The current `glib` Dependabot alert is a Linux production blocker, not a local application-code bug:
-`cargo update --manifest-path src-tauri/Cargo.toml -p glib --precise 0.20.12 --dry-run` fails because
-the Tauri Linux stack requires `gtk 0.18.x`, which requires `glib ^0.18`. Do not mark Linux production
-ready until that upstream dependency path is patched or Linux production distribution is explicitly
-removed from production scope. For `v0.1.0`, Linux is intentionally alpha-scoped in
+the Tauri Linux GTK/WebKit stack currently resolves `glib 0.18.x`, while the advisory is patched in
+`glib >= 0.20.0`. The current command evidence and dry-run update attempts live in
+`docs/release/glib-linux-alpha-blocker-2026-06-21.md`. Do not mark Linux production ready until that
+upstream dependency path is patched or Linux production distribution is explicitly removed from
+production scope. For `v0.1.0`, Linux is intentionally alpha-scoped in
 `docs/production-release-evidence.example.json`.
 
 Keep real production evidence in `docs/production-release-evidence.json` and downloaded artifact proof

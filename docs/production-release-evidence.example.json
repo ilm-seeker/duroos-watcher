@@ -11,7 +11,7 @@
         "platform": "linux",
         "id": "GHSA-wrw7-89jp-8q8g",
         "status": "upstream glib advisory tracked; Linux artifact remains alpha until resolved or accepted",
-        "evidence": ["Dependabot alert and cargo tree evidence pointer"]
+        "evidence": ["docs/release/glib-linux-alpha-blocker-2026-06-21.md"]
       }
     ]
   },
@@ -115,7 +115,8 @@
       "openAlerts": 1,
       "openAlertIds": ["GHSA-wrw7-89jp-8q8g"],
       "evidence": [
-        "gh api repos/ilm-seeker/duroos-watcher/dependabot/alerts --paginate output pointer"
+        "gh api repos/ilm-seeker/duroos-watcher/dependabot/alerts --paginate output pointer",
+        "docs/release/glib-linux-alpha-blocker-2026-06-21.md"
       ]
     }
   },
