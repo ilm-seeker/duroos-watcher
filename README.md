@@ -6,15 +6,17 @@ You can download the current alpha package, build the app locally, or fork the s
 
 ## Download The App
 
-The current packaged build is [Duroos Watcher v0.1.0-alpha.2](https://github.com/ilm-seeker/duroos-watcher/releases/tag/v0.1.0-alpha.2). These are unsigned alpha/testing packages, not production-signed releases. Verify the matching SHA-256 checksum before opening the app.
+The current packaged build is [Duroos Watcher v0.1.0-alpha.3](https://github.com/ilm-seeker/duroos-watcher/releases/tag/v0.1.0-alpha.3). These are unsigned alpha/testing packages, not production-signed releases. Verify the matching SHA-256 checksum before opening the app.
 
 | Platform | Download | Checksum |
 | --- | --- | --- |
-| macOS | [Unsigned `.app.zip`](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.2/Duroos-Watcher-v0.1.0-alpha.2-macos-unsigned.app.zip) | [SHA256SUMS macOS](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.2/SHA256SUMS-v0.1.0-alpha.2-macos.txt) |
-| Windows | [Unsigned setup `.exe`](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.2/Duroos-Watcher-v0.1.0-alpha.2-windows-unsigned-Duroos.Watcher_0.1.0_x64-setup.exe) or [unsigned `.msi`](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.2/Duroos-Watcher-v0.1.0-alpha.2-windows-unsigned-Duroos.Watcher_0.1.0_x64_en-US.msi) | [SHA256SUMS Windows](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.2/SHA256SUMS-v0.1.0-alpha.2-windows.txt) |
-| Linux | [Unsigned `.AppImage`](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.2/Duroos-Watcher-v0.1.0-alpha.2-linux-unsigned-Duroos.Watcher_0.1.0_amd64.AppImage) or [unsigned `.deb`](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.2/Duroos-Watcher-v0.1.0-alpha.2-linux-unsigned-Duroos.Watcher_0.1.0_amd64.deb) | [SHA256SUMS Linux](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.2/SHA256SUMS-v0.1.0-alpha.2-linux.txt) |
+| macOS | [Unsigned `.app.zip`](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.3/Duroos-Watcher-v0.1.0-alpha.3-macos-unsigned.app.zip) | [SHA256SUMS macOS](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.3/SHA256SUMS-v0.1.0-alpha.3-macos.txt) |
+| Windows | [Unsigned setup `.exe`](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.3/Duroos-Watcher-v0.1.0-alpha.3-windows-unsigned-Duroos.Watcher_0.1.0_x64-setup.exe) or [unsigned `.msi`](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.3/Duroos-Watcher-v0.1.0-alpha.3-windows-unsigned-Duroos.Watcher_0.1.0_x64_en-US.msi) | [SHA256SUMS Windows](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.3/SHA256SUMS-v0.1.0-alpha.3-windows.txt) |
+| Linux | [Unsigned `.AppImage`](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.3/Duroos-Watcher-v0.1.0-alpha.3-linux-unsigned-Duroos.Watcher_0.1.0_amd64.AppImage) or [unsigned `.deb`](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.3/Duroos-Watcher-v0.1.0-alpha.3-linux-unsigned-Duroos.Watcher_0.1.0_amd64.deb) | [SHA256SUMS Linux](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.3/SHA256SUMS-v0.1.0-alpha.3-linux.txt) |
 
 Operating systems may warn because these alpha artifacts are not Apple-notarized and the Windows installers are not code-signed. Only install them if you trust this repository and are comfortable testing unsigned software. See [unsigned alpha install notes](./docs/release/unsigned-alpha-install-notes.md) for safer review steps.
+
+If macOS says the app is damaged, delete any older `v0.1.0-alpha.2` download, download `v0.1.0-alpha.3`, verify the checksum, move `Duroos Watcher.app` to `/Applications`, and open it with Control-click or right-click then **Open**. If the verified `v0.1.0-alpha.3` app is still blocked by quarantine, the release notes include the one-app `xattr` command to clear quarantine for `/Applications/Duroos Watcher.app`.
 
 To build or customize instead of installing a packaged alpha, use the development commands below and read [Harness Customization](./docs/harness-customization.md).
 

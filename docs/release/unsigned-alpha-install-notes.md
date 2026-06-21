@@ -4,10 +4,12 @@ This is an unsigned alpha build for testers. It is not a production release.
 
 ## Downloads
 
-- macOS: download the `macos-unsigned.app.zip` asset.
-- Windows: download the `windows-unsigned` installer asset.
-- Linux: download the `linux-unsigned` AppImage or deb asset.
-- Download the matching `SHA256SUMS` file and verify the checksum before opening the app.
+- macOS: download `Duroos-Watcher-<tag>-macos-unsigned.app.zip` and `SHA256SUMS-<tag>-macos.txt`.
+- Windows: download the `windows-unsigned` `.exe` or `.msi` installer and `SHA256SUMS-<tag>-windows.txt`.
+- Linux: download the `linux-unsigned` `.AppImage` or `.deb` package and `SHA256SUMS-<tag>-linux.txt`.
+
+Use files from the same release tag. Do not mix a zip from one tag with a checksum file from another
+tag.
 
 ## Why The OS Warns
 
@@ -20,10 +22,24 @@ Only install this build if you trust the repository and are comfortable testing 
 
 ## macOS Install Notes
 
-1. Verify the downloaded zip against `SHA256SUMS`.
-2. Unzip `Duroos-Watcher-*-macos-unsigned.app.zip`.
-3. Move `Duroos Watcher.app` to `/Applications`.
-4. Open it with Control-click or right-click, then choose `Open`.
+Use `v0.1.0-alpha.3` or newer on macOS. The older `v0.1.0-alpha.2` macOS zip can trigger a
+misleading damaged-app warning because the bundle resources were not sealed correctly. Delete older
+macOS alpha zips/apps before testing the current release.
+
+1. Download the macOS zip and matching macOS `SHA256SUMS` file from this release.
+2. Verify the downloaded zip:
+
+   ```sh
+   cd ~/Downloads
+   shasum -a 256 -c SHA256SUMS-v0.1.0-alpha.3-macos.txt
+   ```
+
+   The expected result ends with `OK`.
+
+3. Unzip `Duroos-Watcher-*-macos-unsigned.app.zip`.
+4. Delete any older `/Applications/Duroos Watcher.app`.
+5. Move the new `Duroos Watcher.app` to `/Applications`.
+6. Open it with Control-click or right-click, then choose `Open`.
 
 If macOS still says the app is damaged after you have verified the checksum and reviewed the source
 or workflow, remove the quarantine marker for this app only:
