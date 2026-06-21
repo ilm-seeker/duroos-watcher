@@ -11,6 +11,38 @@ This is an unsigned alpha build for testers. It is not a production release.
 Use files from the same release tag. Do not mix a zip from one tag with a checksum file from another
 tag.
 
+Current packaged CPU support: macOS Apple Silicon (`arm64`), Windows `x64`, and Linux `x86_64`.
+Intel Macs need a local source build until a universal or Intel macOS release asset exists.
+
+## Install With A Command
+
+These commands download the release asset, verify its SHA-256 checksum, and install it. They execute
+installer scripts from this repository. Inspect the scripts first if you want to review the install
+path before running it.
+
+macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ilm-seeker/duroos-watcher/main/install/macos.sh | DUROOS_WATCHER_ACCEPT_UNSIGNED=1 bash
+```
+
+Linux:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ilm-seeker/duroos-watcher/main/install/linux.sh | DUROOS_WATCHER_ACCEPT_UNSIGNED=1 bash
+```
+
+Windows PowerShell:
+
+```powershell
+$env:DUROOS_WATCHER_ACCEPT_UNSIGNED = "1"
+Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/ilm-seeker/duroos-watcher/main/install/windows.ps1" -OutFile "$env:TEMP\install-duroos-watcher.ps1"
+powershell -ExecutionPolicy Bypass -File "$env:TEMP\install-duroos-watcher.ps1"
+```
+
+On Linux, set `DUROOS_WATCHER_PACKAGE=appimage` to avoid a system `.deb` install. On Windows, set
+`$env:DUROOS_WATCHER_PACKAGE = "msi"` before running the script if you prefer the MSI package.
+
 ## Why The OS Warns
 
 These alpha artifacts are not Apple-notarized, not Apple Developer ID signed, and the Windows

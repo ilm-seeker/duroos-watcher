@@ -8,6 +8,40 @@ You can download the current alpha package, build the app locally, or fork the s
 
 The current packaged build is [Duroos Watcher v0.1.0-alpha.3](https://github.com/ilm-seeker/duroos-watcher/releases/tag/v0.1.0-alpha.3). These are unsigned alpha/testing packages, not production-signed releases. Verify the matching SHA-256 checksum before opening the app.
 
+Current packaged CPU support: macOS Apple Silicon (`arm64`), Windows `x64`, and Linux `x86_64`.
+Intel Macs need a local source build until a universal or Intel macOS release asset exists.
+
+### Install With A Command
+
+These commands download the release asset, verify its SHA-256 checksum, and install it. They execute
+installer scripts from this repository, so inspect the scripts in [`install/`](./install/) first if
+you want to review the install path before running it.
+
+macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ilm-seeker/duroos-watcher/main/install/macos.sh | DUROOS_WATCHER_ACCEPT_UNSIGNED=1 bash
+```
+
+Linux:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ilm-seeker/duroos-watcher/main/install/linux.sh | DUROOS_WATCHER_ACCEPT_UNSIGNED=1 bash
+```
+
+Windows PowerShell:
+
+```powershell
+$env:DUROOS_WATCHER_ACCEPT_UNSIGNED = "1"
+Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/ilm-seeker/duroos-watcher/main/install/windows.ps1" -OutFile "$env:TEMP\install-duroos-watcher.ps1"
+powershell -ExecutionPolicy Bypass -File "$env:TEMP\install-duroos-watcher.ps1"
+```
+
+On Linux, set `DUROOS_WATCHER_PACKAGE=appimage` to avoid a system `.deb` install. On Windows, set
+`$env:DUROOS_WATCHER_PACKAGE = "msi"` before running the script if you prefer the MSI package.
+
+### Manual Downloads
+
 | Platform | Download | Checksum |
 | --- | --- | --- |
 | macOS | [Unsigned `.app.zip`](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.3/Duroos-Watcher-v0.1.0-alpha.3-macos-unsigned.app.zip) | [SHA256SUMS macOS](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.3/SHA256SUMS-v0.1.0-alpha.3-macos.txt) |
