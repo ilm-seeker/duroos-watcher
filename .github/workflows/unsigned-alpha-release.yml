@@ -88,6 +88,14 @@ jobs:
       - name: Build unsigned app artifacts
         run: ${{ matrix.platform.build_command }}
 
+      - name: Ad-hoc sign macOS app bundle
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          app_bundle="src-tauri/target/release/bundle/macos/Duroos Watcher.app"
+          codesign --force --deep --sign - --timestamp=none "$app_bundle"
+          codesign --verify --deep --strict --verbose=2 "$app_bundle"
+
       - name: Package macOS app zip
         if: runner.os == 'macOS'
         run: |
