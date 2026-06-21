@@ -8,17 +8,22 @@ const report = (
   relayAccepted: boolean[],
 ): PublisherEndpointTestReport => ({
   passed,
+  synthetic: false,
+  testedAt: "2026-06-20T10:00:00.000Z",
   messages: [],
   blossomResults: blossomUploaded.map((uploaded, index) => ({
     serverUrl: `https://blossom-${index}.example`,
     hash: `${index}`.repeat(64).slice(0, 64),
     url: uploaded ? `https://blossom-${index}.example/blob` : undefined,
     uploaded,
+    elapsedMs: 100 + index,
+    bytesPerSecond: uploaded ? 1024 * 1024 : undefined,
     message: uploaded ? "Blob stored by server." : "Upload failed.",
   })),
   relayResults: relayAccepted.map((accepted, index) => ({
     relayUrl: `wss://relay-${index}.example`,
     accepted,
+    elapsedMs: 50 + index,
     message: accepted ? "" : "Relay rejected the event.",
   })),
 });

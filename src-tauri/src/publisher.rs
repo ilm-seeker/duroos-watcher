@@ -6,7 +6,7 @@ use crate::{
         NostrRelayConfig, NostrRelayPublishResult, PublishTeacherChannelRequest,
         PublishedChannelItem, PublishedLessonDraft, PublishedPostDraft, PublisherChannel,
         PublisherEndpointTestReport, PublisherEndpointTestRequest, PublisherProfile,
-        SavePublisherChannelRequest,
+        SavePublisherChannelRequest, SyntheticPublisherProbeRequest,
     },
 };
 use argon2::Argon2;
@@ -27,7 +27,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::AppHandle;
 use tungstenite::{connect, Message as WsMessage};
@@ -596,13 +596,118 @@ pub fn test_publisher_endpoints(
     let relay_ok = relay_results.iter().any(|result| result.accepted);
     let passed = storage_ok && relay_ok;
     let messages = endpoint_test_messages(passed, &blossom_upload.results, &relay_results);
+    let tested_at = Utc::now().to_rfc3339();
+    update_publisher_endpoint_test_summary(
+        &connection,
+        &profile.id,
+        &tested_at,
+        passed,
+        &messages.join(" "),
+    )?;
 
     Ok(PublisherEndpointTestReport {
         passed,
+        synthetic: false,
+        tested_at,
         blossom_results: blossom_upload.results,
         relay_results,
         messages,
     })
+}
+
+pub fn run_synthetic_publisher_probe(
+    request: SyntheticPublisherProbeRequest,
+) -> Result<PublisherEndpointTestReport, String> {
+    if !request.confirm_public_probe {
+        return Err(
+            "Confirm that the synthetic probe may publish tiny public test records before running it."
+                .to_string(),
+        );
+    }
+    let relays = normalize_relays(request.relays)?;
+    let blossom_servers = normalize_blossom_servers(request.blossom_servers)?;
+    let mut curator_secret = random_32_bytes();
+    let mut nostr_secret = random_32_bytes();
+    let curator_public_key =
+        general_purpose::STANDARD.encode(SigningKey::from_bytes(&curator_secret).verifying_key());
+    let nostr_pubkey = nostr_pubkey_from_secret(&nostr_secret)?;
+    let profile = PublisherProfile {
+        id: format!("synthetic-probe-{}", Uuid::new_v4()),
+        display_name: "Synthetic Publisher Probe".to_string(),
+        curator_public_key,
+        nostr_pubkey,
+        relays: relays.clone(),
+        blossom_servers: blossom_servers.clone(),
+        created_at: Utc::now().to_rfc3339(),
+        updated_at: Utc::now().to_rfc3339(),
+        vault_configured: false,
+        last_endpoint_tested_at: None,
+        last_endpoint_test_passed: None,
+        last_endpoint_test_summary: None,
+    };
+    let keys = PublisherKeys {
+        curator_secret_key: curator_secret,
+        nostr_secret_key: nostr_secret,
+    };
+    let client = Client::builder()
+        .user_agent("DuroosWatcher/0.1 synthetic-publisher-probe")
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let probe_body = format!(
+        "Duroos Watcher synthetic publisher probe\ntime={}\n",
+        Utc::now().to_rfc3339()
+    );
+    let blossom_upload = upload_blob_to_servers(
+        &client,
+        probe_body.as_bytes(),
+        "text/plain; charset=utf-8",
+        "txt",
+        &blossom_servers,
+        &keys,
+    );
+    let relay_event = endpoint_probe_event(&keys, &profile, &blossom_upload.urls)?;
+    let relay_results = publish_event_to_relays(&relay_event, &relays);
+    let storage_ok = blossom_upload.results.iter().any(|result| result.uploaded);
+    let relay_ok = relay_results.iter().any(|result| result.accepted);
+    let passed = storage_ok && relay_ok;
+    let mut messages = endpoint_test_messages(passed, &blossom_upload.results, &relay_results);
+    messages.insert(
+        0,
+        "Synthetic probe used temporary keys and did not save a publisher profile.".to_string(),
+    );
+    curator_secret.zeroize();
+    nostr_secret.zeroize();
+
+    Ok(PublisherEndpointTestReport {
+        passed,
+        synthetic: true,
+        tested_at: Utc::now().to_rfc3339(),
+        blossom_results: blossom_upload.results,
+        relay_results,
+        messages,
+    })
+}
+
+fn update_publisher_endpoint_test_summary(
+    connection: &Connection,
+    profile_id: &str,
+    tested_at: &str,
+    passed: bool,
+    summary: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "UPDATE publisher_profiles
+             SET last_endpoint_tested_at = ?1,
+                 last_endpoint_test_passed = ?2,
+                 last_endpoint_test_summary = ?3,
+                 updated_at = ?1
+             WHERE id = ?4",
+            params![tested_at, if passed { 1 } else { 0 }, summary, profile_id],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 fn endpoint_test_messages(
@@ -971,7 +1076,9 @@ fn fetch_publisher_profiles(
     let mut statement = connection
         .prepare(
             "SELECT id, display_name, curator_public_key, nostr_pubkey, relays_json,
-                    blossom_servers_json, vault_path, created_at, updated_at
+                    blossom_servers_json, vault_path, created_at, updated_at,
+                    last_endpoint_tested_at, last_endpoint_test_passed,
+                    last_endpoint_test_summary
              FROM publisher_profiles
              ORDER BY updated_at DESC, created_at DESC",
         )
@@ -1290,7 +1397,9 @@ fn publisher_profile_for_id(
     connection
         .query_row(
             "SELECT id, display_name, curator_public_key, nostr_pubkey, relays_json,
-                    blossom_servers_json, vault_path, created_at, updated_at
+                    blossom_servers_json, vault_path, created_at, updated_at,
+                    last_endpoint_tested_at, last_endpoint_test_passed,
+                    last_endpoint_test_summary
              FROM publisher_profiles
              WHERE id = ?1",
             params![profile_id],
@@ -1317,6 +1426,9 @@ fn publisher_profile_from_row(
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
         vault_configured: resolve_vault_path(app, &vault_path).is_file(),
+        last_endpoint_tested_at: row.get(9)?,
+        last_endpoint_test_passed: row.get::<_, Option<i64>>(10)?.map(|value| value != 0),
+        last_endpoint_test_summary: row.get(11)?,
     })
 }
 
@@ -1422,6 +1534,7 @@ fn upload_blob_to_servers(
     let mut results = Vec::new();
 
     for server in blossom_servers {
+        let started = Instant::now();
         let upload_url = format!("{}/upload", server.url.trim_end_matches('/'));
         let blob_url = format!(
             "{}/{}.{}",
@@ -1442,6 +1555,7 @@ fn upload_blob_to_servers(
 
         match request.send() {
             Ok(response) if response.status().is_success() => {
+                let elapsed_ms = elapsed_millis(started);
                 if first_url.is_none() {
                     first_url = Some(blob_url.clone());
                 }
@@ -1451,10 +1565,13 @@ fn upload_blob_to_servers(
                     hash: format!("sha256:{hash}"),
                     url: Some(blob_url),
                     uploaded: true,
+                    elapsed_ms: Some(elapsed_ms),
+                    bytes_per_second: bytes_per_second(data.len() as i64, elapsed_ms),
                     message: "Blob stored by server.".to_string(),
                 });
             }
             Ok(response) => {
+                let elapsed_ms = elapsed_millis(started);
                 let status = response.status();
                 let body = response.text().unwrap_or_default();
                 results.push(BlossomUploadResult {
@@ -1462,6 +1579,8 @@ fn upload_blob_to_servers(
                     hash: format!("sha256:{hash}"),
                     url: None,
                     uploaded: false,
+                    elapsed_ms: Some(elapsed_ms),
+                    bytes_per_second: bytes_per_second(data.len() as i64, elapsed_ms),
                     message: format!(
                         "Upload failed with HTTP {status}. {}",
                         clip_text(&body, 160)
@@ -1469,11 +1588,14 @@ fn upload_blob_to_servers(
                 });
             }
             Err(error) => {
+                let elapsed_ms = elapsed_millis(started);
                 results.push(BlossomUploadResult {
                     server_url: server.url.clone(),
                     hash: format!("sha256:{hash}"),
                     url: None,
                     uploaded: false,
+                    elapsed_ms: Some(elapsed_ms),
+                    bytes_per_second: bytes_per_second(data.len() as i64, elapsed_ms),
                     message: error.to_string(),
                 });
             }
@@ -1812,6 +1934,7 @@ fn publish_event_to_relays(
                 .map(|relay| NostrRelayPublishResult {
                     relay_url: relay.url.clone(),
                     accepted: false,
+                    elapsed_ms: None,
                     message: error.to_string(),
                 })
                 .collect()
@@ -1821,49 +1944,61 @@ fn publish_event_to_relays(
 
     relays
         .iter()
-        .map(|relay| match connect(&relay.url) {
-            Ok((mut socket, _)) => {
-                if let Err(error) = socket.send(WsMessage::Text(message.clone())) {
-                    return NostrRelayPublishResult {
-                        relay_url: relay.url.clone(),
-                        accepted: false,
-                        message: error.to_string(),
-                    };
-                }
+        .map(|relay| {
+            let started = Instant::now();
+            match connect(&relay.url) {
+                Ok((mut socket, _)) => {
+                    if let Err(error) = socket.send(WsMessage::Text(message.clone())) {
+                        let elapsed_ms = elapsed_millis(started);
+                        return NostrRelayPublishResult {
+                            relay_url: relay.url.clone(),
+                            accepted: false,
+                            elapsed_ms: Some(elapsed_ms),
+                            message: error.to_string(),
+                        };
+                    }
 
-                for _ in 0..8 {
-                    match socket.read() {
-                        Ok(WsMessage::Text(text)) => {
-                            if let Some(result) = parse_ok_message(&text, &event.id) {
+                    for _ in 0..8 {
+                        match socket.read() {
+                            Ok(WsMessage::Text(text)) => {
+                                if let Some(result) = parse_ok_message(&text, &event.id) {
+                                    let elapsed_ms = elapsed_millis(started);
+                                    return NostrRelayPublishResult {
+                                        relay_url: relay.url.clone(),
+                                        accepted: result.0,
+                                        elapsed_ms: Some(elapsed_ms),
+                                        message: result.1,
+                                    };
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                let elapsed_ms = elapsed_millis(started);
                                 return NostrRelayPublishResult {
                                     relay_url: relay.url.clone(),
-                                    accepted: result.0,
-                                    message: result.1,
+                                    accepted: false,
+                                    elapsed_ms: Some(elapsed_ms),
+                                    message: error.to_string(),
                                 };
                             }
                         }
-                        Ok(_) => {}
-                        Err(error) => {
-                            return NostrRelayPublishResult {
-                                relay_url: relay.url.clone(),
-                                accepted: false,
-                                message: error.to_string(),
-                            };
-                        }
+                    }
+
+                    let elapsed_ms = elapsed_millis(started);
+                    NostrRelayPublishResult {
+                        relay_url: relay.url.clone(),
+                        accepted: false,
+                        elapsed_ms: Some(elapsed_ms),
+                        message: "Relay did not return an OK message.".to_string(),
                     }
                 }
-
-                NostrRelayPublishResult {
+                Err(error) => NostrRelayPublishResult {
                     relay_url: relay.url.clone(),
                     accepted: false,
-                    message: "Relay did not return an OK message.".to_string(),
-                }
+                    elapsed_ms: Some(elapsed_millis(started)),
+                    message: error.to_string(),
+                },
             }
-            Err(error) => NostrRelayPublishResult {
-                relay_url: relay.url.clone(),
-                accepted: false,
-                message: error.to_string(),
-            },
         })
         .collect()
 }
@@ -2680,6 +2815,17 @@ fn clip_text(value: &str, max: usize) -> String {
         + "..."
 }
 
+fn elapsed_millis(started: Instant) -> i64 {
+    started.elapsed().as_millis().min(i64::MAX as u128) as i64
+}
+
+fn bytes_per_second(bytes_downloaded: i64, elapsed_ms: i64) -> Option<f64> {
+    if bytes_downloaded <= 0 || elapsed_ms <= 0 {
+        return None;
+    }
+    Some((bytes_downloaded as f64) / ((elapsed_ms as f64) / 1000.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2738,6 +2884,8 @@ mod tests {
                 hash: "a".repeat(64),
                 url: Some("https://blossom.ok/a".to_string()),
                 uploaded: true,
+                elapsed_ms: Some(10),
+                bytes_per_second: Some(100.0),
                 message: "Blob stored by server.".to_string(),
             },
             BlossomUploadResult {
@@ -2745,6 +2893,8 @@ mod tests {
                 hash: "b".repeat(64),
                 url: None,
                 uploaded: false,
+                elapsed_ms: Some(10),
+                bytes_per_second: Some(100.0),
                 message: "Upload failed.".to_string(),
             },
         ];
@@ -2752,11 +2902,13 @@ mod tests {
             NostrRelayPublishResult {
                 relay_url: "wss://relay.ok".to_string(),
                 accepted: true,
+                elapsed_ms: Some(5),
                 message: String::new(),
             },
             NostrRelayPublishResult {
                 relay_url: "wss://relay.failed".to_string(),
                 accepted: false,
+                elapsed_ms: Some(5),
                 message: "HTTP error.".to_string(),
             },
         ];
@@ -2824,6 +2976,9 @@ mod tests {
             created_at: "2026-06-17T00:00:00Z".to_string(),
             updated_at: "2026-06-17T00:00:00Z".to_string(),
             vault_configured: true,
+            last_endpoint_tested_at: None,
+            last_endpoint_test_passed: None,
+            last_endpoint_test_summary: None,
         };
         let keys = PublisherKeys {
             curator_secret_key: [4_u8; 32],
@@ -2885,6 +3040,9 @@ mod tests {
             created_at: "2026-06-17T00:00:00Z".to_string(),
             updated_at: "2026-06-17T00:00:00Z".to_string(),
             vault_configured: true,
+            last_endpoint_tested_at: None,
+            last_endpoint_test_passed: None,
+            last_endpoint_test_summary: None,
         };
         let keys = PublisherKeys {
             curator_secret_key: [8_u8; 32],
@@ -3001,6 +3159,11 @@ mod tests {
         assert_eq!(result.first_url, Some(format!("{url}/{hash}.pdf")));
         assert_eq!(result.urls, vec![format!("{url}/{hash}.pdf")]);
         assert!(result.results.first().is_some_and(|result| result.uploaded));
+        assert!(result
+            .results
+            .first()
+            .and_then(|result| result.elapsed_ms)
+            .is_some());
         assert!(headers
             .iter()
             .any(|(name, value)| name.eq_ignore_ascii_case("X-SHA-256") && value == &hash));
@@ -3354,6 +3517,7 @@ mod tests {
         publish_thread.join().unwrap();
         assert_eq!(relay_results.len(), 1);
         assert!(relay_results[0].accepted);
+        assert!(relay_results[0].elapsed_ms.is_some());
 
         let fetch_listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let fetch_url = format!("ws://{}", fetch_listener.local_addr().unwrap());
@@ -3393,6 +3557,22 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_probe_requires_explicit_public_probe_confirmation() {
+        let error = run_synthetic_publisher_probe(SyntheticPublisherProbeRequest {
+            relays: vec![NostrRelayConfig {
+                url: "wss://relay.example".to_string(),
+            }],
+            blossom_servers: vec![BlossomServerConfig {
+                url: "https://blossom.example".to_string(),
+            }],
+            confirm_public_probe: false,
+        })
+        .unwrap_err();
+
+        assert!(error.contains("Confirm"));
+    }
+
+    #[test]
     fn endpoint_probe_event_is_marked_as_test_only() {
         let profile = PublisherProfile {
             id: "publisher-test".to_string(),
@@ -3405,6 +3585,9 @@ mod tests {
             created_at: "2026-06-17T00:00:00Z".to_string(),
             updated_at: "2026-06-17T00:00:00Z".to_string(),
             vault_configured: true,
+            last_endpoint_tested_at: None,
+            last_endpoint_test_passed: None,
+            last_endpoint_test_summary: None,
         };
         let keys = PublisherKeys {
             curator_secret_key: [11_u8; 32],
@@ -3496,6 +3679,9 @@ mod tests {
             created_at: "2026-06-20T10:00:00Z".to_string(),
             updated_at: "2026-06-20T10:00:00Z".to_string(),
             vault_configured: false,
+            last_endpoint_tested_at: None,
+            last_endpoint_test_passed: None,
+            last_endpoint_test_summary: None,
         }
     }
 

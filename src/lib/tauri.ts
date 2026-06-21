@@ -13,6 +13,7 @@ import type {
   LessonNote,
   MediaStorageAudit,
   MediaStorageCleanup,
+  MediaStorageCleanupMode,
   NativePlaybackResult,
   NostrChannelPreview,
   OpenMediaResult,
@@ -25,6 +26,7 @@ import type {
   PublisherEndpointTestRequest,
   PublisherProfile,
   SavePublisherChannelRequest,
+  SyntheticPublisherProbeRequest,
   TrustedCurator,
   TrustCuratorSummary,
   RuntimeDiagnostics,
@@ -250,6 +252,7 @@ export const auditMediaStorage = async (): Promise<MediaStorageAudit> => {
       staleBytes: 0,
       partialFiles: 0,
       staleSamples: [],
+      staleItems: [],
       messages: ["Storage audit requires the Tauri desktop runtime."],
     };
   }
@@ -257,11 +260,14 @@ export const auditMediaStorage = async (): Promise<MediaStorageAudit> => {
   return invoke<MediaStorageAudit>("audit_media_storage");
 };
 
-export const cleanupMediaStorage = async (): Promise<MediaStorageCleanup> => {
+export const cleanupMediaStorage = async (
+  mode: MediaStorageCleanupMode,
+): Promise<MediaStorageCleanup> => {
   if (!isTauriRuntime()) {
     const audit = await auditMediaStorage();
     return {
       audit,
+      mode,
       removedFiles: 0,
       failedRemovals: 0,
       reclaimedBytes: 0,
@@ -269,7 +275,7 @@ export const cleanupMediaStorage = async (): Promise<MediaStorageCleanup> => {
     };
   }
 
-  return invoke<MediaStorageCleanup>("cleanup_media_storage");
+  return invoke<MediaStorageCleanup>("cleanup_media_storage", { request: { mode } });
 };
 
 export const playMediaFileNative = async (
@@ -513,6 +519,8 @@ export const testPublisherEndpoints = async (
   if (!isTauriRuntime()) {
     return {
       passed: false,
+      synthetic: false,
+      testedAt: new Date().toISOString(),
       blossomResults: [],
       relayResults: [],
       messages: ["Publisher endpoint testing requires the Tauri desktop runtime."],
@@ -520,6 +528,23 @@ export const testPublisherEndpoints = async (
   }
 
   return invoke<PublisherEndpointTestReport>("test_publisher_endpoints", { request });
+};
+
+export const runSyntheticPublisherProbe = async (
+  request: SyntheticPublisherProbeRequest,
+): Promise<PublisherEndpointTestReport> => {
+  if (!isTauriRuntime()) {
+    return {
+      passed: false,
+      synthetic: true,
+      testedAt: new Date().toISOString(),
+      blossomResults: [],
+      relayResults: [],
+      messages: ["Synthetic publisher probing requires the Tauri desktop runtime."],
+    };
+  }
+
+  return invoke<PublisherEndpointTestReport>("run_synthetic_publisher_probe", { request });
 };
 
 export const previewNostrChannel = async (

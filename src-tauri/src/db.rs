@@ -3,9 +3,9 @@ use crate::{
     models::{
         AppSnapshot, ClearSourceSummary, Collection, DownloadSourceSummary, ImportSummary,
         IngestSummary, Job, Lesson, LessonNote, LiveSession, ManifestValidationReport, MediaFile,
-        MediaStorageAudit, MediaStorageCleanup, NativePlaybackResult, OpenMediaResult,
-        ProvenanceRecord, RuntimeDiagnostics, Source, SourceCapability, Teacher, TeacherRelay,
-        TrustCuratorSummary, TrustedCurator, WatchState,
+        MediaStorageAudit, MediaStorageCleanup, MediaStorageCleanupRequest, MediaStorageStaleItem,
+        NativePlaybackResult, OpenMediaResult, ProvenanceRecord, RuntimeDiagnostics, Source,
+        SourceCapability, Teacher, TeacherRelay, TrustCuratorSummary, TrustedCurator, WatchState,
     },
     publisher,
 };
@@ -20,11 +20,11 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     env, fs,
-    io::{self, Read},
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager};
 use url::Url;
@@ -149,6 +149,28 @@ struct JobUpdate<'a> {
     lesson_id: Option<&'a str>,
     label: &'a str,
     detail: &'a str,
+}
+
+#[derive(Debug, Clone)]
+struct JobProgress {
+    started_at: Option<String>,
+    completed_at: Option<String>,
+    bytes_expected: Option<i64>,
+    bytes_downloaded: Option<i64>,
+    bytes_per_second: Option<f64>,
+    elapsed_ms: Option<i64>,
+}
+
+#[derive(Debug)]
+struct DirectDownloadProgress<'a> {
+    connection: &'a Connection,
+    job_id: &'a str,
+    source_id: &'a str,
+    lesson_id: &'a str,
+    label: &'a str,
+    started_at: &'a str,
+    total_bytes: Option<i64>,
+    last_recorded_bytes: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -1447,7 +1469,11 @@ pub fn audit_media_storage(app: &AppHandle) -> Result<MediaStorageAudit, String>
     Ok(media_storage_audit_detail(&connection, &data_dir)?.audit)
 }
 
-pub fn cleanup_media_storage(app: &AppHandle) -> Result<MediaStorageCleanup, String> {
+pub fn cleanup_media_storage(
+    app: &AppHandle,
+    request: MediaStorageCleanupRequest,
+) -> Result<MediaStorageCleanup, String> {
+    let cleanup_mode = validate_media_cleanup_mode(&request.mode)?;
     let data_dir = app_data_dir(app)?;
     let connection = open_connection(app)?;
     let before = media_storage_audit_detail(&connection, &data_dir)?;
@@ -1456,6 +1482,9 @@ pub fn cleanup_media_storage(app: &AppHandle) -> Result<MediaStorageCleanup, Str
     let mut reclaimed_bytes = 0_i64;
 
     for stale_file in &before.stale_files {
+        if !cleanup_mode_matches(&cleanup_mode, &stale_file.category) {
+            continue;
+        }
         if !stale_file.path.is_file() {
             continue;
         }
@@ -1472,7 +1501,8 @@ pub fn cleanup_media_storage(app: &AppHandle) -> Result<MediaStorageCleanup, Str
 
     let audit = media_storage_audit_detail(&connection, &data_dir)?.audit;
     let mut messages = vec![format!(
-        "Removed {removed_files} stale library file(s), reclaiming {}.",
+        "Removed {removed_files} {} stale library file(s), reclaiming {}.",
+        cleanup_mode_label(&cleanup_mode),
         format_bytes(reclaimed_bytes)
     )];
     if failed_removals > 0 {
@@ -1489,6 +1519,7 @@ pub fn cleanup_media_storage(app: &AppHandle) -> Result<MediaStorageCleanup, Str
 
     Ok(MediaStorageCleanup {
         audit,
+        mode: cleanup_mode,
         removed_files,
         failed_removals,
         reclaimed_bytes,
@@ -1528,6 +1559,7 @@ pub fn download_source_media(
     let source_job_id = format!("job-download-source-{}", stable_suffix(&source_id));
     let mut downloaded = 0;
     let mut failed = 0;
+    let mut total_downloaded_bytes = 0_i64;
     let mut messages = Vec::new();
 
     if lessons.is_empty() {
@@ -1558,7 +1590,9 @@ pub fn download_source_media(
         });
     }
 
-    upsert_job(
+    let source_started_at = Utc::now().to_rfc3339();
+    let source_started_instant = Instant::now();
+    upsert_job_with_progress(
         &connection,
         JobUpdate {
             id: &source_job_id,
@@ -1571,6 +1605,14 @@ pub fn download_source_media(
                 "Starting download of {attempted} missing or invalid file-backed item(s)."
             ),
         },
+        Some(JobProgress {
+            started_at: Some(source_started_at.clone()),
+            completed_at: None,
+            bytes_expected: None,
+            bytes_downloaded: Some(0),
+            bytes_per_second: None,
+            elapsed_ms: None,
+        }),
     )?;
 
     let mut yt_dlp = None;
@@ -1586,8 +1628,11 @@ pub fn download_source_media(
         fs::create_dir_all(&lesson_dir).map_err(|error| error.to_string())?;
         let lesson_job_id = format!("job-download-lesson-{}", lesson.id);
         let position = index + 1;
+        let lesson_started_at = Utc::now().to_rfc3339();
+        let lesson_started_instant = Instant::now();
+        let lesson_label = format!("Download: {}", lesson.title);
 
-        upsert_job(
+        upsert_job_with_progress(
             &connection,
             JobUpdate {
                 id: &lesson_job_id,
@@ -1595,9 +1640,17 @@ pub fn download_source_media(
                 state: "running",
                 source_id: Some(&source_id),
                 lesson_id: Some(&lesson.id),
-                label: &format!("Download: {}", lesson.title),
+                label: &lesson_label,
                 detail: &format!("Item {position} of {attempted} from {source_label}."),
             },
+            Some(JobProgress {
+                started_at: Some(lesson_started_at.clone()),
+                completed_at: None,
+                bytes_expected: None,
+                bytes_downloaded: Some(0),
+                bytes_per_second: None,
+                elapsed_ms: None,
+            }),
         )?;
 
         if lesson.has_invalid_media_record {
@@ -1614,6 +1667,16 @@ pub fn download_source_media(
                     &lesson_dir,
                     &data_dir,
                     yt_dlp_cookies.as_deref(),
+                    Some(DirectDownloadProgress {
+                        connection: &connection,
+                        job_id: &lesson_job_id,
+                        source_id: &source_id,
+                        lesson_id: &lesson.id,
+                        label: &lesson_label,
+                        started_at: &lesson_started_at,
+                        total_bytes: None,
+                        last_recorded_bytes: 0,
+                    }),
                 )
             })
             .and_then(|media_path| {
@@ -1633,7 +1696,18 @@ pub fn download_source_media(
         match media_result {
             Ok(media_path) => {
                 downloaded += 1;
-                upsert_job(
+                let media_size = media_path
+                    .metadata()
+                    .map(|metadata| metadata.len().min(i64::MAX as u64) as i64)
+                    .unwrap_or(0);
+                total_downloaded_bytes = total_downloaded_bytes.saturating_add(media_size);
+                let lesson_progress = completed_job_progress(
+                    lesson_started_at.clone(),
+                    lesson_started_instant,
+                    Some(media_size),
+                    Some(media_size),
+                );
+                upsert_job_with_progress(
                     &connection,
                     JobUpdate {
                         id: &lesson_job_id,
@@ -1641,21 +1715,23 @@ pub fn download_source_media(
                         state: "downloaded",
                         source_id: Some(&source_id),
                         lesson_id: Some(&lesson.id),
-                        label: &format!("Download: {}", lesson.title),
+                        label: &lesson_label,
                         detail: &format!(
-                            "Saved {} into the app library.",
+                            "Saved {} into the app library in {}.",
                             media_path
                                 .file_name()
                                 .and_then(|value| value.to_str())
-                                .unwrap_or("media file")
+                                .unwrap_or("media file"),
+                            format_duration_ms(lesson_progress.elapsed_ms.unwrap_or_default())
                         ),
                     },
+                    Some(lesson_progress),
                 )?;
             }
             Err(error) => {
                 failed += 1;
                 messages.push(format!("{}: {error}", lesson.title));
-                upsert_job(
+                upsert_job_with_progress(
                     &connection,
                     JobUpdate {
                         id: &lesson_job_id,
@@ -1663,15 +1739,25 @@ pub fn download_source_media(
                         state: "failed",
                         source_id: Some(&source_id),
                         lesson_id: Some(&lesson.id),
-                        label: &format!("Download: {}", lesson.title),
+                        label: &lesson_label,
                         detail: &error,
                     },
+                    Some(completed_job_progress(
+                        lesson_started_at.clone(),
+                        lesson_started_instant,
+                        None,
+                        None,
+                    )),
                 )?;
             }
         }
 
         let remaining = attempted - downloaded - failed;
-        upsert_job(
+        let source_elapsed_ms = source_started_instant
+            .elapsed()
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        upsert_job_with_progress(
             &connection,
             JobUpdate {
                 id: &source_job_id,
@@ -1684,14 +1770,30 @@ pub fn download_source_media(
                     "{downloaded} downloaded, {failed} failed, {skipped} skipped; {remaining} remaining."
                 ),
             },
+            Some(JobProgress {
+                started_at: Some(source_started_at.clone()),
+                completed_at: None,
+                bytes_expected: None,
+                bytes_downloaded: Some(total_downloaded_bytes),
+                bytes_per_second: bytes_per_second(total_downloaded_bytes, source_elapsed_ms),
+                elapsed_ms: Some(source_elapsed_ms),
+            }),
         )?;
     }
 
     let job_state = if failed == 0 { "downloaded" } else { "failed" };
-    let detail = format!(
-        "{downloaded} downloaded, {failed} failed, {skipped} skipped from {attempted} missing or invalid file-backed item(s)."
+    let source_progress = completed_job_progress(
+        source_started_at.clone(),
+        source_started_instant,
+        Some(total_downloaded_bytes),
+        Some(total_downloaded_bytes),
     );
-    upsert_job(
+    let detail = format!(
+        "{downloaded} downloaded, {failed} failed, {skipped} skipped from {attempted} missing or invalid file-backed item(s), saving {} in {}.",
+        format_bytes(total_downloaded_bytes),
+        format_duration_ms(source_progress.elapsed_ms.unwrap_or_default())
+    );
+    upsert_job_with_progress(
         &connection,
         JobUpdate {
             id: &source_job_id,
@@ -1702,6 +1804,7 @@ pub fn download_source_media(
             label: &format!("Download media: {source_label}"),
             detail: &detail,
         },
+        Some(source_progress),
     )?;
 
     messages.insert(
@@ -3431,11 +3534,29 @@ fn record_standalone_job(
 }
 
 fn upsert_job(connection: &Connection, job: JobUpdate<'_>) -> Result<(), String> {
+    upsert_job_with_progress(connection, job, None)
+}
+
+fn upsert_job_with_progress(
+    connection: &Connection,
+    job: JobUpdate<'_>,
+    progress: Option<JobProgress>,
+) -> Result<(), String> {
+    let progress = progress.unwrap_or(JobProgress {
+        started_at: None,
+        completed_at: None,
+        bytes_expected: None,
+        bytes_downloaded: None,
+        bytes_per_second: None,
+        elapsed_ms: None,
+    });
     connection
         .execute(
             "INSERT INTO jobs
-             (id, kind, state, source_id, lesson_id, label, detail, retry_count, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)
+             (id, kind, state, source_id, lesson_id, label, detail, retry_count, updated_at,
+              started_at, completed_at, bytes_expected, bytes_downloaded, bytes_per_second,
+              elapsed_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(id) DO UPDATE SET
                kind = excluded.kind,
                state = excluded.state,
@@ -3443,7 +3564,13 @@ fn upsert_job(connection: &Connection, job: JobUpdate<'_>) -> Result<(), String>
                lesson_id = excluded.lesson_id,
                label = excluded.label,
                detail = excluded.detail,
-               updated_at = excluded.updated_at",
+               updated_at = excluded.updated_at,
+               started_at = COALESCE(excluded.started_at, jobs.started_at),
+               completed_at = COALESCE(excluded.completed_at, jobs.completed_at),
+               bytes_expected = COALESCE(excluded.bytes_expected, jobs.bytes_expected),
+               bytes_downloaded = COALESCE(excluded.bytes_downloaded, jobs.bytes_downloaded),
+               bytes_per_second = COALESCE(excluded.bytes_per_second, jobs.bytes_per_second),
+               elapsed_ms = COALESCE(excluded.elapsed_ms, jobs.elapsed_ms)",
             params![
                 job.id,
                 job.kind,
@@ -3452,11 +3579,44 @@ fn upsert_job(connection: &Connection, job: JobUpdate<'_>) -> Result<(), String>
                 job.lesson_id,
                 job.label,
                 job.detail,
-                Utc::now().to_rfc3339()
+                Utc::now().to_rfc3339(),
+                progress.started_at,
+                progress.completed_at,
+                progress.bytes_expected,
+                progress.bytes_downloaded,
+                progress.bytes_per_second,
+                progress.elapsed_ms,
             ],
         )
         .map(|_| ())
         .map_err(|error| error.to_string())
+}
+
+fn completed_job_progress(
+    started_at: String,
+    started_instant: Instant,
+    bytes_expected: Option<i64>,
+    bytes_downloaded: Option<i64>,
+) -> JobProgress {
+    let elapsed_ms = started_instant.elapsed().as_millis().min(i64::MAX as u128) as i64;
+    let completed_at = Utc::now().to_rfc3339();
+    let bytes_per_second = bytes_downloaded.and_then(|bytes| bytes_per_second(bytes, elapsed_ms));
+
+    JobProgress {
+        started_at: Some(started_at),
+        completed_at: Some(completed_at),
+        bytes_expected,
+        bytes_downloaded,
+        bytes_per_second,
+        elapsed_ms: Some(elapsed_ms),
+    }
+}
+
+fn bytes_per_second(bytes_downloaded: i64, elapsed_ms: i64) -> Option<f64> {
+    if bytes_downloaded <= 0 || elapsed_ms <= 0 {
+        return None;
+    }
+    Some((bytes_downloaded as f64) / ((elapsed_ms as f64) / 1000.0))
 }
 
 fn record_downloaded_media(
@@ -4407,6 +4567,7 @@ struct StaleMediaFile {
     relative_path: String,
     path: PathBuf,
     size_bytes: i64,
+    category: String,
 }
 
 #[derive(Debug)]
@@ -4451,6 +4612,7 @@ fn media_storage_audit_detail(
                 .map(|metadata| metadata.len().min(i64::MAX as u64) as i64)
                 .unwrap_or(0);
             stale_files.push(StaleMediaFile {
+                category: stale_media_file_category(&relative_path, path),
                 relative_path,
                 path: path.to_path_buf(),
                 size_bytes,
@@ -4464,6 +4626,14 @@ fn media_storage_audit_detail(
         .iter()
         .take(5)
         .map(|file| file.relative_path.clone())
+        .collect::<Vec<_>>();
+    let stale_items = stale_files
+        .iter()
+        .map(|file| MediaStorageStaleItem {
+            relative_path: file.relative_path.clone(),
+            size_bytes: file.size_bytes,
+            category: file.category.clone(),
+        })
         .collect::<Vec<_>>();
     let messages = if stale_files.is_empty() {
         vec!["No stale app-library media files were found.".to_string()]
@@ -4483,10 +4653,50 @@ fn media_storage_audit_detail(
             stale_bytes,
             partial_files,
             stale_samples,
+            stale_items,
             messages,
         },
         stale_files,
     })
+}
+
+fn stale_media_file_category(relative_path: &str, path: &Path) -> String {
+    if is_probably_partial_media_file(path) {
+        return "partial-fragment".to_string();
+    }
+    if relative_path.starts_with("library/downloads/") {
+        return "old-source-download".to_string();
+    }
+    "unreferenced".to_string()
+}
+
+fn validate_media_cleanup_mode(mode: &str) -> Result<String, String> {
+    let normalized = mode.trim();
+    match normalized {
+        "partial-fragments" | "old-source-downloads" | "all-stale" => Ok(normalized.to_string()),
+        _ => Err(
+            "Storage cleanup mode must be partial-fragments, old-source-downloads, or all-stale."
+                .to_string(),
+        ),
+    }
+}
+
+fn cleanup_mode_matches(mode: &str, category: &str) -> bool {
+    match mode {
+        "partial-fragments" => category == "partial-fragment",
+        "old-source-downloads" => category == "old-source-download",
+        "all-stale" => true,
+        _ => false,
+    }
+}
+
+fn cleanup_mode_label(mode: &str) -> &'static str {
+    match mode {
+        "partial-fragments" => "partial-fragment",
+        "old-source-downloads" => "old source-download",
+        "all-stale" => "all-stale",
+        _ => "matching",
+    }
 }
 
 fn collect_all_media_paths(connection: &Connection) -> Result<Vec<String>, String> {
@@ -4528,6 +4738,19 @@ fn format_bytes(bytes: i64) -> String {
     } else {
         format!("{} B", bytes as i64)
     }
+}
+
+fn format_duration_ms(elapsed_ms: i64) -> String {
+    if elapsed_ms < 1000 {
+        return format!("{} ms", elapsed_ms.max(0));
+    }
+    let seconds = elapsed_ms as f64 / 1000.0;
+    if seconds < 60.0 {
+        return format!("{seconds:.1}s");
+    }
+    let minutes = (seconds / 60.0).floor() as i64;
+    let remainder = (seconds as i64) % 60;
+    format!("{minutes}m {remainder}s")
 }
 
 fn duplicate_lesson_title_for_hash(
@@ -4824,6 +5047,7 @@ fn download_lesson_media(
     lesson_dir: &Path,
     data_dir: &Path,
     cookies_file: Option<&Path>,
+    progress: Option<DirectDownloadProgress<'_>>,
 ) -> Result<PathBuf, String> {
     if !is_file_backed_content_type(&lesson.content_type) {
         return Err(
@@ -4832,7 +5056,13 @@ fn download_lesson_media(
     }
 
     if is_direct_file_url(&lesson.source_url) {
-        return download_direct_file(client, &lesson.source_url, lesson_dir, &lesson.content_type);
+        return download_direct_file_with_progress(
+            client,
+            &lesson.source_url,
+            lesson_dir,
+            &lesson.content_type,
+            progress,
+        );
     }
 
     let command = match yt_dlp {
@@ -4858,11 +5088,22 @@ fn is_direct_file_url(source_url: &str) -> bool {
     extension_from_url(source_url).is_some()
 }
 
+#[cfg(test)]
 fn download_direct_file(
     client: &Client,
     source_url: &str,
     lesson_dir: &Path,
     content_type: &str,
+) -> Result<PathBuf, String> {
+    download_direct_file_with_progress(client, source_url, lesson_dir, content_type, None)
+}
+
+fn download_direct_file_with_progress(
+    client: &Client,
+    source_url: &str,
+    lesson_dir: &Path,
+    content_type: &str,
+    mut progress: Option<DirectDownloadProgress<'_>>,
 ) -> Result<PathBuf, String> {
     let mut response = client
         .get(source_url)
@@ -4874,6 +5115,13 @@ fn download_direct_file(
         return Err(format!("Could not fetch media file: HTTP {status}."));
     }
     validate_response_media_type(&response, content_type)?;
+    let expected_bytes = response
+        .content_length()
+        .map(|bytes| bytes.min(i64::MAX as u64) as i64);
+    if let Some(progress) = progress.as_mut() {
+        progress.total_bytes = expected_bytes;
+        let _ = record_direct_download_progress(progress, 0);
+    }
 
     let file_name = direct_download_file_name(source_url);
     let destination = lesson_dir.join(file_name);
@@ -4886,9 +5134,28 @@ fn download_direct_file(
             .unwrap_or_default()
     ));
     let mut file = fs::File::create(&partial_destination).map_err(|error| error.to_string())?;
-    if let Err(error) = io::copy(&mut response, &mut file) {
-        let _ = fs::remove_file(&partial_destination);
-        return Err(error.to_string());
+    let mut bytes_downloaded = 0_i64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = match response.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) => {
+                let _ = fs::remove_file(&partial_destination);
+                return Err(error.to_string());
+            }
+        };
+        if let Err(error) = file.write_all(&buffer[..count]) {
+            let _ = fs::remove_file(&partial_destination);
+            return Err(error.to_string());
+        }
+        bytes_downloaded = bytes_downloaded.saturating_add(count as i64);
+        if let Some(progress) = progress.as_mut() {
+            let threshold = progress.last_recorded_bytes.saturating_add(256 * 1024);
+            if bytes_downloaded >= threshold || Some(bytes_downloaded) == expected_bytes {
+                let _ = record_direct_download_progress(progress, bytes_downloaded);
+            }
+        }
     }
     if let Err(error) = fs::rename(&partial_destination, &destination) {
         let _ = fs::remove_file(&partial_destination);
@@ -4900,6 +5167,41 @@ fn download_direct_file(
     }
 
     Ok(destination)
+}
+
+fn record_direct_download_progress(
+    progress: &mut DirectDownloadProgress<'_>,
+    bytes: i64,
+) -> Result<(), String> {
+    progress.last_recorded_bytes = bytes;
+    let detail = match progress.total_bytes {
+        Some(total) if total > 0 => format!(
+            "Downloaded {} of {}.",
+            format_bytes(bytes),
+            format_bytes(total)
+        ),
+        _ => format!("Downloaded {}.", format_bytes(bytes)),
+    };
+    upsert_job_with_progress(
+        progress.connection,
+        JobUpdate {
+            id: progress.job_id,
+            kind: "download",
+            state: "running",
+            source_id: Some(progress.source_id),
+            lesson_id: Some(progress.lesson_id),
+            label: progress.label,
+            detail: &detail,
+        },
+        Some(JobProgress {
+            started_at: Some(progress.started_at.to_string()),
+            completed_at: None,
+            bytes_expected: progress.total_bytes,
+            bytes_downloaded: Some(bytes),
+            bytes_per_second: None,
+            elapsed_ms: None,
+        }),
+    )
 }
 
 fn direct_download_file_name(source_url: &str) -> String {
@@ -6118,6 +6420,60 @@ fn run_migrations(connection: &Connection) -> Result<(), String> {
         "content_type",
         "ALTER TABLE lessons ADD COLUMN content_type TEXT NOT NULL DEFAULT 'video'",
     )?;
+    ensure_column(
+        connection,
+        "publisher_profiles",
+        "last_endpoint_tested_at",
+        "ALTER TABLE publisher_profiles ADD COLUMN last_endpoint_tested_at TEXT",
+    )?;
+    ensure_column(
+        connection,
+        "publisher_profiles",
+        "last_endpoint_test_passed",
+        "ALTER TABLE publisher_profiles ADD COLUMN last_endpoint_test_passed INTEGER",
+    )?;
+    ensure_column(
+        connection,
+        "publisher_profiles",
+        "last_endpoint_test_summary",
+        "ALTER TABLE publisher_profiles ADD COLUMN last_endpoint_test_summary TEXT",
+    )?;
+    ensure_column(
+        connection,
+        "jobs",
+        "started_at",
+        "ALTER TABLE jobs ADD COLUMN started_at TEXT",
+    )?;
+    ensure_column(
+        connection,
+        "jobs",
+        "completed_at",
+        "ALTER TABLE jobs ADD COLUMN completed_at TEXT",
+    )?;
+    ensure_column(
+        connection,
+        "jobs",
+        "bytes_expected",
+        "ALTER TABLE jobs ADD COLUMN bytes_expected INTEGER",
+    )?;
+    ensure_column(
+        connection,
+        "jobs",
+        "bytes_downloaded",
+        "ALTER TABLE jobs ADD COLUMN bytes_downloaded INTEGER",
+    )?;
+    ensure_column(
+        connection,
+        "jobs",
+        "bytes_per_second",
+        "ALTER TABLE jobs ADD COLUMN bytes_per_second REAL",
+    )?;
+    ensure_column(
+        connection,
+        "jobs",
+        "elapsed_ms",
+        "ALTER TABLE jobs ADD COLUMN elapsed_ms INTEGER",
+    )?;
     backfill_lesson_content_types(connection)
 }
 
@@ -6909,7 +7265,9 @@ fn lesson_note_for_lesson(connection: &Connection, lesson_id: &str) -> Result<Le
 fn fetch_jobs(connection: &Connection) -> Result<Vec<Job>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT id, kind, state, source_id, lesson_id, label, detail, retry_count, updated_at
+            "SELECT id, kind, state, source_id, lesson_id, label, detail, retry_count, updated_at,
+                    started_at, completed_at, bytes_expected, bytes_downloaded,
+                    bytes_per_second, elapsed_ms
              FROM jobs
              ORDER BY updated_at DESC",
         )
@@ -6927,6 +7285,12 @@ fn fetch_jobs(connection: &Connection) -> Result<Vec<Job>, String> {
                 detail: sanitize_job_detail(&row.get::<_, String>(6)?),
                 retry_count: row.get(7)?,
                 updated_at: row.get(8)?,
+                started_at: row.get(9)?,
+                completed_at: row.get(10)?,
+                bytes_expected: row.get(11)?,
+                bytes_downloaded: row.get(12)?,
+                bytes_per_second: row.get(13)?,
+                elapsed_ms: row.get(14)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -8920,8 +9284,35 @@ mod tests {
             detail.audit.stale_samples,
             vec!["library/imports/stale.mp4.part".to_string()]
         );
+        assert_eq!(detail.audit.stale_items.len(), 1);
+        assert_eq!(
+            detail.audit.stale_items[0].relative_path,
+            "library/imports/stale.mp4.part"
+        );
+        assert_eq!(detail.audit.stale_items[0].category, "partial-fragment");
         assert!(!detail.audit.messages.join(" ").contains("/Users/"));
         fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[test]
+    fn cleanup_modes_only_match_their_allowed_stale_categories() {
+        assert!(cleanup_mode_matches(
+            "partial-fragments",
+            "partial-fragment"
+        ));
+        assert!(!cleanup_mode_matches(
+            "partial-fragments",
+            "old-source-download"
+        ));
+        assert!(cleanup_mode_matches(
+            "old-source-downloads",
+            "old-source-download"
+        ));
+        assert!(!cleanup_mode_matches(
+            "old-source-downloads",
+            "unreferenced"
+        ));
+        assert!(cleanup_mode_matches("all-stale", "unreferenced"));
     }
 
     #[test]

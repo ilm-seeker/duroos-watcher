@@ -159,6 +159,12 @@ pub struct Job {
     pub detail: String,
     pub retry_count: i64,
     pub updated_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub bytes_expected: Option<i64>,
+    pub bytes_downloaded: Option<i64>,
+    pub bytes_per_second: Option<f64>,
+    pub elapsed_ms: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -249,13 +255,29 @@ pub struct MediaStorageAudit {
     pub stale_bytes: i64,
     pub partial_files: i64,
     pub stale_samples: Vec<String>,
+    pub stale_items: Vec<MediaStorageStaleItem>,
     pub messages: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaStorageStaleItem {
+    pub relative_path: String,
+    pub size_bytes: i64,
+    pub category: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaStorageCleanupRequest {
+    pub mode: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaStorageCleanup {
     pub audit: MediaStorageAudit,
+    pub mode: String,
     pub removed_files: i64,
     pub failed_removals: i64,
     pub reclaimed_bytes: i64,
@@ -403,6 +425,9 @@ pub struct PublisherProfile {
     pub created_at: String,
     pub updated_at: String,
     pub vault_configured: bool,
+    pub last_endpoint_tested_at: Option<String>,
+    pub last_endpoint_test_passed: Option<bool>,
+    pub last_endpoint_test_summary: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -504,11 +529,21 @@ pub struct PublisherEndpointTestRequest {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct SyntheticPublisherProbeRequest {
+    pub relays: Vec<NostrRelayConfig>,
+    pub blossom_servers: Vec<BlossomServerConfig>,
+    pub confirm_public_probe: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct BlossomUploadResult {
     pub server_url: String,
     pub hash: String,
     pub url: Option<String>,
     pub uploaded: bool,
+    pub elapsed_ms: Option<i64>,
+    pub bytes_per_second: Option<f64>,
     pub message: String,
 }
 
@@ -517,6 +552,7 @@ pub struct BlossomUploadResult {
 pub struct NostrRelayPublishResult {
     pub relay_url: String,
     pub accepted: bool,
+    pub elapsed_ms: Option<i64>,
     pub message: String,
 }
 
@@ -558,6 +594,8 @@ pub struct ChannelPublishResult {
 #[serde(rename_all = "camelCase")]
 pub struct PublisherEndpointTestReport {
     pub passed: bool,
+    pub synthetic: bool,
+    pub tested_at: String,
     pub blossom_results: Vec<BlossomUploadResult>,
     pub relay_results: Vec<NostrRelayPublishResult>,
     pub messages: Vec<String>,

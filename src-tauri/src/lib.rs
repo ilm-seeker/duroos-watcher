@@ -8,12 +8,12 @@ mod publisher;
 use models::{
     AppSnapshot, ChannelPublishResult, ClearSourceSummary, CreatePublisherProfileRequest,
     DownloadSourceSummary, ImportSummary, IngestSummary, Lesson, LessonNote,
-    ManifestValidationReport, MediaStorageAudit, MediaStorageCleanup, NativePlaybackResult,
-    NostrChannelPreview, OpenMediaResult, PhoneMediaScope, PhoneMediaSession,
+    ManifestValidationReport, MediaStorageAudit, MediaStorageCleanup, MediaStorageCleanupRequest,
+    NativePlaybackResult, NostrChannelPreview, OpenMediaResult, PhoneMediaScope, PhoneMediaSession,
     PublishTeacherChannelRequest, PublishedChannelItem, PublisherChannel,
     PublisherEndpointTestReport, PublisherEndpointTestRequest, PublisherProfile,
-    RuntimeDiagnostics, SavePublisherChannelRequest, TrustCuratorSummary, TrustedCurator,
-    WatchState,
+    RuntimeDiagnostics, SavePublisherChannelRequest, SyntheticPublisherProbeRequest,
+    TrustCuratorSummary, TrustedCurator, WatchState,
 };
 use phone_access::PhoneAccessState;
 
@@ -131,8 +131,11 @@ fn audit_media_storage(app: tauri::AppHandle) -> Result<MediaStorageAudit, Strin
 }
 
 #[tauri::command]
-fn cleanup_media_storage(app: tauri::AppHandle) -> Result<MediaStorageCleanup, String> {
-    db::cleanup_media_storage(&app)
+fn cleanup_media_storage(
+    app: tauri::AppHandle,
+    request: MediaStorageCleanupRequest,
+) -> Result<MediaStorageCleanup, String> {
+    db::cleanup_media_storage(&app, request)
 }
 
 #[tauri::command]
@@ -261,6 +264,13 @@ fn test_publisher_endpoints(
 }
 
 #[tauri::command]
+fn run_synthetic_publisher_probe(
+    request: SyntheticPublisherProbeRequest,
+) -> Result<PublisherEndpointTestReport, String> {
+    publisher::run_synthetic_publisher_probe(request)
+}
+
+#[tauri::command]
 fn ingest_nostr_channel(
     app: tauri::AppHandle,
     channel_ref: String,
@@ -324,6 +334,7 @@ pub fn run() {
             unlock_publisher_profile,
             publish_teacher_channel,
             test_publisher_endpoints,
+            run_synthetic_publisher_probe,
             ingest_nostr_channel,
             preview_nostr_channel
         ])

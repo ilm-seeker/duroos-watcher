@@ -1560,6 +1560,49 @@ button:focus-visible {
   line-height: 1.35;
 }
 
+.storage-cleanup-review {
+  display: grid;
+  gap: 10px;
+}
+
+.storage-cleanup-groups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.storage-cleanup-groups button strong {
+  font-size: 11px;
+}
+
+.storage-stale-item-list {
+  display: grid;
+  gap: 6px;
+}
+
+.storage-stale-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fbfaf6;
+  padding: 7px 8px;
+}
+
+.storage-stale-item code {
+  overflow-wrap: anywhere;
+  color: #4a554f;
+  font-size: 11px;
+}
+
+.storage-stale-item span {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .source-readiness-row div:nth-child(2) {
   display: grid;
   min-width: 0;
@@ -2928,6 +2971,12 @@ button.compact-row-active {
   padding: 8px;
   font-size: 11px;
   line-height: 1.4;
+}
+
+.job-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .drawer-backdrop {

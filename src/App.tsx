@@ -70,6 +70,7 @@ import {
   removeTrustedCurator,
   resolveMediaFileUrl,
   resolveMediaThumbnailUrl,
+  runSyntheticPublisherProbe,
   saveLessonNote,
   savePublisherChannel,
   saveWatchState,
@@ -120,6 +121,7 @@ import type {
   LessonNote,
   LiveSession,
   MediaStorageAudit,
+  MediaStorageCleanupMode,
   MediaFile,
   NostrChannelPreview,
   PhoneMediaSession,
@@ -158,7 +160,7 @@ type ViewMode = "library" | "relays" | "publish" | "sources" | "queue";
 type ImportMode = "local" | "source" | "feed" | "manifest" | "keys";
 type BusySourceAction = { sourceId: string; action: "clear" | "download" } | null;
 type PhoneAccessBusyAction = "start" | "stop" | null;
-type MediaStorageBusyAction = "audit" | "cleanup" | null;
+type MediaStorageBusyAction = "audit" | MediaStorageCleanupMode | null;
 type ChannelNotificationPreference = {
   enabled: boolean;
   lastNotifiedAt?: string;
@@ -286,6 +288,54 @@ const formatBytes = (bytes: number): string => {
     return `${(safeBytes / 1024).toFixed(1)} KB`;
   }
   return `${safeBytes} B`;
+};
+
+const formatSpeed = (bytesPerSecond?: number): string => {
+  if (!bytesPerSecond || !Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) {
+    return "Speed unknown";
+  }
+  return `${formatBytes(Math.round(bytesPerSecond))}/s`;
+};
+
+const formatElapsed = (elapsedMs?: number): string => {
+  if (!elapsedMs || !Number.isFinite(elapsedMs) || elapsedMs <= 0) {
+    return "Elapsed unknown";
+  }
+  if (elapsedMs < 1000) {
+    return `${Math.round(elapsedMs)} ms`;
+  }
+  const seconds = elapsedMs / 1000;
+  if (seconds < 60) {
+    return `${seconds.toFixed(1)}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const remainder = Math.round(seconds % 60);
+  return `${minutes}m ${remainder}s`;
+};
+
+const storageCleanupModeLabel = (mode: MediaStorageCleanupMode): string => {
+  switch (mode) {
+    case "partial-fragments":
+      return "Partial Fragments";
+    case "old-source-downloads":
+      return "Old Source Downloads";
+    case "all-stale":
+      return "All Stale Files";
+  }
+};
+
+const storageCleanupModeMatches = (
+  mode: MediaStorageCleanupMode,
+  category: string,
+): boolean => {
+  switch (mode) {
+    case "partial-fragments":
+      return category === "partial-fragment";
+    case "old-source-downloads":
+      return category === "old-source-download";
+    case "all-stale":
+      return true;
+  }
 };
 
 const capabilityLabel = (level: CapabilityLevel): string => {
@@ -494,6 +544,7 @@ const App = () => {
   });
   const [isImportOpen, setIsImportOpen] = useState(false);
   const [initialImportMode, setInitialImportMode] = useState<ImportMode>("local");
+  const [initialImportSourceUrl, setInitialImportSourceUrl] = useState("");
   const [systemNotice, setSystemNotice] = useState("");
   const [busySourceAction, setBusySourceAction] = useState<BusySourceAction>(null);
   const [busyNativeMediaId, setBusyNativeMediaId] = useState<string | null>(null);
@@ -988,9 +1039,10 @@ const App = () => {
     void refreshSnapshot(notice);
   };
 
-  const openImport = (mode: ImportMode = "local") => {
+  const openImport = (mode: ImportMode = "local", sourceUrl = "") => {
     recordOnboardingLane("study");
     setInitialImportMode(mode);
+    setInitialImportSourceUrl(sourceUrl);
     setIsImportOpen(true);
   };
 
@@ -1039,23 +1091,25 @@ const App = () => {
     }
   };
 
-  const handleCleanupMediaStorage = async () => {
-    const staleFiles = mediaStorageAudit?.staleFiles ?? 0;
-    const staleBytes = mediaStorageAudit?.staleBytes ?? 0;
+  const handleCleanupMediaStorage = async (mode: MediaStorageCleanupMode) => {
+    const staleItems = mediaStorageAudit?.staleItems ?? [];
+    const matchingItems = staleItems.filter((item) => storageCleanupModeMatches(mode, item.category));
+    const staleFiles = matchingItems.length;
+    const staleBytes = matchingItems.reduce((total, item) => total + item.sizeBytes, 0);
     if (staleFiles <= 0) {
       setSystemNotice("Run a storage scan first; no stale library files are currently listed.");
       return;
     }
     const confirmed = window.confirm(
-      `Remove ${staleFiles} unreferenced file(s) from the app library and reclaim ${formatBytes(staleBytes)}? This cannot be undone.`,
+      `Remove ${staleFiles} ${storageCleanupModeLabel(mode).toLowerCase()} file(s) from the app library and reclaim ${formatBytes(staleBytes)}? This cannot be undone.`,
     );
     if (!confirmed) {
       return;
     }
 
     try {
-      setMediaStorageBusyAction("cleanup");
-      const result = await cleanupMediaStorage();
+      setMediaStorageBusyAction(mode);
+      const result = await cleanupMediaStorage(mode);
       setMediaStorageAudit(result.audit);
       setSystemNotice(result.messages.join(" "));
       await refreshSnapshot(result.messages.join(" "));
@@ -1462,6 +1516,7 @@ const App = () => {
         <ImportDrawer
           isOnlineMode={isOnlineMode}
           initialMode={initialImportMode}
+          initialSourceUrl={initialImportSourceUrl}
           trustedCurators={snapshot.trustedCurators}
           onEnableFetching={() => setIsOnlineMode(true)}
           close={() => setIsImportOpen(false)}
@@ -1650,9 +1705,10 @@ const TopBar = ({
             className={isOnlineMode ? "mode-toggle mode-toggle-online" : "mode-toggle"}
             onClick={() => setIsOnlineMode(!isOnlineMode)}
             aria-pressed={isOnlineMode}
+            title="Remote source refreshes and subscriptions are blocked while off. Local imports still work."
           >
             {isOnlineMode ? <Wifi size={18} /> : <WifiOff size={18} />}
-            <span>{isOnlineMode ? "Fetching enabled" : "Offline mode"}</span>
+            <span>{isOnlineMode ? "Remote fetching on" : "Remote fetching off"}</span>
           </button>
           <button type="button" className="primary-action" onClick={openImport}>
             <Import size={17} />
@@ -1727,7 +1783,7 @@ interface DashboardProps {
   provenanceById: Map<string, ProvenanceRecord>;
   watchByLessonId: Map<string, WatchState>;
   setSelectedLessonId: (lessonId: string) => void;
-  onOpenImport: (mode?: ImportMode) => void;
+  onOpenImport: (mode?: ImportMode, sourceUrl?: string) => void;
   onOpenPublish: () => void;
   onClearSearch: () => void;
   runtimeDiagnostics: RuntimeDiagnostics;
@@ -2002,6 +2058,7 @@ const Dashboard = ({
               onRefresh={onRefreshChannel}
               onDownload={onDownloadChannel}
               onUnfollow={onUnfollowChannel}
+              onReviewTrust={(channel) => onOpenImport("feed", channel.feedUrl)}
             />
           ))
         ) : (
@@ -2104,7 +2161,7 @@ const FirstRunDashboard = ({
 }: {
   sources: Source[];
   runtimeDiagnostics: RuntimeDiagnostics;
-  onOpenImport: (mode?: ImportMode) => void;
+  onOpenImport: (mode?: ImportMode, sourceUrl?: string) => void;
   onOpenPublish: () => void;
 }) => {
   const downloader = downloaderStatus(runtimeDiagnostics);
@@ -3378,10 +3435,24 @@ const StorageHygienePanel = ({
   audit: MediaStorageAudit | null;
   busyAction: MediaStorageBusyAction;
   onAudit: () => void;
-  onCleanup: () => void;
+  onCleanup: (mode: MediaStorageCleanupMode) => void;
 }) => {
   const staleFiles = audit?.staleFiles ?? 0;
-  const canCleanup = staleFiles > 0 && busyAction === null;
+  const staleItems = audit?.staleItems ?? [];
+  const cleanupModes: MediaStorageCleanupMode[] = [
+    "partial-fragments",
+    "old-source-downloads",
+    "all-stale",
+  ];
+  const cleanupModeStats = cleanupModes.map((mode) => {
+    const items = staleItems.filter((item) => storageCleanupModeMatches(mode, item.category));
+    return {
+      mode,
+      count: items.length,
+      bytes: items.reduce((total, item) => total + item.sizeBytes, 0),
+    };
+  });
+  const canCleanup = busyAction === null;
 
   return (
     <section className="storage-hygiene-panel">
@@ -3402,20 +3473,6 @@ const StorageHygienePanel = ({
           >
             <Search size={15} />
             <span>{busyAction === "audit" ? "Scanning" : "Scan Storage"}</span>
-          </button>
-          <button
-            type="button"
-            className="danger-action"
-            onClick={onCleanup}
-            disabled={!canCleanup}
-            title={
-              staleFiles > 0
-                ? "Remove unreferenced files from the managed app library."
-                : "Scan storage before cleanup."
-            }
-          >
-            <Trash2 size={15} />
-            <span>{busyAction === "cleanup" ? "Cleaning" : "Clean Stale Files"}</span>
           </button>
         </div>
       </div>
@@ -3440,6 +3497,47 @@ const StorageHygienePanel = ({
           {audit ? audit.messages.join(" ") : "Run a scan before cleaning anything."}
         </p>
       )}
+      {audit && staleFiles > 0 ? (
+        <div className="storage-cleanup-review" aria-label="Review stale files before cleanup">
+          <div className="storage-cleanup-groups">
+            {cleanupModeStats.map(({ mode, count, bytes }) => (
+              <button
+                key={mode}
+                type="button"
+                className={mode === "all-stale" ? "danger-action" : "secondary-action"}
+                onClick={() => onCleanup(mode)}
+                disabled={!canCleanup || count === 0}
+                title={
+                  count > 0
+                    ? `Remove ${count} ${storageCleanupModeLabel(mode).toLowerCase()} file(s).`
+                    : "No matching stale files in the latest scan."
+                }
+              >
+                <Trash2 size={15} />
+                <span>
+                  {busyAction === mode ? "Cleaning" : storageCleanupModeLabel(mode)}
+                </span>
+                <strong>{formatBytes(bytes)}</strong>
+              </button>
+            ))}
+          </div>
+          <div className="storage-stale-item-list" aria-label="Stale managed-library files">
+            {staleItems.slice(0, 8).map((item) => (
+              <div className="storage-stale-item" key={item.relativePath}>
+                <code>{item.relativePath}</code>
+                <span>
+                  {item.category.replace(/-/g, " ")} · {formatBytes(item.sizeBytes)}
+                </span>
+              </div>
+            ))}
+            {staleItems.length > 8 ? (
+              <p className="panel-empty">
+                {staleItems.length - 8} more stale file(s) will remain in the review total.
+              </p>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 };
@@ -3574,37 +3672,52 @@ const TeacherPanel = ({
   groups: LibraryGroup[];
   selectedTeacherId: string;
   onSelectTeacher: (teacherId: string) => void;
-}) => (
-  <section className="side-panel">
-    <SectionHeader title="Teachers" meta={`${groups.length} saved`} />
-    <div className="compact-list">
-      {groups.length ? (
-        groups.map((group) => (
-        <button
-          type="button"
-          className={
-            selectedTeacherId === group.id
-              ? "compact-row compact-row-active"
-              : "compact-row"
-          }
-          key={group.id}
-          onClick={() => onSelectTeacher(selectedTeacherId === group.id ? "all" : group.id)}
-        >
-          <div className="round-icon">
-            <UserRound size={16} />
-          </div>
-          <div>
-            <strong>{group.label}</strong>
-            <span>{group.lessonCount} items · {group.activeCount} active</span>
-          </div>
-        </button>
-      ))
-      ) : (
-        <p className="panel-empty">No teachers yet.</p>
-      )}
-    </div>
-  </section>
-);
+}) => {
+  const labelCounts = groups.reduce<Record<string, number>>((counts, group) => {
+    const key = group.label.trim().toLowerCase();
+    counts[key] = (counts[key] ?? 0) + 1;
+    return counts;
+  }, {});
+
+  return (
+    <section className="side-panel">
+      <SectionHeader title="Teachers" meta={`${groups.length} saved`} />
+      <div className="compact-list">
+        {groups.length ? (
+          groups.map((group) => {
+            const isDuplicate = labelCounts[group.label.trim().toLowerCase()] > 1;
+            const displayLabel = isDuplicate
+              ? `${group.label} · ${group.id.slice(-6)}`
+              : group.label;
+
+            return (
+              <button
+                type="button"
+                className={
+                  selectedTeacherId === group.id
+                    ? "compact-row compact-row-active"
+                    : "compact-row"
+                }
+                key={group.id}
+                onClick={() => onSelectTeacher(selectedTeacherId === group.id ? "all" : group.id)}
+              >
+                <div className="round-icon">
+                  <UserRound size={16} />
+                </div>
+                <div>
+                  <strong>{displayLabel}</strong>
+                  <span>{group.lessonCount} items · {group.activeCount} active</span>
+                </div>
+              </button>
+            );
+          })
+        ) : (
+          <p className="panel-empty">No teachers yet.</p>
+        )}
+      </div>
+    </section>
+  );
+};
 
 const ChannelSubscriptionCard = ({
   channel,
@@ -3617,6 +3730,7 @@ const ChannelSubscriptionCard = ({
   onRefresh,
   onDownload,
   onUnfollow,
+  onReviewTrust,
   onToggleNotifications,
 }: {
   channel: ChannelSubscriptionView;
@@ -3629,6 +3743,7 @@ const ChannelSubscriptionCard = ({
   onRefresh: (channel: ChannelSubscriptionView) => void;
   onDownload: (channel: ChannelSubscriptionView) => void;
   onUnfollow: (channel: ChannelSubscriptionView) => void;
+  onReviewTrust?: (channel: ChannelSubscriptionView) => void;
   onToggleNotifications?: (channel: ChannelSubscriptionView) => void;
 }) => {
   const isDownloading =
@@ -3638,6 +3753,9 @@ const ChannelSubscriptionCard = ({
   const mediaTone =
     channel.missingFileCount > 0 ? "warning" : channel.localFileCount > 0 ? "positive" : "neutral";
   const feedReference = compactUrlReference(channel.feedUrl);
+  const canReviewTrust = Boolean(
+    onReviewTrust && channel.trustState === "signed-untrusted" && channel.feedUrl,
+  );
 
   return (
     <article className={selected ? "channel-card channel-card-active" : "channel-card"}>
@@ -3724,6 +3842,17 @@ const ChannelSubscriptionCard = ({
                   ? "Mute Alerts"
                   : "Notify"}
             </span>
+          </button>
+        ) : null}
+        {canReviewTrust ? (
+          <button
+            type="button"
+            className="secondary-action"
+            onClick={() => onReviewTrust?.(channel)}
+            title="Preview the signed manifest and trust this curator only after outside verification."
+          >
+            <KeyRound size={15} />
+            <span>Review Trust</span>
           </button>
         ) : null}
         <button
@@ -3818,7 +3947,7 @@ const RelaysView = ({
   busySourceAction: BusySourceAction;
   channelNotificationPreferences: ChannelNotificationPreferences;
   notificationBusySourceId: string | null;
-  onOpenImport: (mode?: ImportMode) => void;
+  onOpenImport: (mode?: ImportMode, sourceUrl?: string) => void;
   onRefreshChannel: (channel: ChannelSubscriptionView) => void;
   onDownloadChannel: (channel: ChannelSubscriptionView) => void;
   onUnfollowChannel: (channel: ChannelSubscriptionView) => void;
@@ -3894,6 +4023,7 @@ const RelaysView = ({
                     onRefresh={onRefreshChannel}
                     onDownload={onDownloadChannel}
                     onUnfollow={onUnfollowChannel}
+                    onReviewTrust={(channel) => onOpenImport("feed", channel.feedUrl)}
                     onToggleNotifications={onToggleChannelNotifications}
                   />
                 ))
@@ -4033,6 +4163,16 @@ const TeacherPublisherPanel = ({
         : [],
     [channels, selectedProfile],
   );
+  const savedUnpublishedChannels = useMemo(
+    () =>
+      profileChannels.filter(
+        (channel) =>
+          !channel.lastPublishedAt &&
+          !channel.lastManifestSha256 &&
+          channel.mediaCount + channel.postCount === 0,
+      ),
+    [profileChannels],
+  );
   const selectedChannel = useMemo(
     () => profileChannels.find((channel) => channel.id === channelId),
     [channelId, profileChannels],
@@ -4081,9 +4221,13 @@ const TeacherPublisherPanel = ({
         return current;
       }
 
+      if (savedUnpublishedChannels.length === 1) {
+        return savedUnpublishedChannels[0].id;
+      }
+
       return "";
     });
-  }, [selectedProfile, profileChannels]);
+  }, [selectedProfile, profileChannels, savedUnpublishedChannels]);
 
   useEffect(() => {
     if (!selectedChannel) {
@@ -4251,6 +4395,11 @@ const TeacherPublisherPanel = ({
         : blossomServers.length === 0
           ? "Add at least one Blossom server."
           : "";
+  const syntheticProbeBlockedReason = relays.length === 0
+    ? "Add at least one Nostr relay."
+    : blossomServers.length === 0
+      ? "Add at least one Blossom server."
+      : "";
   const publisherSteps = [
     {
       title: "Profile",
@@ -4415,6 +4564,39 @@ const TeacherPublisherPanel = ({
       });
       setEndpointTestReport(report);
       setTestedEndpointSignature(endpointSignature);
+      setPanelNotice(report.messages.join(" "));
+      await onProfilesChanged();
+    } catch (error: unknown) {
+      setPanelNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const runSyntheticProbe = async () => {
+    if (syntheticProbeBlockedReason) {
+      setPanelNotice(syntheticProbeBlockedReason);
+      return;
+    }
+    const confirmed = window.confirm(
+      "Run a synthetic publisher probe with temporary keys? Accepted probes are public on the selected relay and Blossom endpoints.",
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setIsWorking(true);
+    setPanelNotice("");
+    setEndpointTestReport(null);
+
+    try {
+      const report = await runSyntheticPublisherProbe({
+        relays,
+        blossomServers,
+        confirmPublicProbe: true,
+      });
+      setEndpointTestReport(report);
+      setTestedEndpointSignature("");
       setPanelNotice(report.messages.join(" "));
     } catch (error: unknown) {
       setPanelNotice(error instanceof Error ? error.message : String(error));
@@ -4758,6 +4940,22 @@ const TeacherPublisherPanel = ({
                 {publishedItemsError}
               </p>
             ) : null}
+            {savedUnpublishedChannels.length === 1 ? (
+              <div className="publisher-channel-recovery">
+                <div>
+                  <strong>Continue publishing {savedUnpublishedChannels[0].title}</strong>
+                  <span>One saved channel has no subscriber link yet.</span>
+                </div>
+                <button
+                  type="button"
+                  className="primary-action"
+                  onClick={() => startChannelUpdate(savedUnpublishedChannels[0])}
+                >
+                  <ChevronRight size={16} />
+                  <span>Continue</span>
+                </button>
+              </div>
+            ) : null}
             <div className="publisher-channel-dashboard">
               {profileChannels.map((channel) => (
                 <PublishedChannelCard
@@ -4879,6 +5077,13 @@ const TeacherPublisherPanel = ({
               <span>Unlock</span>
             </button>
           </div>
+          {selectedProfile?.lastEndpointTestedAt ? (
+            <p className="publisher-inline-note">
+              Last endpoint test {formatDate(selectedProfile.lastEndpointTestedAt)}:{" "}
+              {selectedProfile.lastEndpointTestPassed ? "passed" : "issues found"}.{" "}
+              {selectedProfile.lastEndpointTestSummary}
+            </p>
+          ) : null}
         </div>
 
         <div className="publisher-column">
@@ -4977,12 +5182,30 @@ const TeacherPublisherPanel = ({
               <RadioTower size={16} />
               <span>{isWorking ? "Working" : "Test Endpoints"}</span>
             </button>
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={runSyntheticProbe}
+              disabled={isWorking || Boolean(syntheticProbeBlockedReason)}
+              title={
+                syntheticProbeBlockedReason ||
+                "Use temporary keys to measure selected endpoints without unlocking a publisher profile."
+              }
+            >
+              <RadioTower size={16} />
+              <span>{isWorking ? "Working" : "Synthetic Probe"}</span>
+            </button>
           </div>
           {endpointTestBlockedReason ? (
             <p className="publisher-inline-note">{endpointTestBlockedReason}</p>
           ) : (
             <p className="publisher-inline-note">
               Endpoint testing creates a tiny public probe on any server or relay that accepts it.
+            </p>
+          )}
+          {syntheticProbeBlockedReason ? null : (
+            <p className="publisher-inline-note">
+              Synthetic probes use temporary keys for timing only and do not unlock publishing.
             </p>
           )}
           {endpointTestReport ? (
@@ -5461,6 +5684,10 @@ const EndpointTestReportView = ({ report }: { report: PublisherEndpointTestRepor
     <div className="endpoint-test-report" role="status">
       <div className="endpoint-test-summary">
         <StatusChip label={status.label} tone={status.tone} />
+        <StatusChip
+          label={report.synthetic ? "Synthetic probe" : `Tested ${formatDate(report.testedAt)}`}
+          tone={report.synthetic ? "neutral" : "positive"}
+        />
         <span>{report.messages.join(" ")}</span>
       </div>
       <div className="endpoint-test-grid">
@@ -5471,7 +5698,9 @@ const EndpointTestReportView = ({ report }: { report: PublisherEndpointTestRepor
               tone={result.uploaded ? "positive" : "danger"}
             />
             <code>{result.serverUrl}</code>
-            <span>{result.message}</span>
+            <span>
+              {result.message} · {formatElapsed(result.elapsedMs)} · {formatSpeed(result.bytesPerSecond)}
+            </span>
           </div>
         ))}
         {report.relayResults.map((result) => (
@@ -5481,7 +5710,7 @@ const EndpointTestReportView = ({ report }: { report: PublisherEndpointTestRepor
               tone={result.accepted ? "positive" : "danger"}
             />
             <code>{result.relayUrl}</code>
-            <span>{result.message || "No relay message."}</span>
+            <span>{result.message || "No relay message."} · {formatElapsed(result.elapsedMs)}</span>
           </div>
         ))}
       </div>
@@ -5678,7 +5907,7 @@ const SourcesView = ({
   onDownloadSource: (source: Source) => void;
   onRemoveTrustedCurator: (curator: TrustedCurator) => void;
   onAuditMediaStorage: () => void;
-  onCleanupMediaStorage: () => void;
+  onCleanupMediaStorage: (mode: MediaStorageCleanupMode) => void;
 }) => {
   const sourceQuery = normalizeSearch(query);
   const visibleSources = sources.filter((source) =>
@@ -5975,6 +6204,22 @@ const QueueView = ({
                       <code>{detail.technicalDetail}</code>
                     </details>
                   ) : null}
+                  {job.bytesDownloaded || job.bytesExpected || job.elapsedMs ? (
+                    <div className="job-metrics" aria-label={`${job.label} download metrics`}>
+                      {job.bytesDownloaded ? (
+                        <StatusChip label={formatBytes(job.bytesDownloaded)} tone="neutral" />
+                      ) : null}
+                      {job.bytesExpected && job.bytesExpected !== job.bytesDownloaded ? (
+                        <StatusChip label={`of ${formatBytes(job.bytesExpected)}`} tone="neutral" />
+                      ) : null}
+                      {job.bytesPerSecond ? (
+                        <StatusChip label={formatSpeed(job.bytesPerSecond)} tone="neutral" />
+                      ) : null}
+                      {job.elapsedMs ? (
+                        <StatusChip label={formatElapsed(job.elapsedMs)} tone="neutral" />
+                      ) : null}
+                    </div>
+                  ) : null}
                   <span>
                     {sources.get(job.sourceId ?? "")?.label ?? "System"} · {formatDate(job.updatedAt)}
                   </span>
@@ -6026,6 +6271,7 @@ function importModeConfig(mode: ImportMode): { description: string } {
 const ImportDrawer = ({
   isOnlineMode,
   initialMode,
+  initialSourceUrl,
   trustedCurators,
   onEnableFetching,
   close,
@@ -6034,6 +6280,7 @@ const ImportDrawer = ({
 }: {
   isOnlineMode: boolean;
   initialMode: ImportMode;
+  initialSourceUrl: string;
   trustedCurators: TrustedCurator[];
   onEnableFetching: () => void;
   close: () => void;
@@ -6088,6 +6335,14 @@ const ImportDrawer = ({
   useEffect(() => {
     setMode(initialMode);
   }, [initialMode]);
+
+  useEffect(() => {
+    if (!initialSourceUrl) {
+      return;
+    }
+    setSourceUrl(initialSourceUrl);
+    setValidationMessage("Channel reference loaded. Preview before trusting or following.");
+  }, [initialSourceUrl]);
 
   useEffect(() => {
     const previousActiveElement =

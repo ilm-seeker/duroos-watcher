@@ -201,6 +201,12 @@ export interface Job {
   detail: string;
   retryCount: number;
   updatedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  bytesExpected?: number;
+  bytesDownloaded?: number;
+  bytesPerSecond?: number;
+  elapsedMs?: number;
 }
 
 export interface TrustedCurator {
@@ -273,11 +279,28 @@ export interface MediaStorageAudit {
   staleBytes: number;
   partialFiles: number;
   staleSamples: string[];
+  staleItems: MediaStorageStaleItem[];
   messages: string[];
+}
+
+export type MediaStorageCleanupMode =
+  | "partial-fragments"
+  | "old-source-downloads"
+  | "all-stale";
+
+export interface MediaStorageStaleItem {
+  relativePath: string;
+  sizeBytes: number;
+  category: "partial-fragment" | "old-source-download" | "unreferenced";
+}
+
+export interface MediaStorageCleanupRequest {
+  mode: MediaStorageCleanupMode;
 }
 
 export interface MediaStorageCleanup {
   audit: MediaStorageAudit;
+  mode: MediaStorageCleanupMode;
   removedFiles: number;
   failedRemovals: number;
   reclaimedBytes: number;
@@ -381,6 +404,9 @@ export interface PublisherProfile {
   createdAt: string;
   updatedAt: string;
   vaultConfigured: boolean;
+  lastEndpointTestedAt?: string;
+  lastEndpointTestPassed?: boolean;
+  lastEndpointTestSummary?: string;
 }
 
 export interface PublisherChannel {
@@ -461,17 +487,26 @@ export interface PublisherEndpointTestRequest {
   blossomServers: BlossomServerConfig[];
 }
 
+export interface SyntheticPublisherProbeRequest {
+  relays: NostrRelayConfig[];
+  blossomServers: BlossomServerConfig[];
+  confirmPublicProbe: boolean;
+}
+
 export interface BlossomUploadResult {
   serverUrl: string;
   hash: string;
   url?: string;
   uploaded: boolean;
+  elapsedMs?: number;
+  bytesPerSecond?: number;
   message: string;
 }
 
 export interface NostrRelayPublishResult {
   relayUrl: string;
   accepted: boolean;
+  elapsedMs?: number;
   message: string;
 }
 
@@ -507,6 +542,8 @@ export interface ChannelPublishResult {
 
 export interface PublisherEndpointTestReport {
   passed: boolean;
+  synthetic: boolean;
+  testedAt: string;
   blossomResults: BlossomUploadResult[];
   relayResults: NostrRelayPublishResult[];
   messages: string[];
