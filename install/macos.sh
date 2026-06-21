@@ -113,22 +113,34 @@ if [[ -f "$executable" ]]; then
 fi
 
 if [[ ! -d "$install_dir" ]]; then
-  mkdir -p "$install_dir" 2>/dev/null || sudo mkdir -p "$install_dir"
+  mkdir -p "$install_dir" 2>/dev/null || {
+    require_command sudo
+    sudo mkdir -p "$install_dir"
+  }
 fi
 
-sudo_cmd=()
+needs_sudo=0
 if [[ ! -w "$install_dir" ]]; then
-  sudo_cmd=(sudo)
+  require_command sudo
+  needs_sudo=1
 fi
+
+run_install_command() {
+  if [[ "$needs_sudo" == "1" ]]; then
+    sudo "$@"
+  else
+    "$@"
+  fi
+}
 
 destination="${install_dir}/${app_name}"
 if [[ -e "$destination" ]]; then
   existing_id="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "${destination}/Contents/Info.plist" 2>/dev/null || true)"
   [[ "$existing_id" == "$bundle_id" ]] || fail "${destination} exists but is not Duroos Watcher."
-  "${sudo_cmd[@]}" rm -rf "$destination"
+  run_install_command rm -rf "$destination"
 fi
 
-"${sudo_cmd[@]}" ditto "$app_path" "$destination"
+run_install_command ditto "$app_path" "$destination"
 
 echo "Installed ${destination}"
 echo "Open it with: open \"${destination}\""
