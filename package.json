@@ -2,7 +2,29 @@
   "name": "duroos-watcher",
   "private": true,
   "version": "0.1.0",
+  "description": "Open-source local media harness for decentralized scholarly media distribution.",
   "license": "AGPL-3.0-or-later",
+  "homepage": "https://github.com/ilm-seeker/duroos-watcher/releases",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ilm-seeker/duroos-watcher.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ilm-seeker/duroos-watcher/issues"
+  },
+  "keywords": [
+    "media-harness",
+    "scholarly-media",
+    "decentralized",
+    "local-first",
+    "offline-first",
+    "tauri",
+    "react",
+    "typescript",
+    "agpl",
+    "signed-manifests",
+    "education"
+  ],
   "type": "module",
   "scripts": {
     "dev": "vite",

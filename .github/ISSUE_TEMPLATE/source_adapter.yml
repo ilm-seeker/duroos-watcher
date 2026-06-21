@@ -1,0 +1,53 @@
+name: Source adapter proposal
+description: Propose support for a new public feed, manifest, source, or scholarly media workflow.
+title: "Source adapter: "
+labels: ["source-adapter"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Source adapters must preserve review-first downloads, source provenance, and permission-respecting behavior.
+  - type: input
+    id: source
+    attributes:
+      label: Source or format
+      placeholder: RSS, Atom, JSON Feed, Archive.org, signed Duroos manifest, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Scholarly media use case
+      description: Explain the learner, teacher, curator, or archive workflow.
+    validations:
+      required: true
+  - type: textarea
+    id: data_model
+    attributes:
+      label: Data and provenance
+      description: What URLs, titles, authors, hashes, signatures, permission notes, or media references should be stored?
+  - type: dropdown
+    id: credentials
+    attributes:
+      label: Credentials required?
+      options:
+        - No credentials
+        - Optional local cookies or browser session
+        - Required credentials
+        - Unknown
+    validations:
+      required: true
+  - type: textarea
+    id: download_behavior
+    attributes:
+      label: Download behavior
+      description: State whether media uses direct URLs, enclosures, local tools such as yt-dlp, or metadata-only references.
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Boundaries
+      options:
+        - label: This proposal does not bypass paid access, private content, platform terms, copyright controls, or source permissions.
+          required: true
+        - label: This proposal treats remote feeds, manifests, pages, thumbnails, and media as untrusted input.
+          required: true

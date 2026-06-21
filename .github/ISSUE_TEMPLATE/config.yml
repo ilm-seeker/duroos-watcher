@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Download current alpha packages
+    url: https://github.com/ilm-seeker/duroos-watcher/releases
+    about: Use GitHub Releases for packaged app downloads and checksum files.
+  - name: Security policy
+    url: https://github.com/ilm-seeker/duroos-watcher/blob/main/SECURITY.md
+    about: Read this before reporting vulnerabilities or sensitive security details.
+  - name: Harness customization guide
+    url: https://github.com/ilm-seeker/duroos-watcher/blob/main/docs/harness-customization.md
+    about: Start here for source-level customization, forks, theming, source adapters, and packaging.

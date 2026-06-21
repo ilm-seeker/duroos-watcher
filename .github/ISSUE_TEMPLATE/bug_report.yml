@@ -1,0 +1,60 @@
+name: Bug report
+description: Report a reproducible Duroos Watcher software bug.
+title: "Bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include cookies, tokens, private keys, Telegram sessions, local absolute paths, or private media.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: App version, release tag, or commit SHA.
+      placeholder: v0.1.0-alpha.2 or 6eb8f9f
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS
+        - Windows
+        - Linux
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: State the actual behavior and expected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Give the smallest steps that reproduce the bug.
+      placeholder: |
+        1. Open...
+        2. Import...
+        3. Click...
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Paste relevant logs or screenshots after removing private data.
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Boundaries
+      options:
+        - label: I removed credentials, cookies, tokens, private keys, local absolute paths, and private media.
+          required: true
+        - label: This is a Duroos Watcher software issue, not only a third-party platform/source/content issue.
+          required: true

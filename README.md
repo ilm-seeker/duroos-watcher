@@ -1,22 +1,37 @@
 # Duroos Watcher
 
-Duroos Watcher is a local-first desktop study library for long-form educational media. It is meant to be a quiet YouTube-like shell for lessons you choose to save, follow, verify, organize, and study without accounts, recommendations, comments, telemetry, or a central Duroos server.
+Duroos Watcher is an open-source local media harness for decentralized scholarly media distribution. The reference app is a local-first desktop study library for long-form educational media: a quiet YouTube-like shell for lessons you choose to save, follow, verify, organize, and study without accounts, recommendations, comments, telemetry, or a central Duroos server.
 
-The project direction is not "build another LMS." The useful direction is narrower: a private learner and curator tool for preserving permitted lessons locally, tracking provenance, following signed teacher or curator feeds, and making playback and study flow reliable across video, audio, PDFs, and source posts.
+You can download the current alpha package, build the app locally, or fork the source to customize the interface, source adapters, branding, release packaging, and scholarly media workflow. The project direction is not "build another LMS." The useful direction is narrower: a private learner and curator tool for preserving permitted lessons locally, tracking provenance, following signed teacher or curator feeds, and making playback and study flow reliable across video, audio, PDFs, and source posts.
+
+## Download The App
+
+The current packaged build is [Duroos Watcher v0.1.0-alpha.2](https://github.com/ilm-seeker/duroos-watcher/releases/tag/v0.1.0-alpha.2). These are unsigned alpha/testing packages, not production-signed releases. Verify the matching SHA-256 checksum before opening the app.
+
+| Platform | Download | Checksum |
+| --- | --- | --- |
+| macOS | [Unsigned `.app.zip`](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.2/Duroos-Watcher-v0.1.0-alpha.2-macos-unsigned.app.zip) | [SHA256SUMS macOS](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.2/SHA256SUMS-v0.1.0-alpha.2-macos.txt) |
+| Windows | [Unsigned setup `.exe`](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.2/Duroos-Watcher-v0.1.0-alpha.2-windows-unsigned-Duroos.Watcher_0.1.0_x64-setup.exe) or [unsigned `.msi`](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.2/Duroos-Watcher-v0.1.0-alpha.2-windows-unsigned-Duroos.Watcher_0.1.0_x64_en-US.msi) | [SHA256SUMS Windows](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.2/SHA256SUMS-v0.1.0-alpha.2-windows.txt) |
+| Linux | [Unsigned `.AppImage`](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.2/Duroos-Watcher-v0.1.0-alpha.2-linux-unsigned-Duroos.Watcher_0.1.0_amd64.AppImage) or [unsigned `.deb`](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.2/Duroos-Watcher-v0.1.0-alpha.2-linux-unsigned-Duroos.Watcher_0.1.0_amd64.deb) | [SHA256SUMS Linux](https://github.com/ilm-seeker/duroos-watcher/releases/download/v0.1.0-alpha.2/SHA256SUMS-v0.1.0-alpha.2-linux.txt) |
+
+Operating systems may warn because these alpha artifacts are not Apple-notarized and the Windows installers are not code-signed. Only install them if you trust this repository and are comfortable testing unsigned software. See [unsigned alpha install notes](./docs/release/unsigned-alpha-install-notes.md) for safer review steps.
+
+To build or customize instead of installing a packaged alpha, use the development commands below and read [Harness Customization](./docs/harness-customization.md).
 
 ## Project Direction
 
-Duroos Watcher is moving toward a local study-library and trusted-source layer:
+Duroos Watcher is moving toward a local study-library, trusted-source layer, and forkable media harness:
 
 - **Local learner library first:** imported and downloaded media lives in an app-managed local library backed by SQLite.
 - **Source provenance by default:** lessons keep source URLs, adapter names, hashes when available, permission notes, and import/download history.
 - **Review-first downloads:** feeds and manifests can discover lessons, but media downloads stay explicit and visible.
 - **Signed curator channels:** Duroos manifests can carry curator identity, source references, retrieval references, media hashes, and Ed25519 signatures.
 - **Teacher-owned publishing:** teachers can publish signed channel updates through user-configured Nostr relays and Blossom media servers without Duroos running a central catalog.
+- **Customizable source harness:** forks can redesign the UI, adjust CSS tokens, add source adapters, change app identity, and package their own local media workflows from the same Tauri + React foundation.
 - **Study flow, not social feed:** Smart Library grouping, search, resume progress, lightweight notes, and source-aware cleanup are more important than likes, comments, trending pages, or public profiles.
 - **Privacy-preserving defaults:** no telemetry, no accounts, no remote server, offline mode blocks remote source refreshes, and local cookies or credentials are never exported in collection manifests.
 
-That makes the project closest to a cross between a personal study archive, a source-aware media library, and a signed feed reader. The core bet is that serious learners and teachers need reliable private access to lessons more than they need another social video platform.
+That makes the project closest to a cross between a personal study archive, a source-aware media library, a signed feed reader, and a local desktop harness for scholarly media workflows. The core bet is that serious learners and teachers need reliable private access to lessons more than they need another social video platform.
 
 ## Does This Already Exist?
 

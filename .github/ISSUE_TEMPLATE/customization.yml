@@ -1,0 +1,43 @@
+name: Customization or redesign proposal
+description: Propose a source-level customization, UI redesign, theme, fork, or packaging improvement.
+title: "Customization: "
+labels: ["customization"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Duroos Watcher supports source-level customization today. There is no stable external plugin SDK yet.
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What customization are you trying to make possible?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Visual theme or CSS tokens
+        - UI layout or workflow
+        - App identity or branding
+        - Packaging or release workflow
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: approach
+    attributes:
+      label: Proposed approach
+      description: Mention the files or surfaces you expect to change.
+  - type: checkboxes
+    id: guardrails
+    attributes:
+      label: Guardrails
+      options:
+        - label: This proposal keeps local-first defaults unless the fork explicitly takes responsibility for changing them.
+          required: true
+        - label: This proposal does not add telemetry, accounts, central hosting, automatic sharing, or credential export.
+          required: true
