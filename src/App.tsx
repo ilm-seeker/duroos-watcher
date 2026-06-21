@@ -166,6 +166,10 @@ type ChannelNotificationPreference = {
   lastNotifiedAt?: string;
 };
 type ChannelNotificationPreferences = Record<string, ChannelNotificationPreference>;
+type NavBadge = {
+  label: string;
+  title: string;
+};
 
 const sidebarCollapsedStorageKey = "duroos.sidebarCollapsed";
 const channelNotificationStorageKey = "duroos.channelNotifications";
@@ -336,6 +340,20 @@ const storageCleanupModeMatches = (
     case "all-stale":
       return true;
   }
+};
+
+const storageAuditNoticeKey = (audit: MediaStorageAudit): string =>
+  `storage-audit:${audit.staleFiles}:${audit.staleBytes}:${audit.partialFiles}`;
+
+const sourceControlHygieneBadge = (audit: MediaStorageAudit | null): NavBadge | undefined => {
+  if (!audit || audit.staleFiles <= 0) {
+    return undefined;
+  }
+
+  return {
+    label: String(audit.staleFiles),
+    title: `${audit.staleFiles} stale managed-library file(s), ${formatBytes(audit.staleBytes)} reclaimable`,
+  };
 };
 
 const capabilityLabel = (level: CapabilityLevel): string => {
@@ -545,7 +563,11 @@ const App = () => {
   const [isImportOpen, setIsImportOpen] = useState(false);
   const [initialImportMode, setInitialImportMode] = useState<ImportMode>("local");
   const [initialImportSourceUrl, setInitialImportSourceUrl] = useState("");
-  const [systemNotice, setSystemNotice] = useState("");
+  const [systemNotice, setSystemNoticeMessage] = useState("");
+  const [systemNoticeKey, setSystemNoticeKey] = useState("");
+  const [dismissedSystemNoticeKeys, setDismissedSystemNoticeKeys] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [busySourceAction, setBusySourceAction] = useState<BusySourceAction>(null);
   const [busyNativeMediaId, setBusyNativeMediaId] = useState<string | null>(null);
   const [selectedMediaUrl, setSelectedMediaUrl] = useState("");
@@ -567,6 +589,32 @@ const App = () => {
   const [mediaStorageAudit, setMediaStorageAudit] = useState<MediaStorageAudit | null>(null);
   const [mediaStorageBusyAction, setMediaStorageBusyAction] =
     useState<MediaStorageBusyAction>(null);
+
+  const setSystemNotice = (notice: string, noticeKey = "") => {
+    if (!notice) {
+      setSystemNoticeMessage("");
+      setSystemNoticeKey("");
+      return;
+    }
+
+    if (noticeKey && dismissedSystemNoticeKeys.has(noticeKey)) {
+      return;
+    }
+
+    setSystemNoticeMessage(notice);
+    setSystemNoticeKey(noticeKey);
+  };
+
+  const dismissSystemNotice = () => {
+    if (systemNoticeKey) {
+      setDismissedSystemNoticeKeys((current) => new Set(current).add(systemNoticeKey));
+    }
+
+    setSystemNoticeMessage("");
+    setSystemNoticeKey("");
+  };
+
+  const sourceHygieneBadge = sourceControlHygieneBadge(mediaStorageAudit);
 
   useEffect(() => {
     window.localStorage.setItem(sidebarCollapsedStorageKey, String(isSidebarCollapsed));
@@ -1082,7 +1130,7 @@ const App = () => {
       setMediaStorageBusyAction("audit");
       const result = await auditMediaStorage();
       setMediaStorageAudit(result);
-      setSystemNotice(result.messages.join(" "));
+      setSystemNotice(result.messages.join(" "), storageAuditNoticeKey(result));
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       setSystemNotice(message);
@@ -1365,6 +1413,7 @@ const App = () => {
         setViewMode={setViewMode}
         isCollapsed={isSidebarCollapsed}
         onToggleCollapsed={() => setIsSidebarCollapsed((current) => !current)}
+        sourceHygieneBadge={sourceHygieneBadge}
       />
       <main className="workspace">
         <TopBar
@@ -1381,7 +1430,7 @@ const App = () => {
           <div className="notice-bar" role="status">
             <AlertTriangle size={16} />
             <span>{systemNotice}</span>
-            <button type="button" onClick={() => setSystemNotice("")}>
+            <button type="button" onClick={dismissSystemNotice}>
               Dismiss
             </button>
           </div>
@@ -1533,6 +1582,7 @@ interface SidebarProps {
   setViewMode: (mode: ViewMode) => void;
   isCollapsed: boolean;
   onToggleCollapsed: () => void;
+  sourceHygieneBadge?: NavBadge;
 }
 
 const Sidebar = ({
@@ -1540,12 +1590,18 @@ const Sidebar = ({
   setViewMode,
   isCollapsed,
   onToggleCollapsed,
+  sourceHygieneBadge,
 }: SidebarProps) => {
-  const navItems: { mode: ViewMode; label: string; icon: typeof Library }[] = [
+  const navItems: {
+    mode: ViewMode;
+    label: string;
+    icon: typeof Library;
+    badge?: NavBadge;
+  }[] = [
     { mode: "library", label: "Library", icon: Library },
     { mode: "relays", label: "Channels", icon: Rss },
     { mode: "publish", label: "Publish", icon: UploadCloud },
-    { mode: "sources", label: "Sources", icon: Database },
+    { mode: "sources", label: "Sources", icon: Database, badge: sourceHygieneBadge },
     { mode: "queue", label: "Update Queue", icon: History },
   ];
 
@@ -1580,18 +1636,23 @@ const Sidebar = ({
       </div>
 
       <nav className="nav-stack">
-        {navItems.map(({ mode, label, icon: Icon }) => (
+        {navItems.map(({ mode, label, icon: Icon, badge }) => (
           <button
             key={mode}
             type="button"
             className={viewMode === mode ? "nav-item nav-item-active" : "nav-item"}
             onClick={() => setViewMode(mode)}
-            aria-label={label}
+            aria-label={badge ? `${label}. ${badge.title}` : label}
             aria-current={viewMode === mode ? "page" : undefined}
-            title={label}
+            title={badge ? `${label}: ${badge.title}` : label}
           >
             <Icon size={18} aria-hidden="true" />
             <span>{label}</span>
+            {badge ? (
+              <strong className="nav-badge" aria-label={badge.title}>
+                {badge.label}
+              </strong>
+            ) : null}
           </button>
         ))}
       </nav>
@@ -2135,6 +2196,7 @@ const Dashboard = ({
       />
       <TeacherPanel
         groups={teacherGroups}
+        channels={channelSubscriptions}
         selectedTeacherId={selectedTeacherId}
         onSelectTeacher={onSelectTeacher}
       />
@@ -3666,10 +3728,12 @@ const LibraryOrganizationPanel = ({
 
 const TeacherPanel = ({
   groups,
+  channels,
   selectedTeacherId,
   onSelectTeacher,
 }: {
   groups: LibraryGroup[];
+  channels: ChannelSubscriptionView[];
   selectedTeacherId: string;
   onSelectTeacher: (teacherId: string) => void;
 }) => {
@@ -3678,6 +3742,13 @@ const TeacherPanel = ({
     counts[key] = (counts[key] ?? 0) + 1;
     return counts;
   }, {});
+  const channelsByTeacherId = channels.reduce<Record<string, ChannelSubscriptionView[]>>(
+    (grouped, channel) => {
+      grouped[channel.teacherId] = [...(grouped[channel.teacherId] ?? []), channel];
+      return grouped;
+    },
+    {},
+  );
 
   return (
     <section className="side-panel">
@@ -3686,8 +3757,11 @@ const TeacherPanel = ({
         {groups.length ? (
           groups.map((group) => {
             const isDuplicate = labelCounts[group.label.trim().toLowerCase()] > 1;
+            const teacherChannels = channelsByTeacherId[group.id] ?? [];
+            const duplicateSuffix =
+              teacherChannels.length === 1 ? teacherChannels[0].title : group.id.slice(-6);
             const displayLabel = isDuplicate
-              ? `${group.label} · ${group.id.slice(-6)}`
+              ? `${group.label} · ${duplicateSuffix}`
               : group.label;
 
             return (

@@ -228,6 +228,22 @@ button:focus-visible {
   flex: 0 0 auto;
 }
 
+.nav-badge {
+  display: inline-flex;
+  min-width: 20px;
+  height: 20px;
+  margin-left: auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--amber-soft);
+  color: #7a4b00;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 850;
+  line-height: 1;
+}
+
 .nav-item:hover {
   background: var(--surface-muted);
   color: var(--ink);
@@ -274,6 +290,16 @@ button:focus-visible {
   width: 40px;
   height: 40px;
   padding: 0;
+}
+
+.sidebar-collapsed .nav-badge {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  font-size: 9px;
 }
 
 .sidebar-collapsed .nav-item-active::before {
