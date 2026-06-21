@@ -23,6 +23,11 @@ const publishResult = (): ChannelPublishResult => ({
     `Open in Duroos Watcher: nostr:${naddr}`,
     "Manifest: sha256:83829c50baca669812884d16505873dd9d7318c8ab88e9630c9bfcd1d970570b",
     "Check code: DW-8382-9C50-BACA",
+    "Curator public-key fingerprint: DWK-1111-2222-3333",
+    "Relays: wss://relay.example",
+    "Manifest URLs: https://blossom.example/83829c50baca669812884d16505873dd9d7318c8ab88e9630c9bfcd1d970570b.json",
+    "Blossom servers: https://blossom.example",
+    "Archive mirrors: https://archive.example/manifest.json",
     "Preview before trusting this teacher key.",
   ].join("\n"),
   verificationCode: "DW-8382-9C50-BACA",
@@ -30,6 +35,13 @@ const publishResult = (): ChannelPublishResult => ({
   manifestSha256: "sha256:83829c50baca669812884d16505873dd9d7318c8ab88e9630c9bfcd1d970570b",
   manifestUrl:
     "https://blossom.example/83829c50baca669812884d16505873dd9d7318c8ab88e9630c9bfcd1d970570b.json",
+  manifestUrls: [
+    "https://blossom.example/83829c50baca669812884d16505873dd9d7318c8ab88e9630c9bfcd1d970570b.json",
+  ],
+  relays: ["wss://relay.example"],
+  blossomServers: ["https://blossom.example"],
+  archiveMirrors: ["https://archive.example/manifest.json"],
+  curatorPublicKeyFingerprint: "DWK-1111-2222-3333",
   nostrEventId: "event-test",
   blossomResults: [],
   archiveResults: [],
@@ -96,6 +108,20 @@ describe("channel invite helpers", () => {
     expect(invite.canonicalChannelLink).toBe(`nostr:${naddr}`);
     expect(invite.verificationCode).toBe("DW-8382-9C50-BACA");
     expect(invite.inviteText).toContain("Channel: Foundations");
+    expect(invite.inviteText).toContain("Manifest URLs: https://blossom.example");
+    expect(invite.manifestUrls).toHaveLength(1);
+    expect(invite.relays).toEqual(["wss://relay.example"]);
+  });
+
+  it("builds rescue-capable invite text when backend text is unavailable", () => {
+    const invite = buildChannelInvite({ ...publishResult(), inviteText: "" });
+
+    expect(invite.inviteText).toContain("Channel: Foundations");
+    expect(invite.inviteText).toContain("Curator public-key fingerprint: DWK-1111-2222-3333");
+    expect(invite.inviteText).toContain("Relays: wss://relay.example");
+    expect(invite.inviteText).toContain("Manifest URLs: https://blossom.example");
+    expect(invite.inviteText).toContain("Blossom servers: https://blossom.example");
+    expect(invite.inviteText).toContain("Archive mirrors: https://archive.example/manifest.json");
   });
 
   it("builds copyable invites from persisted publisher channels", () => {
@@ -105,6 +131,7 @@ describe("channel invite helpers", () => {
     expect(invite?.canonicalChannelLink).toBe(`nostr:${naddr}`);
     expect(invite?.verificationCode).toBe("DW-8382-9C50-BACA");
     expect(invite?.inviteText).toContain("Channel: Foundations");
+    expect(invite?.inviteText).toContain("Manifest URLs: https://blossom.example");
     expect(invite?.inviteText).toContain("Preview before trusting this teacher key.");
   });
 

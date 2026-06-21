@@ -1,7 +1,11 @@
 import type { PublisherEndpointTestReport } from "./types";
 
 export type EndpointTestStatus = {
-  label: "All endpoints passed" | "Partial endpoint pass" | "Endpoint issues";
+  label:
+    | "All endpoints passed"
+    | "Durability warning"
+    | "Partial endpoint pass"
+    | "Endpoint issues";
   tone: "positive" | "warning";
 };
 
@@ -16,9 +20,30 @@ export const endpointTestStatus = (
     return { label: "Partial endpoint pass", tone: "warning" };
   }
 
+  if (report.passed && endpointDurabilityWarning(report)) {
+    return { label: "Durability warning", tone: "warning" };
+  }
+
   if (report.passed) {
     return { label: "All endpoints passed", tone: "positive" };
   }
 
   return { label: "Endpoint issues", tone: "warning" };
+};
+
+export const endpointDurabilityWarning = (
+  report: PublisherEndpointTestReport,
+): string | null => {
+  if (!report.passed) {
+    return null;
+  }
+
+  const uploadedCount = report.blossomResults.filter((result) => result.uploaded).length;
+  const acceptedCount = report.relayResults.filter((result) => result.accepted).length;
+
+  if (uploadedCount >= 2 && acceptedCount >= 2) {
+    return null;
+  }
+
+  return `Durability warning: ${uploadedCount} Blossom server(s) and ${acceptedCount} relay(s) passed. One accepted relay is enough to publish, but use at least two of each before relying on durable distribution.`;
 };

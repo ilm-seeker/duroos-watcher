@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { PublisherEndpointTestReport } from "./types";
-import { endpointTestHasFailures, endpointTestStatus } from "./publisherEndpointReport";
+import {
+  endpointDurabilityWarning,
+  endpointTestHasFailures,
+  endpointTestStatus,
+} from "./publisherEndpointReport";
 
 const report = (
   passed: boolean,
@@ -45,6 +49,18 @@ describe("publisher endpoint report status", () => {
     expect(endpointTestHasFailures(partialPass)).toBe(true);
     expect(endpointTestStatus(partialPass)).toEqual({
       label: "Partial endpoint pass",
+      tone: "warning",
+    });
+    expect(endpointDurabilityWarning(partialPass)).toContain("1 Blossom server(s)");
+  });
+
+  it("warns when only one relay and Blossom server pass", () => {
+    const thinPass = report(true, [true], [true]);
+
+    expect(endpointTestHasFailures(thinPass)).toBe(false);
+    expect(endpointDurabilityWarning(thinPass)).toContain("1 Blossom server(s)");
+    expect(endpointTestStatus(thinPass)).toEqual({
+      label: "Durability warning",
       tone: "warning",
     });
   });

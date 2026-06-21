@@ -106,6 +106,7 @@ import {
 } from "./domain/jobQueue";
 import { recordOnboardingLane } from "./domain/onboardingState";
 import {
+  endpointDurabilityWarning,
   endpointTestHasFailures,
   endpointTestStatus,
 } from "./domain/publisherEndpointReport";
@@ -4365,6 +4366,10 @@ const TeacherPublisherPanel = ({
     : false;
   const endpointHealthPassed =
     Boolean(endpointTestReport?.passed) && testedEndpointSignature === endpointSignature;
+  const endpointHealthDurabilityWarning =
+    endpointHealthPassed && endpointTestReport
+      ? endpointDurabilityWarning(endpointTestReport)
+      : null;
   const archiveMirrors: ArchiveMirrorConfig[] = [
     ...endpointLines(archiveText).map((url) => ({
       service: "https",
@@ -4412,11 +4417,13 @@ const TeacherPublisherPanel = ({
     },
     {
       label: endpointHealthPassed
-        ? endpointHealthHasFailures
+        ? endpointHealthDurabilityWarning
+          ? "Network durability warning"
+          : endpointHealthHasFailures
           ? "Network partial pass"
           : "Network tested"
         : "Health check needed",
-      tone: endpointHealthPassed ? "positive" : "warning",
+      tone: endpointHealthPassed && !endpointHealthDurabilityWarning ? "positive" : "warning",
     },
     {
       label: selectedChannel
@@ -4492,7 +4499,9 @@ const TeacherPublisherPanel = ({
     {
       title: "Storage",
       detail: endpointHealthPassed
-        ? endpointHealthHasFailures
+        ? endpointHealthDurabilityWarning
+          ? endpointHealthDurabilityWarning
+          : endpointHealthHasFailures
           ? "Quorum passed; fix or remove endpoints that failed."
           : "Every configured relay and Blossom server accepted the probe."
         : "Test one working Nostr relay and one Blossom server.",
@@ -4828,7 +4837,7 @@ const TeacherPublisherPanel = ({
     }
 
     setIsWorking(true);
-    setPanelNotice("");
+    setPanelNotice(endpointHealthDurabilityWarning ?? "");
     setPublishResult(null);
 
     try {
@@ -6502,7 +6511,7 @@ const ImportDrawer = ({
 
   const runSourceIngest = async () => {
     const trimmedUrl = sourceUrl.trim();
-    const sourceInput = canonicalChannelRef ?? trimmedUrl;
+    const sourceInput = trimmedUrl;
 
     if (!trimmedUrl) {
       setValidationMessage("Add a public feed, playlist, Telegram channel, or source URL first.");
@@ -6560,7 +6569,7 @@ const ImportDrawer = ({
     setPreviewedChannelRef("");
 
     try {
-      const preview = await previewNostrChannel(channelRef);
+      const preview = await previewNostrChannel(trimmedUrl);
       setChannelPreview(preview);
       setPreviewedChannelRef(channelRef);
       setValidationMessage(
@@ -6588,7 +6597,7 @@ const ImportDrawer = ({
         return;
       }
 
-      setSourceUrl(channelRef);
+      setSourceUrl(clipboardText.trim());
       setValidationMessage("Channel invite pasted. Preview before following.");
     } catch {
       setValidationMessage("Could not read the clipboard. Paste the invite text manually.");
@@ -6831,7 +6840,7 @@ const ImportDrawer = ({
               {mode === "feed" ? <ShieldCheck size={17} /> : <Rss size={17} />}
               <span>
                 {mode === "feed"
-                  ? "Preview signed teacher feeds before importing. Trust a curator key only after confirming the identity outside the manifest."
+                  ? "Preview signed teacher feeds before importing. Duroos invites can use relay hints or a SHA-256 verified rescue manifest fallback."
                   : "Public feeds and public Telegram previews can become reviewable library rows. X/Rumble may need app-local yt-dlp cookies or manual import."}
               </span>
             </div>
@@ -6881,7 +6890,7 @@ const ImportDrawer = ({
                   disabled={isWorking || !isOnlineMode}
                   title={
                     isOnlineMode
-                      ? "Resolve network hints and validate the channel manifest."
+                      ? "Resolve relay hints or verified rescue fallback URLs, then validate the channel manifest."
                       : "Switch to online fetch mode before previewing a channel."
                   }
                 >

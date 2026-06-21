@@ -1168,15 +1168,22 @@ pub fn ingest_source_url(app: &AppHandle, source_url: String) -> Result<IngestSu
                     &resolved.manifest_url,
                 )?;
                 summary.source_url = normalized_input;
-                summary.messages.insert(
-                    0,
+                let resolution_message = if resolved.used_rescue_fallback {
+                    format!(
+                        "Resolved Nostr rescue invite {} to signed manifest {} across {} verified fallback URL(s).",
+                        resolved.naddr,
+                        resolved.manifest_sha256,
+                        resolved.manifest_urls.len()
+                    )
+                } else {
                     format!(
                         "Resolved Nostr channel {} to signed manifest {} across {} advertised manifest mirror(s).",
                         resolved.naddr,
                         resolved.manifest_sha256,
                         resolved.manifest_urls.len()
-                    ),
-                );
+                    )
+                };
+                summary.messages.insert(0, resolution_message);
                 return Ok(summary);
             }
             Err(error) => {
@@ -4249,9 +4256,12 @@ fn is_probably_telegram_invite(source_url: &str) -> bool {
 }
 
 fn is_nostr_reference(source_url: &str) -> bool {
+    let lower = source_url.to_ascii_lowercase();
     source_url.starts_with("naddr1")
         || source_url.starts_with("nostr:")
         || source_url.starts_with("nostr+")
+        || ((source_url.contains('\n') || lower.contains("duroos channel invite"))
+            && publisher::channel_ref_has_naddr(source_url))
 }
 
 fn platform_for_feed(source_url: &str) -> String {
@@ -8204,6 +8214,13 @@ mod tests {
         assert_eq!(
             normalize_source_input("nostr:naddr1example").unwrap(),
             "nostr:naddr1example"
+        );
+        assert_eq!(
+            normalize_source_input(
+                "Duroos channel invite\nOpen in Duroos Watcher: nostr:naddr1example"
+            )
+            .unwrap(),
+            "Duroos channel invite\nOpen in Duroos Watcher: nostr:naddr1example"
         );
     }
 

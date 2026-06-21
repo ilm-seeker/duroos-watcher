@@ -71,6 +71,8 @@ pub struct ResolvedNostrChannel {
     pub manifest_urls: Vec<String>,
     pub archive_mirrors: Vec<String>,
     pub manifest_sha256: String,
+    pub used_rescue_fallback: bool,
+    pub relay_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +82,21 @@ struct ParsedNaddr {
     author: String,
     kind: u64,
     relays: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RescueInviteBundle {
+    manifest_sha256: Option<String>,
+    manifest_urls: Vec<String>,
+    archive_mirrors: Vec<String>,
+    relays: Vec<String>,
+    blossom_servers: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ChannelResolutionInput {
+    parsed: ParsedNaddr,
+    fallback: RescueInviteBundle,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -407,6 +424,7 @@ pub fn publish_teacher_channel(
     let manifest_url = manifest_upload.first_url.ok_or_else(|| {
         "Manifest upload failed on all Blossom servers; Nostr event was not published.".to_string()
     })?;
+    let manifest_blossom_count = manifest_upload.urls.len();
     let mut manifest_urls = manifest_upload.urls;
     let archive_results = publish_archive_mirrors(
         &client,
@@ -430,6 +448,10 @@ pub fn publish_teacher_channel(
             })
         })
         .collect::<Vec<_>>();
+    let archive_mirror_urls = archive_refs
+        .iter()
+        .map(|archive_ref| archive_ref.url.clone())
+        .collect::<Vec<_>>();
     for archive_ref in &archive_refs {
         if !manifest_urls
             .iter()
@@ -446,12 +468,26 @@ pub fn publish_teacher_channel(
     let formatted_manifest_sha256 = format!("sha256:{manifest_sha256}");
     let canonical_channel_link = canonical_channel_link(&naddr);
     let verification_code = manifest_verification_code(&manifest_sha256);
+    let relay_urls = relays
+        .iter()
+        .map(|relay| relay.url.clone())
+        .collect::<Vec<_>>();
+    let blossom_server_urls = blossom_servers
+        .iter()
+        .map(|server| server.url.clone())
+        .collect::<Vec<_>>();
+    let curator_public_key_fingerprint = public_key_fingerprint(&profile.curator_public_key);
     let invite_text = channel_invite_text(
         &channel_title,
         &profile.display_name,
         &canonical_channel_link,
         &formatted_manifest_sha256,
         &verification_code,
+        &curator_public_key_fingerprint,
+        &relay_urls,
+        &manifest_urls,
+        &blossom_server_urls,
+        &archive_mirror_urls,
     );
     let event_content = json!({
         "app": APP_TAG,
@@ -488,7 +524,11 @@ pub fn publish_teacher_channel(
         event_content,
     )?;
     let relay_results = publish_event_to_relays(&event, &relays);
-    if !relay_results.iter().any(|result| result.accepted) {
+    let accepted_relay_count = relay_results
+        .iter()
+        .filter(|result| result.accepted)
+        .count();
+    if accepted_relay_count == 0 {
         return Err(
             "Nostr event was rejected or unreachable on every configured relay.".to_string(),
         );
@@ -527,6 +567,25 @@ pub fn publish_teacher_channel(
         )
         .map_err(|error| error.to_string())?;
 
+    let mut messages = vec![
+        format!(
+            "Published {media_count} media item(s) and {post_count} text post(s) in this channel."
+        ),
+        format!(
+            "Channel feed now advertises {total} signed item(s).",
+            total = media_count + post_count
+        ),
+        format!(
+            "Advertised {archive_ref_count} archive manifest mirror(s) after SHA-256 verification; {archive_failure_count} archive mirror(s) were skipped."
+        ),
+        "Existing subscribers keep the same channel link; no central Duroos catalog was created."
+            .to_string(),
+    ];
+    if let Some(warning) = endpoint_durability_warning(manifest_blossom_count, accepted_relay_count)
+    {
+        messages.push(warning);
+    }
+
     Ok(ChannelPublishResult {
         channel_id: channel_id.clone(),
         channel_title,
@@ -537,6 +596,11 @@ pub fn publish_teacher_channel(
         manifest_json,
         manifest_sha256: formatted_manifest_sha256,
         manifest_url,
+        manifest_urls,
+        relays: relay_urls,
+        blossom_servers: blossom_server_urls,
+        archive_mirrors: archive_mirror_urls,
+        curator_public_key_fingerprint,
         nostr_event_id: event.id,
         blossom_results,
         archive_results,
@@ -544,20 +608,7 @@ pub fn publish_teacher_channel(
         media_count,
         post_count,
         total_item_count: media_count + post_count,
-        messages: vec![
-            format!(
-                "Published {media_count} media item(s) and {post_count} text post(s) in this channel."
-            ),
-            format!(
-                "Channel feed now advertises {total} signed item(s).",
-                total = media_count + post_count
-            ),
-            format!(
-                "Advertised {archive_ref_count} archive manifest mirror(s) after SHA-256 verification; {archive_failure_count} archive mirror(s) were skipped."
-            ),
-            "Existing subscribers keep the same channel link; no central Duroos catalog was created."
-                .to_string(),
-        ],
+        messages,
     })
 }
 
@@ -744,7 +795,12 @@ fn endpoint_test_messages(
             "Publishing can continue through endpoints that accepted the probe, but failed endpoints should be fixed or removed before relying on them."
                 .to_string(),
         );
-    } else if !passed {
+    }
+    if passed {
+        if let Some(warning) = endpoint_durability_warning(uploaded_count, accepted_count) {
+            messages.push(warning);
+        }
+    } else {
         messages.push(
             "A real publish still needs at least one working Blossom server and one accepting Nostr relay."
                 .to_string(),
@@ -755,6 +811,16 @@ fn endpoint_test_messages(
         "The probe is intentionally small and public on any endpoint that accepted it.".to_string(),
     );
     messages
+}
+
+fn endpoint_durability_warning(uploaded_count: usize, accepted_count: usize) -> Option<String> {
+    if uploaded_count >= 2 && accepted_count >= 2 {
+        return None;
+    }
+
+    Some(format!(
+        "Durability warning: {uploaded_count} Blossom server(s) and {accepted_count} relay(s) passed. One accepted relay is enough to publish, but use at least two of each before relying on durable distribution."
+    ))
 }
 
 pub fn ingest_nostr_channel(app: &AppHandle, channel_ref: String) -> Result<IngestSummary, String> {
@@ -810,16 +876,16 @@ pub fn preview_nostr_channel(
 pub fn resolve_nostr_channel_manifest_url(
     channel_ref: &str,
 ) -> Result<ResolvedNostrChannel, String> {
-    let parsed = decode_naddr(channel_ref)?;
+    let resolution_input = parse_channel_resolution_input(channel_ref)?;
+    let parsed = resolution_input.parsed;
+    let fallback = resolution_input.fallback;
     if parsed.kind != DUROOS_CHANNEL_KIND {
         return Err("Nostr address is not a Duroos channel event.".to_string());
     }
-    if parsed.relays.is_empty() {
-        return Err("Nostr channel link does not include relay hints.".to_string());
-    }
+    let relay_urls = merged_channel_relays(&parsed.relays, &fallback.relays);
 
     let mut last_error = String::new();
-    for relay in &parsed.relays {
+    for relay in &relay_urls {
         match fetch_channel_event(relay, &parsed) {
             Ok(event) => {
                 let content: ChannelEventContent =
@@ -851,6 +917,8 @@ pub fn resolve_nostr_channel_manifest_url(
                     manifest_urls,
                     archive_mirrors,
                     manifest_sha256: content.manifest_sha256,
+                    used_rescue_fallback: false,
+                    relay_error: None,
                 });
             }
             Err(error) => {
@@ -859,7 +927,14 @@ pub fn resolve_nostr_channel_manifest_url(
         }
     }
 
-    Err(if last_error.is_empty() {
+    if let Some(resolved) = resolve_rescue_invite_fallback(&parsed, &fallback, &last_error)? {
+        return Ok(resolved);
+    }
+
+    Err(if relay_urls.is_empty() {
+        "Nostr channel link does not include relay hints and the invite did not include a verified manifest fallback."
+            .to_string()
+    } else if last_error.is_empty() {
         "No relays were available for this channel.".to_string()
     } else {
         last_error
@@ -920,6 +995,25 @@ fn channel_preview_from_manifest(
     let advertised_manifest_count = resolved.manifest_urls.len();
     let archive_mirrors = resolved.archive_mirrors;
     let archive_mirror_count = archive_mirrors.len();
+    let mut messages = if resolved.used_rescue_fallback {
+        vec![format!(
+            "Preview used the rescue invite fallback after SHA-256 verifying {} advertised manifest URL(s) and {} archive fallback(s).",
+            advertised_manifest_count, archive_mirror_count
+        )]
+    } else {
+        vec![format!(
+            "Preview verified the Nostr event pointer, signed manifest hash, {} advertised manifest mirror(s), and {} archive fallback(s).",
+            advertised_manifest_count, archive_mirror_count
+        )]
+    };
+    if resolved.used_rescue_fallback {
+        if let Some(error) = resolved.relay_error.as_ref() {
+            messages.push(format!("Relay resolution failed before fallback: {error}"));
+        }
+    }
+    messages.push(
+        "Import remains local-first; media files are only downloaded when requested.".to_string(),
+    );
 
     NostrChannelPreview {
         naddr: resolved.naddr,
@@ -964,16 +1058,89 @@ fn channel_preview_from_manifest(
         blossom_servers,
         archive_mirrors,
         warnings: report.warnings.clone(),
-        messages: vec![
-            format!(
-                "Preview verified the Nostr event pointer, signed manifest hash, {} advertised manifest mirror(s), and {} archive fallback(s).",
-                advertised_manifest_count,
-                archive_mirror_count
-            ),
-            "Import remains local-first; media files are only downloaded when requested."
-                .to_string(),
-        ],
+        messages,
     }
+}
+
+fn merged_channel_relays(naddr_relays: &[String], invite_relays: &[String]) -> Vec<String> {
+    let mut output = Vec::new();
+    for relay in naddr_relays.iter().chain(invite_relays.iter()) {
+        let relay = relay.trim().trim_end_matches('/').to_string();
+        if relay.is_empty()
+            || !is_safe_nostr_relay_url(&relay)
+            || output.iter().any(|existing| existing == &relay)
+        {
+            continue;
+        }
+        output.push(relay);
+    }
+    output
+}
+
+fn resolve_rescue_invite_fallback(
+    parsed: &ParsedNaddr,
+    fallback: &RescueInviteBundle,
+    relay_error: &str,
+) -> Result<Option<ResolvedNostrChannel>, String> {
+    let Some(manifest_sha256) = fallback.manifest_sha256.as_ref() else {
+        return Ok(None);
+    };
+    if !looks_like_sha256(manifest_sha256) {
+        return Err("Rescue invite manifest hash is not a sha256 hash.".to_string());
+    }
+
+    let manifest_urls = rescue_manifest_urls(fallback);
+    if manifest_urls.is_empty() {
+        return Ok(None);
+    }
+
+    match select_verified_manifest_url(&manifest_urls, manifest_sha256) {
+        Ok(manifest_url) => Ok(Some(ResolvedNostrChannel {
+            naddr: parsed.raw.clone(),
+            manifest_url,
+            manifest_urls,
+            archive_mirrors: fallback.archive_mirrors.clone(),
+            manifest_sha256: manifest_sha256.clone(),
+            used_rescue_fallback: true,
+            relay_error: if relay_error.is_empty() {
+                None
+            } else {
+                Some(relay_error.to_string())
+            },
+        })),
+        Err(error) => {
+            if relay_error.is_empty() {
+                Err(error)
+            } else {
+                Err(format!(
+                    "{relay_error}. Rescue invite fallback also failed: {error}"
+                ))
+            }
+        }
+    }
+}
+
+fn rescue_manifest_urls(fallback: &RescueInviteBundle) -> Vec<String> {
+    let mut output = Vec::new();
+    for url in fallback
+        .manifest_urls
+        .iter()
+        .chain(fallback.archive_mirrors.iter())
+    {
+        if !url.is_empty() && !output.iter().any(|existing| existing == url) {
+            output.push(url.clone());
+        }
+    }
+    if let Some(hash) = fallback.manifest_sha256.as_ref() {
+        let hash = hash.strip_prefix("sha256:").unwrap_or(hash.as_str());
+        for server in &fallback.blossom_servers {
+            let url = format!("{}/{}.json", server.trim_end_matches('/'), hash);
+            if is_safe_http_url(&url) && !output.iter().any(|existing| existing == &url) {
+                output.push(url);
+            }
+        }
+    }
+    output
 }
 
 fn manifest_urls_from_event_content(content: &ChannelEventContent) -> Result<Vec<String>, String> {
@@ -2293,6 +2460,154 @@ fn decode_naddr(input: &str) -> Result<ParsedNaddr, String> {
     })
 }
 
+pub fn channel_ref_has_naddr(input: &str) -> bool {
+    extract_naddr_token(input).is_some()
+}
+
+fn parse_channel_resolution_input(input: &str) -> Result<ChannelResolutionInput, String> {
+    let raw_naddr = extract_naddr_token(input)
+        .ok_or_else(|| "Nostr channel link must include an naddr.".to_string())?;
+    let parsed = decode_naddr(&raw_naddr)?;
+    let fallback = rescue_invite_bundle(input);
+
+    Ok(ChannelResolutionInput { parsed, fallback })
+}
+
+fn extract_naddr_token(input: &str) -> Option<String> {
+    let lower = input.to_ascii_lowercase();
+    let start = lower.find("naddr1")?;
+    let mut end = start;
+
+    for character in lower[start..].chars() {
+        if character.is_ascii_alphanumeric() {
+            end += character.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    let token = lower[start..end].trim();
+    if token.len() > "naddr1".len() {
+        Some(token.to_string())
+    } else {
+        None
+    }
+}
+
+fn rescue_invite_bundle(input: &str) -> RescueInviteBundle {
+    RescueInviteBundle {
+        manifest_sha256: extract_manifest_sha256(input),
+        manifest_urls: extract_labeled_http_values(
+            input,
+            &["manifest url", "manifest urls", "manifest fallback"],
+        ),
+        archive_mirrors: extract_labeled_http_values(input, &["archive mirror", "archive mirrors"]),
+        relays: extract_labeled_relay_values(input, &["relay", "relays"]),
+        blossom_servers: extract_labeled_http_values(input, &["blossom server", "blossom servers"]),
+    }
+}
+
+fn extract_manifest_sha256(input: &str) -> Option<String> {
+    input
+        .split(|character: char| {
+            character.is_whitespace()
+                || matches!(character, ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}')
+        })
+        .filter_map(|token| {
+            let cleaned = clean_invite_value(token);
+            if looks_like_sha256(&cleaned) {
+                let hash = cleaned
+                    .strip_prefix("sha256:")
+                    .unwrap_or(cleaned.as_str())
+                    .to_ascii_lowercase();
+                Some(format!("sha256:{hash}"))
+            } else {
+                None
+            }
+        })
+        .next()
+}
+
+fn extract_labeled_http_values(input: &str, labels: &[&str]) -> Vec<String> {
+    extract_labeled_values(input, labels, is_safe_http_url)
+}
+
+fn extract_labeled_relay_values(input: &str, labels: &[&str]) -> Vec<String> {
+    extract_labeled_values(input, labels, is_safe_nostr_relay_url)
+}
+
+fn extract_labeled_values(
+    input: &str,
+    labels: &[&str],
+    accepts_value: fn(&str) -> bool,
+) -> Vec<String> {
+    let mut output = Vec::new();
+    let mut active_section = false;
+
+    for line in input.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            active_section = false;
+            continue;
+        }
+
+        if let Some(value_text) = labeled_value_suffix(trimmed, labels) {
+            active_section = true;
+            push_invite_values(&mut output, value_text, accepts_value);
+            continue;
+        }
+
+        if active_section && (trimmed.starts_with("- ") || trimmed.starts_with("* ")) {
+            push_invite_values(&mut output, &trimmed[2..], accepts_value);
+            continue;
+        }
+
+        active_section = false;
+    }
+
+    output
+}
+
+fn labeled_value_suffix<'a>(line: &'a str, labels: &[&str]) -> Option<&'a str> {
+    let lower = line.to_ascii_lowercase();
+    for label in labels {
+        let Some(rest) = lower.strip_prefix(label) else {
+            continue;
+        };
+        if !rest.trim_start().starts_with(':') {
+            continue;
+        }
+        let index = label.len() + rest.find(':').unwrap_or(0) + 1;
+        return Some(line[index..].trim());
+    }
+    None
+}
+
+fn push_invite_values(output: &mut Vec<String>, value_text: &str, accepts_value: fn(&str) -> bool) {
+    for token in value_text.split(|character: char| character == ',' || character.is_whitespace()) {
+        let value = clean_invite_value(token);
+        if value.is_empty()
+            || !accepts_value(&value)
+            || output.iter().any(|existing| existing == &value)
+        {
+            continue;
+        }
+        output.push(value);
+    }
+}
+
+fn clean_invite_value(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches(|character| {
+            matches!(
+                character,
+                '"' | '\'' | '`' | ',' | ';' | ')' | ']' | '}' | '.'
+            )
+        })
+        .to_string()
+}
+
 fn canonical_channel_link(naddr: &str) -> String {
     let raw = naddr.trim().strip_prefix("nostr:").unwrap_or(naddr.trim());
     format!("nostr:{raw}")
@@ -2310,23 +2625,49 @@ fn manifest_verification_code(manifest_sha256: &str) -> String {
     format!("DW-{}-{}-{}", &prefix[0..4], &prefix[4..8], &prefix[8..12])
 }
 
+fn public_key_fingerprint(public_key: &str) -> String {
+    let hash = sha256_hex(public_key.trim().as_bytes());
+    let prefix = hash[..12].to_ascii_uppercase();
+    format!("DWK-{}-{}-{}", &prefix[0..4], &prefix[4..8], &prefix[8..12])
+}
+
 fn channel_invite_text(
     channel_title: &str,
     teacher_display_name: &str,
     canonical_channel_link: &str,
     manifest_sha256: &str,
     verification_code: &str,
+    curator_public_key_fingerprint: &str,
+    relays: &[String],
+    manifest_urls: &[String],
+    blossom_servers: &[String],
+    archive_mirrors: &[String],
 ) -> String {
-    [
+    let mut lines = vec![
         "Duroos channel invite".to_string(),
         format!("Channel: {channel_title}"),
         format!("Teacher: {teacher_display_name}"),
         format!("Open in Duroos Watcher: {canonical_channel_link}"),
         format!("Manifest: {manifest_sha256}"),
         format!("Check code: {verification_code}"),
-        "Preview before trusting this teacher key.".to_string(),
-    ]
-    .join("\n")
+        format!("Curator public-key fingerprint: {curator_public_key_fingerprint}"),
+    ];
+
+    if !relays.is_empty() {
+        lines.push(format!("Relays: {}", relays.join(", ")));
+    }
+    if !manifest_urls.is_empty() {
+        lines.push(format!("Manifest URLs: {}", manifest_urls.join(", ")));
+    }
+    if !blossom_servers.is_empty() {
+        lines.push(format!("Blossom servers: {}", blossom_servers.join(", ")));
+    }
+    if !archive_mirrors.is_empty() {
+        lines.push(format!("Archive mirrors: {}", archive_mirrors.join(", ")));
+    }
+
+    lines.push("Preview before trusting this teacher key.".to_string());
+    lines.join("\n")
 }
 
 fn push_tlv(out: &mut Vec<u8>, tag: u8, value: &[u8]) -> Result<(), String> {
@@ -2788,6 +3129,10 @@ fn is_safe_http_url(value: &str) -> bool {
     value.starts_with("https://") || value.starts_with("http://")
 }
 
+fn is_safe_nostr_relay_url(value: &str) -> bool {
+    value.starts_with("wss://") || value.starts_with("ws://")
+}
+
 fn is_safe_archive_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 140
@@ -2866,6 +3211,11 @@ mod tests {
             &canonical,
             manifest_hash,
             &code,
+            "DWK-1234-5678-ABCD",
+            &["wss://relay.example".to_string()],
+            &["https://blossom.example/manifest.json".to_string()],
+            &["https://blossom.example".to_string()],
+            &["https://archive.example/manifest.json".to_string()],
         );
 
         assert_eq!(canonical, "nostr:naddr1qqqqtest");
@@ -2874,6 +3224,53 @@ mod tests {
         assert!(invite.contains("Teacher: Example Teacher"));
         assert!(invite.contains("Open in Duroos Watcher: nostr:naddr1qqqqtest"));
         assert!(invite.contains("Check code: DW-8382-9C50-BACA"));
+        assert!(invite.contains("Curator public-key fingerprint: DWK-1234-5678-ABCD"));
+        assert!(invite.contains("Relays: wss://relay.example"));
+        assert!(invite.contains("Manifest URLs: https://blossom.example/manifest.json"));
+        assert!(invite.contains("Blossom servers: https://blossom.example"));
+        assert!(invite.contains("Archive mirrors: https://archive.example/manifest.json"));
+    }
+
+    #[test]
+    fn rescue_invite_bundle_extracts_labeled_fallback_metadata() {
+        let invite = [
+            "Duroos channel invite",
+            "Manifest: sha256:83829c50baca669812884d16505873dd9d7318c8ab88e9630c9bfcd1d970570b",
+            "Relays: wss://relay-a.example, wss://relay-b.example",
+            "Manifest URLs: https://blossom.example/manifest.json",
+            "Blossom servers: https://blossom.example",
+            "Archive mirrors: https://archive.example/manifest.json",
+        ]
+        .join("\n");
+
+        let bundle = rescue_invite_bundle(&invite);
+
+        assert_eq!(
+            bundle.manifest_sha256,
+            Some(
+                "sha256:83829c50baca669812884d16505873dd9d7318c8ab88e9630c9bfcd1d970570b"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            bundle.relays,
+            vec![
+                "wss://relay-a.example".to_string(),
+                "wss://relay-b.example".to_string()
+            ]
+        );
+        assert_eq!(
+            bundle.manifest_urls,
+            vec!["https://blossom.example/manifest.json".to_string()]
+        );
+        assert_eq!(
+            bundle.blossom_servers,
+            vec!["https://blossom.example".to_string()]
+        );
+        assert_eq!(
+            bundle.archive_mirrors,
+            vec!["https://archive.example/manifest.json".to_string()]
+        );
     }
 
     #[test]
@@ -2921,7 +3318,36 @@ mod tests {
         assert!(messages
             .iter()
             .any(|message| message.contains("failed endpoints should be fixed or removed")));
+        assert!(messages
+            .iter()
+            .any(|message| message.contains("Durability warning")));
         assert!(!messages[0].starts_with("Endpoint test passed"));
+    }
+
+    #[test]
+    fn endpoint_test_messages_warn_when_single_endpoint_pair_passes() {
+        let blossom_results = vec![BlossomUploadResult {
+            server_url: "https://blossom.ok".to_string(),
+            hash: "a".repeat(64),
+            url: Some("https://blossom.ok/a".to_string()),
+            uploaded: true,
+            elapsed_ms: Some(10),
+            bytes_per_second: Some(100.0),
+            message: "Blob stored by server.".to_string(),
+        }];
+        let relay_results = vec![NostrRelayPublishResult {
+            relay_url: "wss://relay.ok".to_string(),
+            accepted: true,
+            elapsed_ms: Some(5),
+            message: String::new(),
+        }];
+
+        let messages = endpoint_test_messages(true, &blossom_results, &relay_results);
+
+        assert!(messages[0].starts_with("Endpoint test passed"));
+        assert!(messages
+            .iter()
+            .any(|message| message.contains("Durability warning")));
     }
 
     #[test]
@@ -3478,6 +3904,82 @@ mod tests {
         assert_eq!(resolved.manifest_urls.len(), 2);
         assert_eq!(resolved.archive_mirrors, vec![archive_manifest_url]);
         assert_eq!(resolved.manifest_sha256, format!("sha256:{manifest_hash}"));
+    }
+
+    #[test]
+    fn nostr_channel_resolution_uses_rescue_invite_after_relay_failure() {
+        let manifest_json =
+            "{\"schemaVersion\":2,\"collection\":{\"title\":\"Rescue\"},\"lessons\":[]}";
+        let manifest_hash = sha256_hex(manifest_json.as_bytes());
+        let http_server = Server::http("127.0.0.1:0").unwrap();
+        let manifest_url = format!("http://{}/manifest.json", http_server.server_addr());
+        let manifest_body = manifest_json.to_string();
+        let http_thread = thread::spawn(move || {
+            let request = http_server.recv().unwrap();
+            assert_eq!(request.url(), "/manifest.json");
+            request
+                .respond(Response::from_string(manifest_body.clone()))
+                .unwrap();
+        });
+        let closed_relay = TcpListener::bind("127.0.0.1:0").unwrap();
+        let relay_url = format!("ws://{}", closed_relay.local_addr().unwrap());
+        drop(closed_relay);
+        let secret = [11_u8; 32];
+        let author = nostr_pubkey_from_secret(&secret).unwrap();
+        let naddr = encode_naddr(
+            "duroos-channel:rescue-test",
+            &author,
+            DUROOS_CHANNEL_KIND as u32,
+            std::slice::from_ref(&relay_url),
+        )
+        .unwrap();
+        let invite = format!(
+            "Duroos channel invite\nOpen in Duroos Watcher: nostr:{naddr}\nManifest: sha256:{manifest_hash}\nRelays: {relay_url}\nManifest URLs: {manifest_url}\nBlossom servers: http://blossom.example\nPreview before trusting this teacher key."
+        );
+
+        let resolved = resolve_nostr_channel_manifest_url(&invite).unwrap();
+        http_thread.join().unwrap();
+
+        assert!(resolved.used_rescue_fallback);
+        assert_eq!(resolved.manifest_url, manifest_url);
+        assert!(resolved.manifest_urls.contains(&manifest_url));
+        assert_eq!(resolved.manifest_urls.len(), 2);
+        assert_eq!(resolved.manifest_sha256, format!("sha256:{manifest_hash}"));
+        assert!(resolved.relay_error.is_some());
+    }
+
+    #[test]
+    fn nostr_channel_resolution_rejects_rescue_invite_hash_mismatch() {
+        let manifest_json =
+            "{\"schemaVersion\":2,\"collection\":{\"title\":\"Wrong\"},\"lessons\":[]}";
+        let correct_hash = sha256_hex(b"different manifest");
+        let http_server = Server::http("127.0.0.1:0").unwrap();
+        let manifest_url = format!("http://{}/manifest.json", http_server.server_addr());
+        let manifest_body = manifest_json.to_string();
+        let http_thread = thread::spawn(move || {
+            let request = http_server.recv().unwrap();
+            assert_eq!(request.url(), "/manifest.json");
+            request
+                .respond(Response::from_string(manifest_body.clone()))
+                .unwrap();
+        });
+        let secret = [12_u8; 32];
+        let author = nostr_pubkey_from_secret(&secret).unwrap();
+        let naddr = encode_naddr(
+            "duroos-channel:rescue-hash-test",
+            &author,
+            DUROOS_CHANNEL_KIND as u32,
+            &[],
+        )
+        .unwrap();
+        let invite = format!(
+            "Duroos channel invite\nOpen in Duroos Watcher: nostr:{naddr}\nManifest: sha256:{correct_hash}\nManifest URLs: {manifest_url}\nPreview before trusting this teacher key."
+        );
+
+        let error = resolve_nostr_channel_manifest_url(&invite).unwrap_err();
+        http_thread.join().unwrap();
+
+        assert!(error.contains("hash mismatch"));
     }
 
     #[test]

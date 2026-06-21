@@ -530,6 +530,11 @@ export interface ChannelPublishResult {
   manifestJson: string;
   manifestSha256: string;
   manifestUrl: string;
+  manifestUrls: string[];
+  relays: string[];
+  blossomServers: string[];
+  archiveMirrors: string[];
+  curatorPublicKeyFingerprint: string;
   nostrEventId: string;
   blossomResults: BlossomUploadResult[];
   archiveResults: ArchiveMirrorResult[];
