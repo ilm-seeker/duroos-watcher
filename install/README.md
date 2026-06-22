@@ -40,3 +40,8 @@ powershell -ExecutionPolicy Bypass -File "$env:TEMP\install-duroos-watcher.ps1"
 - Linux: `DUROOS_WATCHER_PACKAGE=deb` forces the Debian package path.
 - Windows: `$env:DUROOS_WATCHER_PACKAGE = "msi"` uses the MSI instead of the setup EXE.
 - macOS: `DUROOS_WATCHER_INSTALL_DIR` changes the app install directory, default `/Applications`.
+
+The Linux AppImage installer writes the downloaded payload to
+`~/.local/bin/duroos-watcher.AppImage` and writes `~/.local/bin/duroos-watcher` as a launcher
+wrapper. The wrapper sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` by default because some
+Fedora/Wayland/Mesa systems crash the WebKit subprocess during AppImage startup without it.

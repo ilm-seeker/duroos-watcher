@@ -43,6 +43,11 @@ powershell -ExecutionPolicy Bypass -File "$env:TEMP\install-duroos-watcher.ps1"
 On Linux, set `DUROOS_WATCHER_PACKAGE=appimage` to avoid a system `.deb` install. On Windows, set
 `$env:DUROOS_WATCHER_PACKAGE = "msi"` before running the script if you prefer the MSI package.
 
+Linux AppImage installs use a launcher wrapper at `~/.local/bin/duroos-watcher` that sets
+`WEBKIT_DISABLE_DMABUF_RENDERER=1` by default. This works around known WebKitGTK renderer crashes on
+Fedora/Wayland/Mesa systems while keeping the downloaded AppImage at
+`~/.local/bin/duroos-watcher.AppImage`.
+
 ### Manual Downloads
 
 | Platform | Download | Checksum |

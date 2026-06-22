@@ -288,6 +288,8 @@ fn preview_nostr_channel(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    apply_linux_appimage_webkit_defaults();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .manage(PhoneAccessState::default())
@@ -340,4 +342,15 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Duroos Watcher");
+}
+
+fn apply_linux_appimage_webkit_defaults() {
+    #[cfg(target_os = "linux")]
+    {
+        let running_as_appimage =
+            std::env::var_os("APPIMAGE").is_some() || std::env::var_os("APPDIR").is_some();
+        if running_as_appimage && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+    }
 }

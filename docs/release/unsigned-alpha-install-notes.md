@@ -46,6 +46,27 @@ powershell -ExecutionPolicy Bypass -File "$env:TEMP\install-duroos-watcher.ps1"
 On Linux, set `DUROOS_WATCHER_PACKAGE=appimage` to avoid a system `.deb` install. On Windows, set
 `$env:DUROOS_WATCHER_PACKAGE = "msi"` before running the script if you prefer the MSI package.
 
+## Linux AppImage Notes
+
+The Linux AppImage is alpha-scoped and depends on the Tauri GTK/WebKit runtime path. On Fedora,
+Wayland, or Mesa systems, a crash report for `WebKitWebProcess` with signal `ABRT` usually means the
+WebKit renderer subprocess crashed before the Duroos UI loaded. The AppImage installer writes
+`~/.local/bin/duroos-watcher` as a launcher wrapper that sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` by
+default, and stores the downloaded payload at `~/.local/bin/duroos-watcher.AppImage`.
+
+If a manually downloaded AppImage crashes before the UI opens, test the same workaround directly:
+
+```sh
+WEBKIT_DISABLE_DMABUF_RENDERER=1 ./Duroos-Watcher-*-linux-unsigned-*.AppImage
+```
+
+If it still crashes, collect terminal output and the systemd coredump summary before reporting it:
+
+```sh
+G_MESSAGES_DEBUG=all WEBKIT_DISABLE_DMABUF_RENDERER=1 ~/.local/bin/duroos-watcher 2>&1 | tee duroos-linux-appimage.log
+coredumpctl info WebKitWebProcess | tee duroos-webkit-coredump.log
+```
+
 ## Why The OS Warns
 
 These alpha artifacts are not Apple-notarized, not Apple Developer ID signed, and the Windows

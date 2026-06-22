@@ -175,9 +175,19 @@ case "$selected_package" in
     ;;
   appimage)
     mkdir -p "$appimage_dir"
+    appimage_path="${appimage_dir}/duroos-watcher.AppImage"
     install_path="${appimage_dir}/duroos-watcher"
-    install -m 0755 "${tmpdir}/${asset}" "$install_path"
+    install -m 0755 "${tmpdir}/${asset}" "$appimage_path"
+    cat > "${tmpdir}/duroos-watcher-wrapper" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"
+exec "$(dirname "${BASH_SOURCE[0]}")/duroos-watcher.AppImage" "$@"
+EOF
+    install -m 0755 "${tmpdir}/duroos-watcher-wrapper" "$install_path"
     echo "Installed ${install_path}"
+    echo "AppImage payload: ${appimage_path}"
     echo "Run it with: ${install_path}"
     ;;
 esac
