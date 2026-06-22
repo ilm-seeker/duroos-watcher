@@ -8,26 +8,27 @@ and only continue if you trust this repository.
 
 ## Commands
 
-These commands are pinned to the installer-script revision used for this alpha so raw GitHub cache
-lag cannot serve an older script.
+These commands fetch the current installer scripts and pin the package tag explicitly, so installer
+fixes can be picked up without changing the alpha package being installed.
 
 macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ilm-seeker/duroos-watcher/6b93d056ac7d8d8874ad46294c89a08254eb0cc3/install/macos.sh | DUROOS_WATCHER_ACCEPT_UNSIGNED=1 bash
+curl -fsSL https://raw.githubusercontent.com/ilm-seeker/duroos-watcher/main/install/macos.sh | DUROOS_WATCHER_ACCEPT_UNSIGNED=1 DUROOS_WATCHER_TAG=v0.1.0-alpha.3 bash
 ```
 
 Linux:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ilm-seeker/duroos-watcher/6b93d056ac7d8d8874ad46294c89a08254eb0cc3/install/linux.sh | DUROOS_WATCHER_ACCEPT_UNSIGNED=1 bash
+curl -fsSL https://raw.githubusercontent.com/ilm-seeker/duroos-watcher/main/install/linux.sh | DUROOS_WATCHER_ACCEPT_UNSIGNED=1 DUROOS_WATCHER_TAG=v0.1.0-alpha.3 bash
 ```
 
 Windows PowerShell:
 
 ```powershell
 $env:DUROOS_WATCHER_ACCEPT_UNSIGNED = "1"
-Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/ilm-seeker/duroos-watcher/6b93d056ac7d8d8874ad46294c89a08254eb0cc3/install/windows.ps1" -OutFile "$env:TEMP\install-duroos-watcher.ps1"
+$env:DUROOS_WATCHER_TAG = "v0.1.0-alpha.3"
+Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/ilm-seeker/duroos-watcher/main/install/windows.ps1" -OutFile "$env:TEMP\install-duroos-watcher.ps1"
 powershell -ExecutionPolicy Bypass -File "$env:TEMP\install-duroos-watcher.ps1"
 ```
 

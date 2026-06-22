@@ -27,6 +27,33 @@ function Confirm-UnsignedAlpha {
   }
 }
 
+function Get-ChecksumCandidateNames($AssetName) {
+  $AssetName
+  if ($AssetName.Contains("Duroos.Watcher_")) {
+    $AssetName.Replace("Duroos.Watcher_", "Duroos Watcher_")
+  }
+}
+
+function Get-ExpectedChecksum($ChecksumPath, $AssetName) {
+  foreach ($candidateName in (Get-ChecksumCandidateNames $AssetName)) {
+    foreach ($line in Get-Content $ChecksumPath) {
+      $cleanLine = $line.TrimEnd("`r")
+      $separatorIndex = $cleanLine.IndexOf("  ")
+      if ($separatorIndex -lt 0) {
+        continue
+      }
+
+      $hash = $cleanLine.Substring(0, $separatorIndex)
+      $filename = $cleanLine.Substring($separatorIndex + 2)
+      if ($filename -eq $candidateName) {
+        return $hash.ToLowerInvariant()
+      }
+    }
+  }
+
+  return $null
+}
+
 if (-not [Environment]::Is64BitOperatingSystem) {
   Fail "current Windows alpha assets are x64 only."
 }
@@ -60,12 +87,13 @@ try {
   Invoke-WebRequest -Uri "$baseUrl/$assetName" -OutFile $assetPath
   Invoke-WebRequest -Uri "$baseUrl/$checksumName" -OutFile $checksumPath
 
-  $checksumLine = Get-Content $checksumPath | Where-Object { $_ -match "\s+$([regex]::Escape($assetName))$" } | Select-Object -First 1
-  if (-not $checksumLine) {
+  $expectedHash = Get-ExpectedChecksum $checksumPath $assetName
+  if (-not $expectedHash) {
     Fail "checksum file does not include $assetName"
   }
-
-  $expectedHash = (($checksumLine -split "\s+")[0]).ToLowerInvariant()
+  if ($expectedHash -notmatch "^[a-f0-9]{64}$") {
+    Fail "checksum file has an invalid SHA-256 entry for $assetName"
+  }
   $actualHash = (Get-FileHash -Algorithm SHA256 $assetPath).Hash.ToLowerInvariant()
   if ($expectedHash -ne $actualHash) {
     Fail "checksum mismatch for $assetName"

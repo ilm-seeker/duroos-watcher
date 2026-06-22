@@ -117,7 +117,8 @@ jobs:
             throw "No Windows installer artifacts were found."
           }
           foreach ($installer in $installers) {
-            Copy-Item $installer.FullName -Destination (Join-Path "release-assets" "Duroos-Watcher-$($env:TAG_NAME)-windows-unsigned-$($installer.Name)")
+            $safeName = $installer.Name -replace "\s", "."
+            Copy-Item $installer.FullName -Destination (Join-Path "release-assets" "Duroos-Watcher-$($env:TAG_NAME)-windows-unsigned-$safeName")
           }
           Get-ChildItem release-assets -File |
             Sort-Object Name |
@@ -132,7 +133,9 @@ jobs:
         run: |
           mkdir -p release-assets
           while IFS= read -r -d '' artifact; do
-            cp "$artifact" "release-assets/Duroos-Watcher-${TAG_NAME}-linux-unsigned-$(basename "$artifact")"
+            base_name="$(basename "$artifact")"
+            safe_name="${base_name// /.}"
+            cp "$artifact" "release-assets/Duroos-Watcher-${TAG_NAME}-linux-unsigned-${safe_name}"
           done < <(find src-tauri/target/release/bundle -type f \( -name "*.AppImage" -o -name "*.deb" \) -print0)
           if ! find release-assets -type f | grep -q .; then
             echo "No Linux installer artifacts were found." >&2

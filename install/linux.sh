@@ -71,12 +71,56 @@ select_package() {
 download_and_verify() {
   local asset="$1"
   local checksum="$2"
+  local expected_hash=""
+  local actual_hash=""
 
   curl --fail --location --retry 3 --output "${tmpdir}/${asset}" "${base_url}/${asset}"
   curl --fail --location --retry 3 --output "${tmpdir}/${checksum}" "${base_url}/${checksum}"
-  grep "  ${asset}$" "${tmpdir}/${checksum}" > "${tmpdir}/${asset}.sha256" \
+  expected_hash="$(expected_sha256_for_asset "$asset" "${tmpdir}/${checksum}")" \
     || fail "checksum file does not include ${asset}"
-  (cd "$tmpdir" && sha256sum -c "${asset}.sha256")
+  [[ "$expected_hash" =~ ^[A-Fa-f0-9]{64}$ ]] \
+    || fail "checksum file has an invalid SHA-256 entry for ${asset}"
+  expected_hash="$(printf '%s' "$expected_hash" | tr '[:upper:]' '[:lower:]')"
+  actual_hash="$(sha256sum "${tmpdir}/${asset}")"
+  actual_hash="${actual_hash%% *}"
+  actual_hash="$(printf '%s' "$actual_hash" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$expected_hash" != "$actual_hash" ]]; then
+    fail "checksum mismatch for ${asset}"
+  fi
+  echo "Checksum OK: ${asset}"
+}
+
+asset_checksum_names() {
+  local asset="$1"
+
+  printf '%s\n' "$asset"
+  if [[ "$asset" == *"Duroos.Watcher_"* ]]; then
+    printf '%s\n' "${asset/Duroos.Watcher_/Duroos Watcher_}"
+  fi
+}
+
+expected_sha256_for_asset() {
+  local asset="$1"
+  local checksum_path="$2"
+  local candidate=""
+  local line=""
+  local hash=""
+  local filename=""
+
+  while IFS= read -r candidate; do
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      line="${line%$'\r'}"
+      [[ "$line" == *"  "* ]] || continue
+      hash="${line%%  *}"
+      filename="${line#*  }"
+      if [[ "$filename" == "$candidate" ]]; then
+        printf '%s\n' "$hash"
+        return 0
+      fi
+    done < "$checksum_path"
+  done < <(asset_checksum_names "$asset")
+
+  return 1
 }
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
