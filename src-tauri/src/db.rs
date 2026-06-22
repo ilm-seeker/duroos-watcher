@@ -5,7 +5,8 @@ use crate::{
         IngestSummary, Job, Lesson, LessonNote, LiveSession, ManifestValidationReport, MediaFile,
         MediaStorageAudit, MediaStorageCleanup, MediaStorageCleanupRequest, MediaStorageStaleItem,
         NativePlaybackResult, OpenMediaResult, ProvenanceRecord, RuntimeDiagnostics, Source,
-        SourceCapability, Teacher, TeacherRelay, TrustCuratorSummary, TrustedCurator, WatchState,
+        SourceCapability, Teacher, TeacherRelay, RetrievalRef, TrustCuratorSummary, TrustedCurator,
+        WatchState,
     },
     publisher,
 };
@@ -68,6 +69,7 @@ struct DiscoveredLesson {
     title: String,
     content_type: String,
     source_url: String,
+    retrieval_refs: Vec<RetrievalRef>,
     published_at: Option<String>,
     description: Option<String>,
     duration_seconds: Option<i64>,
@@ -136,6 +138,7 @@ struct DownloadLesson {
     title: String,
     content_type: String,
     source_url: String,
+    retrieval_refs: Vec<RetrievalRef>,
     expected_content_hash: Option<String>,
     has_invalid_media_record: bool,
 }
@@ -171,6 +174,13 @@ struct DirectDownloadProgress<'a> {
     started_at: &'a str,
     total_bytes: Option<i64>,
     last_recorded_bytes: i64,
+}
+
+#[derive(Debug, Clone)]
+struct RetrievalDownloadCandidate {
+    url: String,
+    label: String,
+    file_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -498,8 +508,8 @@ pub fn search_lessons(connection: &Connection, query: &str) -> Result<Vec<Lesson
     let mut statement = connection
         .prepare(
             "SELECT l.id, l.title, l.content_type, l.teacher_id, l.collection_id, l.source_id,
-                    l.source_url, l.published_at, l.description, l.thumbnail_tone,
-                    l.duration_seconds, l.media_file_id, l.provenance_id
+                    l.source_url, l.retrieval_refs_json, l.published_at, l.description,
+                    l.thumbnail_tone, l.duration_seconds, l.media_file_id, l.provenance_id
              FROM lessons_fts f
              JOIN lessons l ON l.id = f.lesson_id
              WHERE lessons_fts MATCH ?
@@ -1674,6 +1684,7 @@ pub fn download_source_media(
                     &lesson_dir,
                     &data_dir,
                     yt_dlp_cookies.as_deref(),
+                    lesson.expected_content_hash.as_deref(),
                     Some(DirectDownloadProgress {
                         connection: &connection,
                         job_id: &lesson_job_id,
@@ -1898,6 +1909,7 @@ fn ingest_public_telegram(
             title,
             content_type: "post".to_string(),
             source_url,
+            retrieval_refs: Vec::new(),
             published_at,
             description,
             duration_seconds: None,
@@ -2098,6 +2110,7 @@ fn ingest_direct_source_url(
         title,
         content_type: content_type.to_string(),
         source_url: original_url.to_string(),
+        retrieval_refs: Vec::new(),
         published_at: None,
         description: Some(
             "Captured from a user-added source URL; media download remains user controlled."
@@ -2469,7 +2482,8 @@ fn duroos_manifest_lesson(lesson: &serde_json::Value) -> Option<DiscoveredLesson
         .get("description")
         .and_then(serde_json::Value::as_str)
         .map(|description| clip_text(description, 900));
-    let source_url = downloadable_retrieval_url(lesson_object)
+    let retrieval_refs = manifest_retrieval_refs(lesson_object);
+    let source_url = downloadable_retrieval_url(&retrieval_refs)
         .or_else(|| first_source_ref_url(lesson_object))?;
     let published_at = lesson_object
         .get("sourceRefs")
@@ -2497,6 +2511,7 @@ fn duroos_manifest_lesson(lesson: &serde_json::Value) -> Option<DiscoveredLesson
         title,
         content_type,
         source_url,
+        retrieval_refs,
         published_at,
         description,
         duration_seconds: lesson_object
@@ -2596,6 +2611,7 @@ fn json_feed_lesson(item: &serde_json::Value) -> Option<DiscoveredLesson> {
         title,
         content_type,
         source_url,
+        retrieval_refs: Vec::new(),
         published_at: item_object
             .get("date_published")
             .or_else(|| item_object.get("date_modified"))
@@ -2611,30 +2627,103 @@ fn json_feed_lesson(item: &serde_json::Value) -> Option<DiscoveredLesson> {
     })
 }
 
-fn downloadable_retrieval_url(
+fn downloadable_retrieval_url(retrieval_refs: &[RetrievalRef]) -> Option<String> {
+    retrieval_refs.iter().find_map(|retrieval_ref| {
+        if matches!(retrieval_ref.kind.as_str(), "direct-url" | "enclosure-url") {
+            retrieval_ref.url.clone()
+        } else {
+            None
+        }
+    })
+}
+
+fn manifest_retrieval_refs(
     lesson_object: &serde_json::Map<String, serde_json::Value>,
-) -> Option<String> {
+) -> Vec<RetrievalRef> {
     lesson_object
         .get("retrievalRefs")
         .and_then(serde_json::Value::as_array)
-        .and_then(|refs| {
+        .map(|refs| {
             refs.iter()
                 .filter_map(serde_json::Value::as_object)
-                .find_map(|retrieval_ref| {
-                    let kind = retrieval_ref
-                        .get("kind")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default();
-                    if matches!(kind, "direct-url" | "enclosure-url") {
-                        retrieval_ref
-                            .get("url")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_string)
-                    } else {
-                        None
-                    }
-                })
+                .filter_map(manifest_retrieval_ref)
+                .collect()
         })
+        .unwrap_or_default()
+}
+
+fn manifest_retrieval_ref(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Option<RetrievalRef> {
+    let kind = object
+        .get("kind")
+        .and_then(serde_json::Value::as_str)?
+        .to_string();
+    let media_type = object
+        .get("mediaType")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let mime_type = object
+        .get("mimeType")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| media_type.clone());
+    let sha256 = object
+        .get("sha256")
+        .and_then(serde_json::Value::as_str)
+        .map(format_sha256);
+    let size_bytes = object.get("sizeBytes").and_then(serde_json::Value::as_i64);
+
+    match kind.as_str() {
+        "direct-url" | "enclosure-url" => {
+            let url = object
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .filter(|url| is_safe_http_url(url))?
+                .to_string();
+            Some(RetrievalRef {
+                kind,
+                url: Some(url),
+                service: object
+                    .get("service")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                sha256,
+                size_bytes,
+                mime_type,
+                media_type,
+                ..Default::default()
+            })
+        }
+        "ipfs-cid" => object
+            .get("cid")
+            .and_then(serde_json::Value::as_str)
+            .filter(|cid| !cid.trim().is_empty())
+            .map(|cid| RetrievalRef {
+                kind,
+                cid: Some(cid.to_string()),
+                gateway_url: object
+                    .get("gatewayUrl")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|url| is_safe_http_url(url))
+                    .map(str::to_string),
+                sha256,
+                size_bytes,
+                mime_type,
+                media_type,
+                ..Default::default()
+            }),
+        "magnet" => object
+            .get("magnetUri")
+            .and_then(serde_json::Value::as_str)
+            .map(|magnet_uri| RetrievalRef {
+                kind,
+                magnet_uri: Some(magnet_uri.to_string()),
+                media_type,
+                ..Default::default()
+            }),
+        _ => None,
+    }
 }
 
 fn first_source_ref_url(
@@ -3464,8 +3553,9 @@ fn insert_discovered_lesson(
         .execute(
             "INSERT INTO lessons
              (id, title, content_type, teacher_id, collection_id, source_id, source_url,
-              published_at, description, thumbnail_tone, duration_seconds, media_file_id, provenance_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'emerald', ?10, NULL, ?11)",
+              retrieval_refs_json, published_at, description, thumbnail_tone, duration_seconds,
+              media_file_id, provenance_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'emerald', ?11, NULL, ?12)",
             params![
                 &lesson_id,
                 &lesson.title,
@@ -3474,6 +3564,7 @@ fn insert_discovered_lesson(
                 &context.collection_id,
                 &context.source_id,
                 &lesson.source_url,
+                retrieval_refs_to_json(&lesson.retrieval_refs)?,
                 lesson.published_at.as_deref(),
                 description,
                 lesson.duration_seconds,
@@ -3743,6 +3834,23 @@ fn verify_downloaded_hash(
     }
 }
 
+fn parse_retrieval_refs_json(value: &str) -> Vec<RetrievalRef> {
+    serde_json::from_str::<Vec<RetrievalRef>>(value).unwrap_or_default()
+}
+
+fn retrieval_refs_to_json(refs: &[RetrievalRef]) -> Result<String, String> {
+    serde_json::to_string(refs).map_err(|error| error.to_string())
+}
+
+fn format_sha256(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.starts_with("sha256:") {
+        trimmed.to_ascii_lowercase()
+    } else {
+        format!("sha256:{}", trimmed.to_ascii_lowercase())
+    }
+}
+
 fn archive_file_lesson(
     identifier: &str,
     file: &serde_json::Value,
@@ -3785,6 +3893,7 @@ fn archive_file_lesson(
         title: clip_text(&title, 140),
         content_type,
         source_url: archive_download_url(identifier, &name),
+        retrieval_refs: Vec::new(),
         published_at: published_at.map(str::to_string),
         description: if description_parts.is_empty() {
             None
@@ -3893,6 +4002,7 @@ fn feed_lessons(document: &roxmltree::Document<'_>) -> Result<Vec<DiscoveredLess
             title: clip_text(&title, 140),
             content_type,
             source_url,
+            retrieval_refs: Vec::new(),
             published_at: child_text(item, "pubDate"),
             description,
             duration_seconds: child_text(item, "duration")
@@ -3932,6 +4042,7 @@ fn feed_lessons(document: &roxmltree::Document<'_>) -> Result<Vec<DiscoveredLess
             title: clip_text(&title, 140),
             content_type,
             source_url,
+            retrieval_refs: Vec::new(),
             published_at: child_text(entry, "published").or_else(|| child_text(entry, "updated")),
             description,
             duration_seconds: child_text(entry, "duration")
@@ -4840,7 +4951,7 @@ fn source_download_plan(
 ) -> Result<(Vec<DownloadLesson>, i64), String> {
     let mut statement = connection
         .prepare(
-            "SELECT l.id, l.title, l.content_type, l.source_url, p.content_hash,
+            "SELECT l.id, l.title, l.content_type, l.source_url, l.retrieval_refs_json, p.content_hash,
                     l.media_file_id, m.relative_path, m.import_status
              FROM lessons l
              LEFT JOIN media_files m ON m.id = l.media_file_id
@@ -4857,10 +4968,11 @@ fn source_download_plan(
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
-                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(4)?,
                 row.get::<_, Option<String>>(5)?,
                 row.get::<_, Option<String>>(6)?,
                 row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
             ))
         })
         .map_err(|error| error.to_string())?;
@@ -4874,6 +4986,7 @@ fn source_download_plan(
             title,
             content_type,
             source_url,
+            retrieval_refs_json,
             expected_content_hash,
             media_file_id,
             relative_path,
@@ -4903,6 +5016,7 @@ fn source_download_plan(
             title,
             content_type,
             source_url,
+            retrieval_refs: parse_retrieval_refs_json(&retrieval_refs_json),
             expected_content_hash,
             has_invalid_media_record: media_file_id.is_some(),
         });
@@ -5057,6 +5171,7 @@ fn download_lesson_media(
     lesson_dir: &Path,
     data_dir: &Path,
     cookies_file: Option<&Path>,
+    expected_content_hash: Option<&str>,
     progress: Option<DirectDownloadProgress<'_>>,
 ) -> Result<PathBuf, String> {
     if !is_file_backed_content_type(&lesson.content_type) {
@@ -5065,12 +5180,30 @@ fn download_lesson_media(
         );
     }
 
-    if is_direct_file_url(&lesson.source_url) {
-        return download_direct_file_with_progress(
+    let candidates = retrieval_download_candidates(lesson);
+    if !candidates.is_empty() {
+        return download_from_retrieval_candidates(
             client,
-            &lesson.source_url,
+            &candidates,
             lesson_dir,
             &lesson.content_type,
+            expected_content_hash,
+            progress,
+        );
+    }
+
+    if is_direct_file_url(&lesson.source_url) {
+        let candidate = RetrievalDownloadCandidate {
+            url: lesson.source_url.clone(),
+            label: "source_url".to_string(),
+            file_name: None,
+        };
+        return download_from_retrieval_candidates(
+            client,
+            &[candidate],
+            lesson_dir,
+            &lesson.content_type,
+            expected_content_hash,
             progress,
         );
     }
@@ -5094,6 +5227,117 @@ fn download_lesson_media(
     )
 }
 
+fn retrieval_download_candidates(lesson: &DownloadLesson) -> Vec<RetrievalDownloadCandidate> {
+    let mut http_candidates = Vec::new();
+    let mut ipfs_candidates = Vec::new();
+
+    for retrieval_ref in &lesson.retrieval_refs {
+        match retrieval_ref.kind.as_str() {
+            "direct-url" | "enclosure-url" => {
+                let Some(url) = retrieval_ref.url.as_ref() else {
+                    continue;
+                };
+                if !is_safe_http_url(url) {
+                    continue;
+                }
+                http_candidates.push(RetrievalDownloadCandidate {
+                    url: url.clone(),
+                    label: format!("{} {}", retrieval_ref.kind, url),
+                    file_name: fallback_download_file_name(url, &lesson.content_type),
+                });
+            }
+            "ipfs-cid" => {
+                let (Some(cid), Some(gateway_url)) =
+                    (retrieval_ref.cid.as_ref(), retrieval_ref.gateway_url.as_ref())
+                else {
+                    continue;
+                };
+                if !is_safe_http_url(gateway_url) {
+                    continue;
+                }
+                ipfs_candidates.push(RetrievalDownloadCandidate {
+                    url: ipfs_gateway_url(gateway_url, cid),
+                    label: format!("ipfs-cid {cid}"),
+                    file_name: Some(format!(
+                        "ipfs-{}.{}",
+                        safe_path_segment(cid),
+                        extension_for_content_type(&lesson.content_type)
+                    )),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    dedupe_download_candidates(http_candidates.into_iter().chain(ipfs_candidates).collect())
+}
+
+fn dedupe_download_candidates(
+    candidates: Vec<RetrievalDownloadCandidate>,
+) -> Vec<RetrievalDownloadCandidate> {
+    let mut output = Vec::new();
+    for candidate in candidates {
+        if !output
+            .iter()
+            .any(|existing: &RetrievalDownloadCandidate| existing.url == candidate.url)
+        {
+            output.push(candidate);
+        }
+    }
+    output
+}
+
+fn download_from_retrieval_candidates(
+    client: &Client,
+    candidates: &[RetrievalDownloadCandidate],
+    lesson_dir: &Path,
+    content_type: &str,
+    expected_content_hash: Option<&str>,
+    mut progress: Option<DirectDownloadProgress<'_>>,
+) -> Result<PathBuf, String> {
+    let mut attempts = Vec::new();
+
+    for candidate in candidates {
+        match download_direct_file_candidate_with_progress(
+            client,
+            candidate,
+            lesson_dir,
+            content_type,
+            progress.take(),
+        ) {
+            Ok(path) => match verify_candidate_download_hash(expected_content_hash, &path) {
+                Ok(()) => return Ok(path),
+                Err(error) => {
+                    let _ = fs::remove_file(&path);
+                    attempts.push(format!("{}: {error}", candidate.label));
+                }
+            },
+            Err(error) => attempts.push(format!("{}: {error}", candidate.label)),
+        }
+    }
+
+    Err(format!(
+        "Every retrieval path failed for this lesson. Tried: {}",
+        attempts.join("; ")
+    ))
+}
+
+fn verify_candidate_download_hash(
+    expected_content_hash: Option<&str>,
+    media_path: &Path,
+) -> Result<(), String> {
+    if expected_content_hash
+        .map(str::trim)
+        .filter(|hash| !hash.is_empty())
+        .is_none()
+    {
+        return Ok(());
+    }
+
+    let actual_hash = format!("sha256:{}", hash_file(media_path)?);
+    verify_downloaded_hash(expected_content_hash, &actual_hash).map(|_| ())
+}
+
 fn is_direct_file_url(source_url: &str) -> bool {
     extension_from_url(source_url).is_some()
 }
@@ -5115,8 +5359,29 @@ fn download_direct_file_with_progress(
     content_type: &str,
     mut progress: Option<DirectDownloadProgress<'_>>,
 ) -> Result<PathBuf, String> {
+    let candidate = RetrievalDownloadCandidate {
+        url: source_url.to_string(),
+        label: source_url.to_string(),
+        file_name: None,
+    };
+    download_direct_file_candidate_with_progress(
+        client,
+        &candidate,
+        lesson_dir,
+        content_type,
+        progress.take(),
+    )
+}
+
+fn download_direct_file_candidate_with_progress(
+    client: &Client,
+    candidate: &RetrievalDownloadCandidate,
+    lesson_dir: &Path,
+    content_type: &str,
+    mut progress: Option<DirectDownloadProgress<'_>>,
+) -> Result<PathBuf, String> {
     let mut response = client
-        .get(source_url)
+        .get(&candidate.url)
         .send()
         .map_err(|error| format!("Could not fetch media file: {error}"))?;
     let status = response.status();
@@ -5133,7 +5398,10 @@ fn download_direct_file_with_progress(
         let _ = record_direct_download_progress(progress, 0);
     }
 
-    let file_name = direct_download_file_name(source_url);
+    let file_name = candidate
+        .file_name
+        .clone()
+        .unwrap_or_else(|| direct_download_file_name(&candidate.url));
     let destination = lesson_dir.join(file_name);
     let partial_destination = destination.with_extension(format!(
         "{}part",
@@ -5225,6 +5493,37 @@ fn direct_download_file_name(source_url: &str) -> String {
         })
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| format!("download-{}", Uuid::new_v4()))
+}
+
+fn fallback_download_file_name(source_url: &str, content_type: &str) -> Option<String> {
+    if extension_from_url(source_url).is_some() {
+        None
+    } else {
+        Some(format!(
+            "download-{}.{}",
+            stable_suffix(source_url),
+            extension_for_content_type(content_type)
+        ))
+    }
+}
+
+fn extension_for_content_type(content_type: &str) -> &'static str {
+    match content_type {
+        "audio" => "mp3",
+        "pdf" => "pdf",
+        _ => "mp4",
+    }
+}
+
+fn ipfs_gateway_url(gateway_url: &str, cid: &str) -> String {
+    let base = gateway_url.trim().trim_end_matches('/');
+    if base.ends_with(cid) {
+        base.to_string()
+    } else if base.ends_with("/ipfs") {
+        format!("{base}/{cid}")
+    } else {
+        format!("{base}/ipfs/{cid}")
+    }
 }
 
 fn download_lesson_with_yt_dlp(
@@ -6254,6 +6553,7 @@ fn run_migrations(connection: &Connection) -> Result<(), String> {
               description TEXT,
               origin_url TEXT NOT NULL,
               retrieval_url TEXT,
+              retrieval_refs_json TEXT NOT NULL DEFAULT '[]',
               sha256 TEXT NOT NULL,
               size_bytes INTEGER,
               mime_type TEXT,
@@ -6291,6 +6591,7 @@ fn run_migrations(connection: &Connection) -> Result<(), String> {
               collection_id TEXT NOT NULL REFERENCES collections(id),
               source_id TEXT NOT NULL REFERENCES sources(id),
               source_url TEXT NOT NULL,
+              retrieval_refs_json TEXT NOT NULL DEFAULT '[]',
               published_at TEXT,
               description TEXT,
               thumbnail_tone TEXT NOT NULL,
@@ -6432,6 +6733,19 @@ fn run_migrations(connection: &Connection) -> Result<(), String> {
     )?;
     ensure_column(
         connection,
+        "lessons",
+        "retrieval_refs_json",
+        "ALTER TABLE lessons ADD COLUMN retrieval_refs_json TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    ensure_column(
+        connection,
+        "publisher_channel_items",
+        "retrieval_refs_json",
+        "ALTER TABLE publisher_channel_items ADD COLUMN retrieval_refs_json TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    backfill_retrieval_refs_json(connection)?;
+    ensure_column(
+        connection,
         "publisher_profiles",
         "last_endpoint_tested_at",
         "ALTER TABLE publisher_profiles ADD COLUMN last_endpoint_tested_at TEXT",
@@ -6510,6 +6824,99 @@ fn ensure_column(
         .execute(alter_sql, [])
         .map(|_| ())
         .map_err(|error| error.to_string())
+}
+
+fn backfill_retrieval_refs_json(connection: &Connection) -> Result<(), String> {
+    let mut lesson_statement = connection
+        .prepare(
+            "SELECT id, content_type, source_url
+             FROM lessons
+             WHERE retrieval_refs_json IS NULL
+                OR retrieval_refs_json = ''
+                OR retrieval_refs_json = '[]'",
+        )
+        .map_err(|error| error.to_string())?;
+    let lesson_rows = lesson_statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+
+    for row in lesson_rows {
+        let (id, content_type, source_url) = row.map_err(|error| error.to_string())?;
+        if !is_file_backed_content_type(&content_type) || !is_safe_http_url(&source_url) {
+            continue;
+        }
+        let refs = vec![RetrievalRef {
+            kind: "direct-url".to_string(),
+            url: Some(source_url),
+            service: None,
+            media_type: None,
+            ..Default::default()
+        }];
+        connection
+            .execute(
+                "UPDATE lessons SET retrieval_refs_json = ?1 WHERE id = ?2",
+                params![retrieval_refs_to_json(&refs)?, id],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    let mut item_statement = connection
+        .prepare(
+            "SELECT id, item_type, retrieval_url, sha256, size_bytes, mime_type
+             FROM publisher_channel_items
+             WHERE (retrieval_refs_json IS NULL
+                 OR retrieval_refs_json = ''
+                 OR retrieval_refs_json = '[]')
+               AND retrieval_url IS NOT NULL",
+        )
+        .map_err(|error| error.to_string())?;
+    let item_rows = item_statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+
+    for row in item_rows {
+        let (id, item_type, retrieval_url, sha256, size_bytes, mime_type) =
+            row.map_err(|error| error.to_string())?;
+        let Some(url) = retrieval_url.filter(|url| is_safe_http_url(url)) else {
+            continue;
+        };
+        if item_type != "media" {
+            continue;
+        }
+        let refs = vec![RetrievalRef {
+            kind: "direct-url".to_string(),
+            url: Some(url),
+            service: Some("blossom".to_string()),
+            sha256: Some(format_sha256(&sha256)),
+            size_bytes,
+            mime_type: mime_type.clone(),
+            media_type: mime_type,
+            ..Default::default()
+        }];
+        connection
+            .execute(
+                "UPDATE publisher_channel_items SET retrieval_refs_json = ?1 WHERE id = ?2",
+                params![retrieval_refs_to_json(&refs)?, id],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
 }
 
 fn backfill_lesson_content_types(connection: &Connection) -> Result<(), String> {
@@ -7068,7 +7475,7 @@ fn fetch_lessons(connection: &Connection) -> Result<Vec<Lesson>, String> {
     let mut statement = connection
         .prepare(
             "SELECT id, title, content_type, teacher_id, collection_id, source_id,
-                    source_url, published_at, description, thumbnail_tone,
+                    source_url, retrieval_refs_json, published_at, description, thumbnail_tone,
                     duration_seconds, media_file_id, provenance_id
              FROM lessons
              ORDER BY published_at DESC, title ASC",
@@ -7091,12 +7498,13 @@ fn lesson_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Lesson> {
         collection_id: row.get(4)?,
         source_id: row.get(5)?,
         source_url: row.get(6)?,
-        published_at: row.get(7)?,
-        description: row.get(8)?,
-        thumbnail_tone: row.get(9)?,
-        duration_seconds: row.get(10)?,
-        media_file_id: row.get(11)?,
-        provenance_id: row.get(12)?,
+        retrieval_refs: parse_retrieval_refs_json(&row.get::<_, String>(7)?),
+        published_at: row.get(8)?,
+        description: row.get(9)?,
+        thumbnail_tone: row.get(10)?,
+        duration_seconds: row.get(11)?,
+        media_file_id: row.get(12)?,
+        provenance_id: row.get(13)?,
     })
 }
 
@@ -7104,7 +7512,7 @@ fn lesson_for_id(connection: &Connection, lesson_id: &str) -> Result<Lesson, Str
     connection
         .query_row(
             "SELECT id, title, content_type, teacher_id, collection_id, source_id,
-                    source_url, published_at, description, thumbnail_tone,
+                    source_url, retrieval_refs_json, published_at, description, thumbnail_tone,
                     duration_seconds, media_file_id, provenance_id
              FROM lessons
              WHERE id = ?1",
@@ -7483,6 +7891,10 @@ fn should_update_content_type(current: &str, inference: ContentTypeInference) ->
 
 fn is_valid_content_type(content_type: &str) -> bool {
     matches!(content_type, "video" | "audio" | "pdf" | "post")
+}
+
+fn is_safe_http_url(value: &str) -> bool {
+    value.starts_with("https://") || value.starts_with("http://")
 }
 
 fn classify_feed_content(
@@ -8844,6 +9256,7 @@ mod tests {
             title: "Different title".to_string(),
             content_type: "video".to_string(),
             source_url: "https://youtube.com/watch?v=abc123".to_string(),
+            retrieval_refs: Vec::new(),
             published_at: None,
             description: None,
             duration_seconds: None,

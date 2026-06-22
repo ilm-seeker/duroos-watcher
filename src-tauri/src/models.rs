@@ -12,6 +12,30 @@ pub struct SourceCapability {
     pub note: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RetrievalRef {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub magnet_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Source {
@@ -96,6 +120,7 @@ pub struct Lesson {
     pub collection_id: String,
     pub source_id: String,
     pub source_url: String,
+    pub retrieval_refs: Vec<RetrievalRef>,
     pub published_at: Option<String>,
     pub description: Option<String>,
     pub thumbnail_tone: String,
@@ -460,6 +485,7 @@ pub struct PublishedChannelItem {
     pub description: Option<String>,
     pub origin_url: String,
     pub retrieval_url: Option<String>,
+    pub retrieval_refs: Vec<RetrievalRef>,
     pub sha256: String,
     pub size_bytes: Option<i64>,
     pub mime_type: Option<String>,

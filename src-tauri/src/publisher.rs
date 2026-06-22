@@ -6,7 +6,7 @@ use crate::{
         NostrRelayConfig, NostrRelayPublishResult, PublishTeacherChannelRequest,
         PublishedChannelItem, PublishedLessonDraft, PublishedPostDraft, PublisherChannel,
         PublisherEndpointTestReport, PublisherEndpointTestRequest, PublisherProfile,
-        SavePublisherChannelRequest, SyntheticPublisherProbeRequest,
+        RetrievalRef, SavePublisherChannelRequest, SyntheticPublisherProbeRequest,
     },
 };
 use argon2::Argon2;
@@ -135,6 +135,7 @@ struct PublishedBlob {
     content_type: String,
     description: Option<String>,
     url: String,
+    retrieval_refs: Vec<RetrievalRef>,
     sha256: String,
     size_bytes: i64,
     mime_type: String,
@@ -329,6 +330,8 @@ pub fn publish_teacher_channel(
     let relays = normalize_relays(request.relays)?;
     let blossom_servers = normalize_blossom_servers(request.blossom_servers)?;
     let archive_mirrors = normalize_archive_mirrors(request.archive_mirrors)?;
+    enforce_archive_publish_configuration(&relays, &blossom_servers, &archive_mirrors)?;
+    let ipfs_mirror = required_ipfs_mirror(&archive_mirrors)?;
     let post_drafts = normalize_post_drafts(request.posts)?;
     if request.lessons.is_empty() && post_drafts.is_empty() {
         return Err(
@@ -369,6 +372,7 @@ pub fn publish_teacher_channel(
             &client,
             draft,
             &blossom_servers,
+            &ipfs_mirror,
             &keys,
             &mut blossom_results,
         )?;
@@ -390,6 +394,14 @@ pub fn publish_teacher_channel(
             .cmp(&right.published_at)
             .then_with(|| left.title.cmp(&right.title))
     });
+    channel_items = repair_and_verify_channel_media_items(
+        &client,
+        &keys,
+        &blossom_servers,
+        &ipfs_mirror,
+        channel_items,
+        &mut blossom_results,
+    )?;
     let media_count = channel_items
         .iter()
         .filter(|item| item.item_type == "media")
@@ -465,6 +477,21 @@ pub fn publish_teacher_channel(
         .iter()
         .filter(|result| !result.verified)
         .count();
+    let verified_ipfs_manifest = archive_results.iter().any(|result| {
+        result.service == "ipfs-http-api" && result.verified && result.cid.is_some()
+    });
+    if !verified_ipfs_manifest {
+        return Err(
+            "Publish blocked: the signed manifest was not verified through local IPFS and the configured gateway."
+                .to_string(),
+        );
+    }
+    if manifest_urls.len() < 2 {
+        return Err(format!(
+            "Publish blocked: only {} verified manifest retrieval URL(s) were available; archive durability requires at least 2.",
+            manifest_urls.len()
+        ));
+    }
     let formatted_manifest_sha256 = format!("sha256:{manifest_sha256}");
     let canonical_channel_link = canonical_channel_link(&naddr);
     let verification_code = manifest_verification_code(&manifest_sha256);
@@ -528,10 +555,10 @@ pub fn publish_teacher_channel(
         .iter()
         .filter(|result| result.accepted)
         .count();
-    if accepted_relay_count == 0 {
-        return Err(
-            "Nostr event was rejected or unreachable on every configured relay.".to_string(),
-        );
+    if accepted_relay_count < 2 {
+        return Err(format!(
+            "Publish blocked: {accepted_relay_count} relay(s) accepted the channel event; archive durability requires at least 2 accepted Nostr relays."
+        ));
     }
 
     upsert_publisher_channel(
@@ -551,7 +578,7 @@ pub fn publish_teacher_channel(
             post_count,
         },
     )?;
-    upsert_published_channel_items(&connection, &new_items)?;
+    upsert_published_channel_items(&connection, &channel_items)?;
 
     connection
         .execute(
@@ -1406,7 +1433,8 @@ fn fetch_published_channel_items(
     let mut statement = connection
         .prepare(
             "SELECT id, channel_id, item_type, title, content_type, description,
-                    origin_url, retrieval_url, sha256, size_bytes, mime_type, published_at
+                    origin_url, retrieval_url, retrieval_refs_json, sha256, size_bytes,
+                    mime_type, published_at
              FROM publisher_channel_items
              WHERE channel_id = ?1
              ORDER BY published_at ASC, title ASC",
@@ -1431,10 +1459,11 @@ fn published_channel_item_from_row(
         description: row.get(5)?,
         origin_url: row.get(6)?,
         retrieval_url: row.get(7)?,
-        sha256: row.get(8)?,
-        size_bytes: row.get(9)?,
-        mime_type: row.get(10)?,
-        published_at: row.get(11)?,
+        retrieval_refs: serde_json::from_str(&row.get::<_, String>(8)?).unwrap_or_default(),
+        sha256: row.get(9)?,
+        size_bytes: row.get(10)?,
+        mime_type: row.get(11)?,
+        published_at: row.get(12)?,
     })
 }
 
@@ -1447,13 +1476,14 @@ fn upsert_published_channel_items(
             .execute(
                 "INSERT INTO publisher_channel_items
                  (id, channel_id, item_type, title, content_type, description, origin_url,
-                  retrieval_url, sha256, size_bytes, mime_type, published_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                  retrieval_url, retrieval_refs_json, sha256, size_bytes, mime_type, published_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                  ON CONFLICT(id) DO UPDATE SET
                    title = excluded.title,
                    description = excluded.description,
                    origin_url = excluded.origin_url,
                    retrieval_url = excluded.retrieval_url,
+                   retrieval_refs_json = excluded.retrieval_refs_json,
                    sha256 = excluded.sha256,
                    size_bytes = excluded.size_bytes,
                    mime_type = excluded.mime_type,
@@ -1467,6 +1497,7 @@ fn upsert_published_channel_items(
                     item.description,
                     item.origin_url,
                     item.retrieval_url,
+                    serde_json::to_string(&item.retrieval_refs).map_err(|error| error.to_string())?,
                     item.sha256,
                     item.size_bytes,
                     item.mime_type,
@@ -1496,6 +1527,7 @@ fn channel_item_from_blob(
         description: blob.description,
         origin_url: blob.url.clone(),
         retrieval_url: Some(blob.url),
+        retrieval_refs: blob.retrieval_refs,
         sha256: blob.sha256,
         size_bytes: Some(blob.size_bytes),
         mime_type: Some(blob.mime_type),
@@ -1545,11 +1577,233 @@ fn channel_item_from_post(
         description: Some(post.body.clone()),
         origin_url,
         retrieval_url: None,
+        retrieval_refs: Vec::new(),
         sha256: post_hash,
         size_bytes: Some(post.body.len() as i64),
         mime_type: Some("text/plain; charset=utf-8".to_string()),
         published_at: published_at.to_string(),
     }
+}
+
+fn repair_and_verify_channel_media_items(
+    client: &Client,
+    keys: &PublisherKeys,
+    blossom_servers: &[BlossomServerConfig],
+    ipfs_mirror: &ArchiveMirrorConfig,
+    items: Vec<PublishedChannelItem>,
+    blossom_results: &mut Vec<BlossomUploadResult>,
+) -> Result<Vec<PublishedChannelItem>, String> {
+    items
+        .into_iter()
+        .map(|item| {
+            if item.item_type == "media" {
+                repair_and_verify_media_item(
+                    client,
+                    keys,
+                    blossom_servers,
+                    ipfs_mirror,
+                    item,
+                    blossom_results,
+                )
+            } else {
+                Ok(item)
+            }
+        })
+        .collect()
+}
+
+fn repair_and_verify_media_item(
+    client: &Client,
+    keys: &PublisherKeys,
+    blossom_servers: &[BlossomServerConfig],
+    ipfs_mirror: &ArchiveMirrorConfig,
+    mut item: PublishedChannelItem,
+    blossom_results: &mut Vec<BlossomUploadResult>,
+) -> Result<PublishedChannelItem, String> {
+    let expected_hash = normalized_sha256(&item.sha256)
+        .ok_or_else(|| format!("{} does not have a valid SHA-256 hash.", item.title))?;
+    let mime_type = item
+        .mime_type
+        .clone()
+        .unwrap_or_else(|| mime_type_for_path(Path::new(&item.origin_url), &item.content_type));
+    let size_bytes = item.size_bytes.unwrap_or_default().max(0);
+    let verified_blossom_urls =
+        verified_blossom_urls_for_item(client, &item.retrieval_refs, &expected_hash);
+    let verified_ipfs = verified_ipfs_ref_for_item(
+        client,
+        &item.retrieval_refs,
+        &expected_hash,
+        ipfs_mirror.gateway_url.as_deref(),
+    );
+
+    if verified_blossom_urls.len() >= 2 && verified_ipfs.is_some() {
+        item.retrieval_refs = media_retrieval_refs(
+            &verified_blossom_urls,
+            verified_ipfs.as_ref().map(|(cid, gateway)| (cid.as_str(), gateway.as_str())),
+            &expected_hash,
+            size_bytes,
+            &mime_type,
+        );
+        item.retrieval_url = verified_blossom_urls.first().cloned();
+        item.origin_url = item
+            .retrieval_url
+            .clone()
+            .unwrap_or_else(|| item.origin_url.clone());
+        return Ok(item);
+    }
+
+    let data = fetch_existing_media_bytes(client, &item, &expected_hash)?;
+    let extension = extension_for_content_type(&item.content_type);
+    let upload =
+        upload_blob_to_servers(client, &data, &mime_type, extension, blossom_servers, keys);
+    blossom_results.extend(upload.results);
+    if upload.urls.len() < 2 {
+        return Err(format!(
+            "Publish blocked while repairing \"{}\": {} verified Blossom media copy/copies were available; archive durability requires at least 2.",
+            item.title,
+            upload.urls.len()
+        ));
+    }
+    let ipfs_pin = pin_bytes_to_ipfs(
+        client,
+        &data,
+        &format!(
+            "{}.{}",
+            safe_path_segment(&item.title),
+            extension_for_content_type(&item.content_type)
+        ),
+        &mime_type,
+        &expected_hash,
+        ipfs_mirror,
+    )?;
+    let gateway_base = ipfs_mirror
+        .gateway_url
+        .as_deref()
+        .unwrap_or(ipfs_pin.url.as_str());
+    item.retrieval_refs = media_retrieval_refs(
+        &upload.urls,
+        Some((&ipfs_pin.cid, gateway_base)),
+        &expected_hash,
+        data.len() as i64,
+        &mime_type,
+    );
+    item.retrieval_url = upload.first_url.clone();
+    if let Some(url) = upload.first_url {
+        item.origin_url = url;
+    }
+    item.size_bytes = Some(data.len() as i64);
+    item.mime_type = Some(mime_type);
+
+    Ok(item)
+}
+
+fn verified_blossom_urls_for_item(
+    client: &Client,
+    refs: &[RetrievalRef],
+    expected_sha256: &str,
+) -> Vec<String> {
+    let mut urls = Vec::new();
+    for retrieval_ref in refs {
+        if !matches!(retrieval_ref.kind.as_str(), "direct-url" | "enclosure-url")
+            || retrieval_ref.service.as_deref() != Some("blossom")
+        {
+            continue;
+        }
+        let Some(url) = retrieval_ref.url.as_ref() else {
+            continue;
+        };
+        if urls.iter().any(|existing| existing == url) {
+            continue;
+        }
+        if verify_blob_url(client, url, expected_sha256).is_ok() {
+            urls.push(url.clone());
+        }
+    }
+    urls
+}
+
+fn verified_ipfs_ref_for_item(
+    client: &Client,
+    refs: &[RetrievalRef],
+    expected_sha256: &str,
+    fallback_gateway_url: Option<&str>,
+) -> Option<(String, String)> {
+    for retrieval_ref in refs {
+        if retrieval_ref.kind != "ipfs-cid" {
+            continue;
+        }
+        let Some(cid) = retrieval_ref.cid.as_ref() else {
+            continue;
+        };
+        let Some(gateway_url) = retrieval_ref
+            .gateway_url
+            .as_deref()
+            .or(fallback_gateway_url)
+        else {
+            continue;
+        };
+        let url = ipfs_gateway_url(gateway_url, cid);
+        if verify_blob_url(client, &url, expected_sha256).is_ok() {
+            return Some((cid.clone(), gateway_url.to_string()));
+        }
+    }
+    None
+}
+
+fn fetch_existing_media_bytes(
+    client: &Client,
+    item: &PublishedChannelItem,
+    expected_sha256: &str,
+) -> Result<Vec<u8>, String> {
+    let mut candidates = item
+        .retrieval_refs
+        .iter()
+        .filter(|retrieval_ref| matches!(retrieval_ref.kind.as_str(), "direct-url" | "enclosure-url"))
+        .filter_map(|retrieval_ref| retrieval_ref.url.clone())
+        .collect::<Vec<_>>();
+    if let Some(retrieval_url) = item.retrieval_url.as_ref() {
+        candidates.push(retrieval_url.clone());
+    }
+    if is_safe_http_url(&item.origin_url) {
+        candidates.push(item.origin_url.clone());
+    }
+    let mut deduped = Vec::new();
+    for candidate in candidates {
+        if is_safe_http_url(&candidate) && !deduped.iter().any(|url| url == &candidate) {
+            deduped.push(candidate);
+        }
+    }
+
+    let mut attempts = Vec::new();
+    for url in &deduped {
+        match client.get(url).send() {
+            Ok(response) if response.status().is_success() => match response.bytes() {
+                Ok(bytes) => {
+                    let data = bytes.to_vec();
+                    let actual = sha256_hex(&data);
+                    if actual == expected_sha256 {
+                        return Ok(data);
+                    }
+                    attempts.push(format!(
+                        "{url}: hash mismatch, expected sha256:{expected_sha256}, got sha256:{actual}"
+                    ));
+                }
+                Err(error) => attempts.push(format!("{url}: could not read bytes: {error}")),
+            },
+            Ok(response) => attempts.push(format!("{url}: HTTP {}", response.status())),
+            Err(error) => attempts.push(format!("{url}: {error}")),
+        }
+    }
+
+    Err(format!(
+        "Publish blocked: historical media item \"{}\" could not be repaired. Tried: {}",
+        item.title,
+        if attempts.is_empty() {
+            "no usable HTTP retrieval URLs were stored".to_string()
+        } else {
+            attempts.join("; ")
+        }
+    ))
 }
 
 fn clip_publish_text(value: &str, max_chars: usize) -> String {
@@ -1643,6 +1897,7 @@ fn publish_lesson_blob(
     client: &Client,
     draft: &PublishedLessonDraft,
     blossom_servers: &[BlossomServerConfig],
+    ipfs_mirror: &ArchiveMirrorConfig,
     keys: &PublisherKeys,
     blossom_results: &mut Vec<BlossomUploadResult>,
 ) -> Result<PublishedBlob, String> {
@@ -1663,6 +1918,30 @@ fn publish_lesson_blob(
     let upload =
         upload_blob_to_servers(client, &data, &mime_type, extension, blossom_servers, keys);
     blossom_results.extend(upload.results);
+    if upload.urls.len() < 2 {
+        return Err(format!(
+            "Publish blocked for \"{title}\": {} verified Blossom media copy/copies were available; archive durability requires at least 2.",
+            upload.urls.len()
+        ));
+    }
+    let ipfs_pin = pin_bytes_to_ipfs(
+        client,
+        &data,
+        &format!("{}.{}", safe_path_segment(&title), safe_extension(extension)),
+        &mime_type,
+        &sha256,
+        ipfs_mirror,
+    )?;
+    let retrieval_refs = media_retrieval_refs(
+        &upload.urls,
+        Some((
+            &ipfs_pin.cid,
+            ipfs_mirror.gateway_url.as_deref().unwrap_or(ipfs_pin.url.as_str()),
+        )),
+        &sha256,
+        data.len() as i64,
+        &mime_type,
+    );
     let url = upload
         .first_url
         .ok_or_else(|| format!("Upload failed for \"{title}\" on every Blossom server."))?;
@@ -1675,6 +1954,7 @@ fn publish_lesson_blob(
             .clone()
             .filter(|value| !value.trim().is_empty()),
         url,
+        retrieval_refs,
         sha256,
         size_bytes: data.len() as i64,
         mime_type,
@@ -1685,6 +1965,12 @@ struct BlobUploadAggregate {
     first_url: Option<String>,
     urls: Vec<String>,
     results: Vec<BlossomUploadResult>,
+}
+
+#[derive(Debug, Clone)]
+struct IpfsPin {
+    cid: String,
+    url: String,
 }
 
 fn upload_blob_to_servers(
@@ -1723,19 +2009,34 @@ fn upload_blob_to_servers(
         match request.send() {
             Ok(response) if response.status().is_success() => {
                 let elapsed_ms = elapsed_millis(started);
-                if first_url.is_none() {
-                    first_url = Some(blob_url.clone());
+                match verify_blob_url(client, &blob_url, &hash) {
+                    Ok(()) => {
+                        if first_url.is_none() {
+                            first_url = Some(blob_url.clone());
+                        }
+                        urls.push(blob_url.clone());
+                        results.push(BlossomUploadResult {
+                            server_url: server.url.clone(),
+                            hash: format!("sha256:{hash}"),
+                            url: Some(blob_url),
+                            uploaded: true,
+                            elapsed_ms: Some(elapsed_ms),
+                            bytes_per_second: bytes_per_second(data.len() as i64, elapsed_ms),
+                            message: "Blob stored and SHA-256 verified by server.".to_string(),
+                        });
+                    }
+                    Err(error) => {
+                        results.push(BlossomUploadResult {
+                            server_url: server.url.clone(),
+                            hash: format!("sha256:{hash}"),
+                            url: Some(blob_url),
+                            uploaded: false,
+                            elapsed_ms: Some(elapsed_ms),
+                            bytes_per_second: bytes_per_second(data.len() as i64, elapsed_ms),
+                            message: format!("Upload accepted, but verification failed: {error}"),
+                        });
+                    }
                 }
-                urls.push(blob_url.clone());
-                results.push(BlossomUploadResult {
-                    server_url: server.url.clone(),
-                    hash: format!("sha256:{hash}"),
-                    url: Some(blob_url),
-                    uploaded: true,
-                    elapsed_ms: Some(elapsed_ms),
-                    bytes_per_second: bytes_per_second(data.len() as i64, elapsed_ms),
-                    message: "Blob stored by server.".to_string(),
-                });
             }
             Ok(response) => {
                 let elapsed_ms = elapsed_millis(started);
@@ -1776,6 +2077,114 @@ fn upload_blob_to_servers(
     }
 }
 
+fn verify_blob_url(client: &Client, url: &str, expected_sha256: &str) -> Result<(), String> {
+    if !is_safe_http_url(url) {
+        return Err("Blob URLs must be http or https.".to_string());
+    }
+    let expected = expected_sha256
+        .strip_prefix("sha256:")
+        .unwrap_or(expected_sha256)
+        .to_ascii_lowercase();
+    let response = client.get(url).send().map_err(|error| error.to_string())?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {status}"));
+    }
+    let body = response
+        .bytes()
+        .map_err(|error| format!("could not read blob: {error}"))?;
+    let actual = sha256_hex(body.as_ref());
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "hash mismatch, expected sha256:{expected}, got sha256:{actual}"
+        ))
+    }
+}
+
+fn pin_bytes_to_ipfs(
+    client: &Client,
+    data: &[u8],
+    file_name: &str,
+    mime_type: &str,
+    expected_sha256: &str,
+    mirror: &ArchiveMirrorConfig,
+) -> Result<IpfsPin, String> {
+    let gateway_url = mirror
+        .gateway_url
+        .as_ref()
+        .ok_or_else(|| "Local IPFS publishing needs an HTTP gateway URL.".to_string())?;
+    let add_url = format!(
+        "{}/api/v0/add?pin=true&cid-version=1&wrap-with-directory=false",
+        mirror.url.trim_end_matches('/')
+    );
+    let part = multipart::Part::bytes(data.to_vec())
+        .file_name(file_name.to_string())
+        .mime_str(mime_type)
+        .map_err(|error| error.to_string())?;
+    let form = multipart::Form::new().part("file", part);
+    let response = client
+        .post(&add_url)
+        .multipart(form)
+        .send()
+        .map_err(|error| error.to_string())?;
+    let status = response.status();
+    let body = response.text().map_err(|error| error.to_string())?;
+    if !status.is_success() {
+        return Err(format!(
+            "IPFS add failed with HTTP {status}. {}",
+            clip_text(&body, 160)
+        ));
+    }
+    let cid = parse_ipfs_add_cid(&body)
+        .ok_or_else(|| "IPFS add response did not include a CID.".to_string())?;
+    let url = ipfs_gateway_url(gateway_url, &cid);
+    verify_blob_url(client, &url, expected_sha256)
+        .map_err(|error| format!("IPFS gateway verification failed for {cid}: {error}"))?;
+
+    Ok(IpfsPin { cid, url })
+}
+
+fn media_retrieval_refs(
+    blossom_urls: &[String],
+    ipfs: Option<(&str, &str)>,
+    sha256: &str,
+    size_bytes: i64,
+    mime_type: &str,
+) -> Vec<RetrievalRef> {
+    let formatted_hash = format!("sha256:{sha256}");
+    let size_bytes = (size_bytes > 0).then_some(size_bytes);
+    let mut refs = blossom_urls
+        .iter()
+        .map(|url| RetrievalRef {
+            kind: "direct-url".to_string(),
+            url: Some(url.clone()),
+            service: Some("blossom".to_string()),
+            sha256: Some(formatted_hash.clone()),
+            size_bytes,
+            mime_type: Some(mime_type.to_string()),
+            media_type: Some(mime_type.to_string()),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+
+    if let Some((cid, gateway_url)) = ipfs {
+        refs.push(RetrievalRef {
+            kind: "ipfs-cid".to_string(),
+            cid: Some(cid.to_string()),
+            gateway_url: Some(gateway_url.to_string()),
+            sha256: Some(formatted_hash),
+            size_bytes,
+            mime_type: Some(mime_type.to_string()),
+            media_type: Some(mime_type.to_string()),
+            ..Default::default()
+        });
+    }
+
+    refs
+}
+
 fn publish_archive_mirrors(
     client: &Client,
     manifest_data: &[u8],
@@ -1800,108 +2209,24 @@ fn publish_manifest_to_ipfs(
     manifest_sha256: &str,
     mirror: &ArchiveMirrorConfig,
 ) -> ArchiveMirrorResult {
-    let Some(gateway_url) = mirror.gateway_url.as_ref() else {
-        return ArchiveMirrorResult {
+    match pin_bytes_to_ipfs(
+        client,
+        manifest_data,
+        "duroos-channel-manifest.json",
+        "application/json",
+        manifest_sha256,
+        mirror,
+    ) {
+        Ok(pin) => ArchiveMirrorResult {
             service: mirror.service.clone(),
             endpoint_url: mirror.url.clone(),
-            url: None,
-            cid: None,
-            archived: false,
-            verified: false,
-            message: "IPFS archive mirror needs an HTTP gateway URL.".to_string(),
-        };
-    };
-    let add_url = format!(
-        "{}/api/v0/add?pin=true&cid-version=1&wrap-with-directory=false",
-        mirror.url.trim_end_matches('/')
-    );
-    let part = match multipart::Part::bytes(manifest_data.to_vec())
-        .file_name("duroos-channel-manifest.json")
-        .mime_str("application/json")
-    {
-        Ok(part) => part,
-        Err(error) => {
-            return ArchiveMirrorResult {
-                service: mirror.service.clone(),
-                endpoint_url: mirror.url.clone(),
-                url: None,
-                cid: None,
-                archived: false,
-                verified: false,
-                message: error.to_string(),
-            }
-        }
-    };
-    let form = multipart::Form::new().part("file", part);
-
-    match client.post(&add_url).multipart(form).send() {
-        Ok(response) if response.status().is_success() => {
-            let body = match response.text() {
-                Ok(body) => body,
-                Err(error) => {
-                    return ArchiveMirrorResult {
-                        service: mirror.service.clone(),
-                        endpoint_url: mirror.url.clone(),
-                        url: None,
-                        cid: None,
-                        archived: true,
-                        verified: false,
-                        message: format!(
-                            "IPFS add succeeded but response could not be read: {error}"
-                        ),
-                    }
-                }
-            };
-            let Some(cid) = parse_ipfs_add_cid(&body) else {
-                return ArchiveMirrorResult {
-                    service: mirror.service.clone(),
-                    endpoint_url: mirror.url.clone(),
-                    url: None,
-                    cid: None,
-                    archived: true,
-                    verified: false,
-                    message: "IPFS add response did not include a CID.".to_string(),
-                };
-            };
-            let url = format!("{}/{}", gateway_url.trim_end_matches('/'), cid);
-            match verify_manifest_url(client, &url, manifest_sha256) {
-                Ok(()) => ArchiveMirrorResult {
-                    service: mirror.service.clone(),
-                    endpoint_url: mirror.url.clone(),
-                    url: Some(url),
-                    cid: Some(cid),
-                    archived: true,
-                    verified: true,
-                    message: "Manifest pinned and verified through the configured IPFS gateway."
-                        .to_string(),
-                },
-                Err(error) => ArchiveMirrorResult {
-                    service: mirror.service.clone(),
-                    endpoint_url: mirror.url.clone(),
-                    url: Some(url),
-                    cid: Some(cid),
-                    archived: true,
-                    verified: false,
-                    message: format!("Manifest pinned, but gateway verification failed: {error}"),
-                },
-            }
-        }
-        Ok(response) => {
-            let status = response.status();
-            let body = response.text().unwrap_or_default();
-            ArchiveMirrorResult {
-                service: mirror.service.clone(),
-                endpoint_url: mirror.url.clone(),
-                url: None,
-                cid: None,
-                archived: false,
-                verified: false,
-                message: format!(
-                    "IPFS add failed with HTTP {status}. {}",
-                    clip_text(&body, 160)
-                ),
-            }
-        }
+            url: Some(pin.url),
+            cid: Some(pin.cid),
+            archived: true,
+            verified: true,
+            message: "Manifest pinned and verified through the configured IPFS gateway."
+                .to_string(),
+        },
         Err(error) => ArchiveMirrorResult {
             service: mirror.service.clone(),
             endpoint_url: mirror.url.clone(),
@@ -1909,7 +2234,7 @@ fn publish_manifest_to_ipfs(
             cid: None,
             archived: false,
             verified: false,
-            message: error.to_string(),
+            message: error,
         },
     }
 }
@@ -1984,6 +2309,15 @@ fn parse_ipfs_add_cid(body: &str) -> Option<String> {
         })
 }
 
+fn ipfs_gateway_url(gateway_url: &str, cid: &str) -> String {
+    let base = gateway_url.trim().trim_end_matches('/');
+    if base.ends_with("/ipfs") {
+        format!("{base}/{cid}")
+    } else {
+        format!("{base}/ipfs/{cid}")
+    }
+}
+
 fn signed_channel_manifest(input: SignedManifestInput<'_>) -> Result<(String, String), String> {
     let SignedManifestInput {
         profile,
@@ -2007,7 +2341,7 @@ fn signed_channel_manifest(input: SignedManifestInput<'_>) -> Result<(String, St
         .collect::<Vec<_>>();
     let lessons = items
         .iter()
-        .map(|item| {
+        .map(|item| -> Result<Value, String> {
             let mut lesson = json!({
                 "title": item.title,
                 "contentType": item.content_type,
@@ -2030,20 +2364,27 @@ fn signed_channel_manifest(input: SignedManifestInput<'_>) -> Result<(String, St
             });
 
             if let Some(retrieval_url) = &item.retrieval_url {
-                lesson["retrievalRefs"] = json!([{
-                    "kind": "direct-url",
-                    "url": retrieval_url,
-                    "service": "blossom",
-                    "sha256": format!("sha256:{}", item.sha256),
-                    "sizeBytes": item.size_bytes.unwrap_or_default(),
-                    "mimeType": item.mime_type.clone().unwrap_or_else(|| "application/octet-stream".to_string()),
-                    "mediaType": item.mime_type.clone().unwrap_or_else(|| "application/octet-stream".to_string()),
-                }]);
+                let refs = if item.retrieval_refs.is_empty() {
+                    vec![RetrievalRef {
+                        kind: "direct-url".to_string(),
+                        url: Some(retrieval_url.clone()),
+                        service: Some("blossom".to_string()),
+                        sha256: Some(format!("sha256:{}", item.sha256)),
+                        size_bytes: item.size_bytes,
+                        mime_type: item.mime_type.clone(),
+                        media_type: item.mime_type.clone(),
+                        ..Default::default()
+                    }]
+                } else {
+                    item.retrieval_refs.clone()
+                };
+                lesson["retrievalRefs"] =
+                    serde_json::to_value(refs).map_err(|error| error.to_string())?;
             }
 
-            lesson
+            Ok(lesson)
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
     let mut manifest_value = json!({
         "schemaVersion": 2,
         "exportedAt": published_at,
@@ -2893,6 +3234,39 @@ fn normalize_archive_mirrors(
     Ok(dedupe_archive_mirrors(normalized))
 }
 
+fn enforce_archive_publish_configuration(
+    relays: &[NostrRelayConfig],
+    blossom_servers: &[BlossomServerConfig],
+    archive_mirrors: &[ArchiveMirrorConfig],
+) -> Result<(), String> {
+    if relays.len() < 2 {
+        return Err(
+            "Archive durability requires at least 2 configured Nostr relays before publishing."
+                .to_string(),
+        );
+    }
+    if blossom_servers.len() < 2 {
+        return Err(
+            "Archive durability requires at least 2 configured Blossom servers before publishing."
+                .to_string(),
+        );
+    }
+    required_ipfs_mirror(archive_mirrors).map(|_| ())
+}
+
+fn required_ipfs_mirror(
+    archive_mirrors: &[ArchiveMirrorConfig],
+) -> Result<ArchiveMirrorConfig, String> {
+    archive_mirrors
+        .iter()
+        .find(|mirror| mirror.service == "ipfs-http-api" && mirror.gateway_url.is_some())
+        .cloned()
+        .ok_or_else(|| {
+            "Archive durability requires a local IPFS HTTP API and configured gateway before publishing."
+                .to_string()
+        })
+}
+
 fn normalize_archive_service(service: &str, url: &str) -> String {
     let service = service.trim().to_ascii_lowercase();
     match service.as_str() {
@@ -3147,6 +3521,15 @@ fn is_safe_archive_identifier(value: &str) -> bool {
 fn looks_like_sha256(value: &str) -> bool {
     let hash = value.strip_prefix("sha256:").unwrap_or(value);
     hash.len() == 64 && hash.chars().all(|character| character.is_ascii_hexdigit())
+}
+
+fn normalized_sha256(value: &str) -> Option<String> {
+    let hash = value.trim().strip_prefix("sha256:").unwrap_or(value.trim());
+    if hash.len() == 64 && hash.chars().all(|character| character.is_ascii_hexdigit()) {
+        Some(hash.to_ascii_lowercase())
+    } else {
+        None
+    }
 }
 
 fn clip_text(value: &str, max: usize) -> String {
