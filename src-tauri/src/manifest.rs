@@ -350,6 +350,32 @@ fn validate_retrieval_refs(prefix: &str, value: &Value, errors: &mut Vec<String>
                 if !looks_like_ipfs_cid(cid) {
                     errors.push(format!("{ref_prefix}.cid must be a valid IPFS CID"));
                 }
+
+                if let Some(gateway_url) = object.get("gatewayUrl").and_then(Value::as_str) {
+                    if !is_safe_http_url(gateway_url) {
+                        errors.push(format!(
+                            "{ref_prefix}.gatewayUrl must be an http or https URL"
+                        ));
+                    }
+                }
+
+                if let Some(hash) = object.get("sha256").and_then(Value::as_str) {
+                    if !looks_like_sha256(hash) {
+                        errors.push(format!("{ref_prefix}.sha256 must be a sha256 hash"));
+                    }
+                }
+
+                if let Some(size_bytes) = object.get("sizeBytes").and_then(Value::as_i64) {
+                    if size_bytes <= 0 {
+                        errors.push(format!("{ref_prefix}.sizeBytes must be positive"));
+                    }
+                }
+
+                if let Some(mime_type) = object.get("mimeType").and_then(Value::as_str) {
+                    if mime_type.trim().is_empty() || mime_type.contains(['\r', '\n']) {
+                        errors.push(format!("{ref_prefix}.mimeType must be a MIME type"));
+                    }
+                }
             }
             "magnet" => {
                 let magnet_uri = object

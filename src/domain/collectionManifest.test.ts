@@ -93,19 +93,39 @@ describe("parseCollectionManifest", () => {
       manifestSha256:
         "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       publishedAt: "2026-06-16T05:00:00.000Z",
-    };
-    manifest.lessons[0].retrievalRefs = [
-      {
-        kind: "direct-url",
-        url: "https://blossom.example/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.mp4",
+  };
+  manifest.lessons[0].retrievalRefs = [
+    {
+      kind: "direct-url",
+      url: "https://blossom.example/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.mp4",
         service: "blossom",
         sha256:
           "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         sizeBytes: 2048,
-        mimeType: "video/mp4",
-        mediaType: "video/mp4",
-      },
-    ];
+      mimeType: "video/mp4",
+      mediaType: "video/mp4",
+    },
+    {
+      kind: "direct-url",
+      url: "https://blossom-two.example/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.mp4",
+      service: "blossom",
+      sha256:
+        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      sizeBytes: 2048,
+      mimeType: "video/mp4",
+      mediaType: "video/mp4",
+    },
+    {
+      kind: "ipfs-cid",
+      cid: "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+      gatewayUrl: "https://gateway.example/ipfs",
+      sha256:
+        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      sizeBytes: 2048,
+      mimeType: "video/mp4",
+      mediaType: "video/mp4",
+    },
+  ];
 
     const report = parseCollectionManifest(manifest);
 

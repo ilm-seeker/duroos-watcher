@@ -37,6 +37,7 @@ const lesson = (
   teacherId: "teacher-test",
   collectionId: "collection-test",
   sourceUrl: `https://example.test/watch/${id}`,
+  retrievalRefs: [],
   thumbnailTone: "emerald",
   mediaFileId,
   provenanceId: `prov-${id}`,

@@ -93,6 +93,10 @@ export type SharedRetrievalRef =
   | {
       kind: "ipfs-cid";
       cid: string;
+      gatewayUrl?: string;
+      sha256?: string;
+      sizeBytes?: number;
+      mimeType?: string;
       mediaType?: string;
     }
   | {
@@ -463,6 +467,41 @@ export const parseCollectionManifest = (
               (typeof retrievalRef.cid !== "string" || !looksLikeIpfsCid(retrievalRef.cid))
             ) {
               errors.push(`${refPrefix}.cid must be a valid IPFS CID`);
+            }
+
+            if (
+              retrievalRef.kind === "ipfs-cid" &&
+              "gatewayUrl" in retrievalRef &&
+              (typeof retrievalRef.gatewayUrl !== "string" ||
+                !isValidHttpUrl(retrievalRef.gatewayUrl))
+            ) {
+              errors.push(`${refPrefix}.gatewayUrl must be an http or https URL`);
+            }
+
+            if (
+              retrievalRef.kind === "ipfs-cid" &&
+              "sha256" in retrievalRef &&
+              (typeof retrievalRef.sha256 !== "string" || !looksLikeHash(retrievalRef.sha256))
+            ) {
+              errors.push(`${refPrefix}.sha256 must be a sha256 hash`);
+            }
+
+            if (
+              retrievalRef.kind === "ipfs-cid" &&
+              "sizeBytes" in retrievalRef &&
+              (typeof retrievalRef.sizeBytes !== "number" || retrievalRef.sizeBytes <= 0)
+            ) {
+              errors.push(`${refPrefix}.sizeBytes must be positive`);
+            }
+
+            if (
+              retrievalRef.kind === "ipfs-cid" &&
+              "mimeType" in retrievalRef &&
+              (typeof retrievalRef.mimeType !== "string" ||
+                retrievalRef.mimeType.trim() === "" ||
+                /[\r\n]/.test(retrievalRef.mimeType))
+            ) {
+              errors.push(`${refPrefix}.mimeType must be a MIME type`);
             }
 
             if (

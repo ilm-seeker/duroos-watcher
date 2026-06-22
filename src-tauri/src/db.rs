@@ -4,8 +4,8 @@ use crate::{
         AppSnapshot, ClearSourceSummary, Collection, DownloadSourceSummary, ImportSummary,
         IngestSummary, Job, Lesson, LessonNote, LiveSession, ManifestValidationReport, MediaFile,
         MediaStorageAudit, MediaStorageCleanup, MediaStorageCleanupRequest, MediaStorageStaleItem,
-        NativePlaybackResult, OpenMediaResult, ProvenanceRecord, RuntimeDiagnostics, Source,
-        SourceCapability, Teacher, TeacherRelay, RetrievalRef, TrustCuratorSummary, TrustedCurator,
+        NativePlaybackResult, OpenMediaResult, ProvenanceRecord, RetrievalRef, RuntimeDiagnostics,
+        Source, SourceCapability, Teacher, TeacherRelay, TrustCuratorSummary, TrustedCurator,
         WatchState,
     },
     publisher,
@@ -174,6 +174,13 @@ struct DirectDownloadProgress<'a> {
     started_at: &'a str,
     total_bytes: Option<i64>,
     last_recorded_bytes: i64,
+}
+
+struct DownloadMediaContext<'a> {
+    data_dir: &'a Path,
+    cookies_file: Option<&'a Path>,
+    expected_content_hash: Option<&'a str>,
+    progress: Option<DirectDownloadProgress<'a>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1682,19 +1689,21 @@ pub fn download_source_media(
                     &mut yt_dlp,
                     lesson,
                     &lesson_dir,
-                    &data_dir,
-                    yt_dlp_cookies.as_deref(),
-                    lesson.expected_content_hash.as_deref(),
-                    Some(DirectDownloadProgress {
-                        connection: &connection,
-                        job_id: &lesson_job_id,
-                        source_id: &source_id,
-                        lesson_id: &lesson.id,
-                        label: &lesson_label,
-                        started_at: &lesson_started_at,
-                        total_bytes: None,
-                        last_recorded_bytes: 0,
-                    }),
+                    DownloadMediaContext {
+                        data_dir: &data_dir,
+                        cookies_file: yt_dlp_cookies.as_deref(),
+                        expected_content_hash: lesson.expected_content_hash.as_deref(),
+                        progress: Some(DirectDownloadProgress {
+                            connection: &connection,
+                            job_id: &lesson_job_id,
+                            source_id: &source_id,
+                            lesson_id: &lesson.id,
+                            label: &lesson_label,
+                            started_at: &lesson_started_at,
+                            total_bytes: None,
+                            last_recorded_bytes: 0,
+                        }),
+                    },
                 )
             })
             .and_then(|media_path| {
@@ -5169,10 +5178,7 @@ fn download_lesson_media(
     yt_dlp: &mut Option<YtDlpCommand>,
     lesson: &DownloadLesson,
     lesson_dir: &Path,
-    data_dir: &Path,
-    cookies_file: Option<&Path>,
-    expected_content_hash: Option<&str>,
-    progress: Option<DirectDownloadProgress<'_>>,
+    context: DownloadMediaContext<'_>,
 ) -> Result<PathBuf, String> {
     if !is_file_backed_content_type(&lesson.content_type) {
         return Err(
@@ -5187,8 +5193,8 @@ fn download_lesson_media(
             &candidates,
             lesson_dir,
             &lesson.content_type,
-            expected_content_hash,
-            progress,
+            context.expected_content_hash,
+            context.progress,
         );
     }
 
@@ -5203,8 +5209,8 @@ fn download_lesson_media(
             &[candidate],
             lesson_dir,
             &lesson.content_type,
-            expected_content_hash,
-            progress,
+            context.expected_content_hash,
+            context.progress,
         );
     }
 
@@ -5221,8 +5227,8 @@ fn download_lesson_media(
         &command,
         &lesson.source_url,
         lesson_dir,
-        data_dir,
-        cookies_file,
+        context.data_dir,
+        context.cookies_file,
         &lesson.content_type,
     )
 }
@@ -5247,9 +5253,10 @@ fn retrieval_download_candidates(lesson: &DownloadLesson) -> Vec<RetrievalDownlo
                 });
             }
             "ipfs-cid" => {
-                let (Some(cid), Some(gateway_url)) =
-                    (retrieval_ref.cid.as_ref(), retrieval_ref.gateway_url.as_ref())
-                else {
+                let (Some(cid), Some(gateway_url)) = (
+                    retrieval_ref.cid.as_ref(),
+                    retrieval_ref.gateway_url.as_ref(),
+                ) else {
                     continue;
                 };
                 if !is_safe_http_url(gateway_url) {
@@ -5352,6 +5359,7 @@ fn download_direct_file(
     download_direct_file_with_progress(client, source_url, lesson_dir, content_type, None)
 }
 
+#[cfg(test)]
 fn download_direct_file_with_progress(
     client: &Client,
     source_url: &str,
@@ -8385,6 +8393,24 @@ mod tests {
                             "kind": "enclosure-url",
                             "url": "https://example.org/opening.mp4",
                             "mediaType": "video/mp4"
+                        },
+                        {
+                            "kind": "direct-url",
+                            "url": "https://blossom.example/opening.mp4",
+                            "service": "blossom",
+                            "sha256": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                            "sizeBytes": 2048,
+                            "mimeType": "video/mp4",
+                            "mediaType": "video/mp4"
+                        },
+                        {
+                            "kind": "ipfs-cid",
+                            "cid": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+                            "gatewayUrl": "https://gateway.example/ipfs",
+                            "sha256": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                            "sizeBytes": 2048,
+                            "mimeType": "video/mp4",
+                            "mediaType": "video/mp4"
                         }
                     ],
                     "contentHashes": [
@@ -8508,6 +8534,29 @@ mod tests {
         assert_eq!(first.id, second.id);
         assert_eq!(trusted_curators.len(), 1);
         assert_eq!(trusted_curators[0].display_name, "Updated Curator");
+    }
+
+    #[test]
+    fn retrieval_refs_backfill_uses_existing_lesson_source_url() {
+        let connection = test_connection();
+        insert_test_lesson(&connection);
+
+        backfill_retrieval_refs_json(&connection).unwrap();
+        let refs_json: String = connection
+            .query_row(
+                "SELECT retrieval_refs_json FROM lessons WHERE id = 'lesson-test'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let refs = parse_retrieval_refs_json(&refs_json);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].kind, "direct-url");
+        assert_eq!(
+            refs[0].url.as_deref(),
+            Some("https://example.test/lesson.mp4")
+        );
     }
 
     #[test]
@@ -9021,6 +9070,24 @@ mod tests {
                             "kind": "enclosure-url",
                             "url": "https://example.org/opening.mp4",
                             "mediaType": "video/mp4"
+                        },
+                        {
+                            "kind": "direct-url",
+                            "url": "https://blossom.example/opening.mp4",
+                            "service": "blossom",
+                            "sha256": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                            "sizeBytes": 2048,
+                            "mimeType": "video/mp4",
+                            "mediaType": "video/mp4"
+                        },
+                        {
+                            "kind": "ipfs-cid",
+                            "cid": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+                            "gatewayUrl": "https://gateway.example/ipfs",
+                            "sha256": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                            "sizeBytes": 2048,
+                            "mimeType": "video/mp4",
+                            "mediaType": "video/mp4"
                         }
                     ],
                     "contentHashes": [
@@ -9052,7 +9119,56 @@ mod tests {
             parsed.lessons[0].source_url,
             "https://example.org/opening.mp4"
         );
+        assert_eq!(parsed.lessons[0].retrieval_refs.len(), 3);
+        assert_eq!(
+            parsed.lessons[0].retrieval_refs[2].cid.as_deref(),
+            Some("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+        );
         assert_eq!(parsed.lessons[0].duration_seconds, Some(240));
+    }
+
+    #[test]
+    fn retrieval_candidates_try_http_before_ipfs_gateway() {
+        let lesson = DownloadLesson {
+            id: "lesson-ipfs".to_string(),
+            title: "IPFS fallback".to_string(),
+            content_type: "video".to_string(),
+            source_url: "https://youtube.com/watch?v=abc123".to_string(),
+            retrieval_refs: vec![
+                RetrievalRef {
+                    kind: "direct-url".to_string(),
+                    url: Some("https://blossom.example/opening.mp4".to_string()),
+                    service: Some("blossom".to_string()),
+                    ..Default::default()
+                },
+                RetrievalRef {
+                    kind: "ipfs-cid".to_string(),
+                    cid: Some(
+                        "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi".to_string(),
+                    ),
+                    gateway_url: Some("https://gateway.example/ipfs".to_string()),
+                    ..Default::default()
+                },
+            ],
+            expected_content_hash: Some(
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_string(),
+            ),
+            has_invalid_media_record: false,
+        };
+
+        let candidates = retrieval_download_candidates(&lesson);
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].url, "https://blossom.example/opening.mp4");
+        assert_eq!(
+            candidates[1].url,
+            "https://gateway.example/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+        );
+        assert_eq!(
+            candidates[1].file_name.as_deref(),
+            Some("ipfs-bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi.mp4")
+        );
     }
 
     #[test]

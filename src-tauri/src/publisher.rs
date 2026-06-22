@@ -5,8 +5,8 @@ use crate::{
         ChannelPublishResult, CreatePublisherProfileRequest, IngestSummary, NostrChannelPreview,
         NostrRelayConfig, NostrRelayPublishResult, PublishTeacherChannelRequest,
         PublishedChannelItem, PublishedLessonDraft, PublishedPostDraft, PublisherChannel,
-        PublisherEndpointTestReport, PublisherEndpointTestRequest, PublisherProfile,
-        RetrievalRef, SavePublisherChannelRequest, SyntheticPublisherProbeRequest,
+        PublisherEndpointTestReport, PublisherEndpointTestRequest, PublisherProfile, RetrievalRef,
+        SavePublisherChannelRequest, SyntheticPublisherProbeRequest,
     },
 };
 use argon2::Argon2;
@@ -477,9 +477,9 @@ pub fn publish_teacher_channel(
         .iter()
         .filter(|result| !result.verified)
         .count();
-    let verified_ipfs_manifest = archive_results.iter().any(|result| {
-        result.service == "ipfs-http-api" && result.verified && result.cid.is_some()
-    });
+    let verified_ipfs_manifest = archive_results
+        .iter()
+        .any(|result| result.service == "ipfs-http-api" && result.verified && result.cid.is_some());
     if !verified_ipfs_manifest {
         return Err(
             "Publish blocked: the signed manifest was not verified through local IPFS and the configured gateway."
@@ -504,18 +504,18 @@ pub fn publish_teacher_channel(
         .map(|server| server.url.clone())
         .collect::<Vec<_>>();
     let curator_public_key_fingerprint = public_key_fingerprint(&profile.curator_public_key);
-    let invite_text = channel_invite_text(
-        &channel_title,
-        &profile.display_name,
-        &canonical_channel_link,
-        &formatted_manifest_sha256,
-        &verification_code,
-        &curator_public_key_fingerprint,
-        &relay_urls,
-        &manifest_urls,
-        &blossom_server_urls,
-        &archive_mirror_urls,
-    );
+    let invite_text = channel_invite_text(ChannelInviteTextInput {
+        channel_title: &channel_title,
+        teacher_display_name: &profile.display_name,
+        canonical_channel_link: &canonical_channel_link,
+        manifest_sha256: &formatted_manifest_sha256,
+        verification_code: &verification_code,
+        curator_public_key_fingerprint: &curator_public_key_fingerprint,
+        relays: &relay_urls,
+        manifest_urls: &manifest_urls,
+        blossom_servers: &blossom_server_urls,
+        archive_mirrors: &archive_mirror_urls,
+    });
     let event_content = json!({
         "app": APP_TAG,
         "schemaVersion": 1,
@@ -596,6 +596,12 @@ pub fn publish_teacher_channel(
 
     let mut messages = vec![
         format!(
+            "Archive durability verified: {accepted_relay_count} relay(s), {manifest_count} manifest retrieval URL(s), {blossom_media_copies} Blossom media copy/copies, and {ipfs_media_cids} IPFS media CID(s).",
+            manifest_count = manifest_urls.len(),
+            blossom_media_copies = media_copy_count(&channel_items, "blossom"),
+            ipfs_media_cids = media_copy_count(&channel_items, "ipfs-cid")
+        ),
+        format!(
             "Published {media_count} media item(s) and {post_count} text post(s) in this channel."
         ),
         format!(
@@ -670,8 +676,17 @@ pub fn test_publisher_endpoints(
     );
     let relay_event = endpoint_probe_event(&keys, &profile, &blossom_upload.urls)?;
     let relay_results = publish_event_to_relays(&relay_event, &relays);
-    let storage_ok = blossom_upload.results.iter().any(|result| result.uploaded);
-    let relay_ok = relay_results.iter().any(|result| result.accepted);
+    let storage_ok = blossom_upload
+        .results
+        .iter()
+        .filter(|result| result.uploaded)
+        .count()
+        >= 2;
+    let relay_ok = relay_results
+        .iter()
+        .filter(|result| result.accepted)
+        .count()
+        >= 2;
     let passed = storage_ok && relay_ok;
     let messages = endpoint_test_messages(passed, &blossom_upload.results, &relay_results);
     let tested_at = Utc::now().to_rfc3339();
@@ -746,8 +761,17 @@ pub fn run_synthetic_publisher_probe(
     );
     let relay_event = endpoint_probe_event(&keys, &profile, &blossom_upload.urls)?;
     let relay_results = publish_event_to_relays(&relay_event, &relays);
-    let storage_ok = blossom_upload.results.iter().any(|result| result.uploaded);
-    let relay_ok = relay_results.iter().any(|result| result.accepted);
+    let storage_ok = blossom_upload
+        .results
+        .iter()
+        .filter(|result| result.uploaded)
+        .count()
+        >= 2;
+    let relay_ok = relay_results
+        .iter()
+        .filter(|result| result.accepted)
+        .count()
+        >= 2;
     let passed = storage_ok && relay_ok;
     let mut messages = endpoint_test_messages(passed, &blossom_upload.results, &relay_results);
     messages.insert(
@@ -829,7 +853,7 @@ fn endpoint_test_messages(
         }
     } else {
         messages.push(
-            "A real publish still needs at least one working Blossom server and one accepting Nostr relay."
+            "A real publish needs at least two verified Blossom uploads and two accepting Nostr relays."
                 .to_string(),
         );
     }
@@ -846,7 +870,7 @@ fn endpoint_durability_warning(uploaded_count: usize, accepted_count: usize) -> 
     }
 
     Some(format!(
-        "Durability warning: {uploaded_count} Blossom server(s) and {accepted_count} relay(s) passed. One accepted relay is enough to publish, but use at least two of each before relying on durable distribution."
+        "Durability warning: {uploaded_count} Blossom server(s) and {accepted_count} relay(s) passed. Archive durability requires at least two of each before publishing."
     ))
 }
 
@@ -1497,7 +1521,8 @@ fn upsert_published_channel_items(
                     item.description,
                     item.origin_url,
                     item.retrieval_url,
-                    serde_json::to_string(&item.retrieval_refs).map_err(|error| error.to_string())?,
+                    serde_json::to_string(&item.retrieval_refs)
+                        .map_err(|error| error.to_string())?,
                     item.sha256,
                     item.size_bytes,
                     item.mime_type,
@@ -1639,7 +1664,9 @@ fn repair_and_verify_media_item(
     if verified_blossom_urls.len() >= 2 && verified_ipfs.is_some() {
         item.retrieval_refs = media_retrieval_refs(
             &verified_blossom_urls,
-            verified_ipfs.as_ref().map(|(cid, gateway)| (cid.as_str(), gateway.as_str())),
+            verified_ipfs
+                .as_ref()
+                .map(|(cid, gateway)| (cid.as_str(), gateway.as_str())),
             &expected_hash,
             size_bytes,
             &mime_type,
@@ -1758,7 +1785,9 @@ fn fetch_existing_media_bytes(
     let mut candidates = item
         .retrieval_refs
         .iter()
-        .filter(|retrieval_ref| matches!(retrieval_ref.kind.as_str(), "direct-url" | "enclosure-url"))
+        .filter(|retrieval_ref| {
+            matches!(retrieval_ref.kind.as_str(), "direct-url" | "enclosure-url")
+        })
         .filter_map(|retrieval_ref| retrieval_ref.url.clone())
         .collect::<Vec<_>>();
     if let Some(retrieval_url) = item.retrieval_url.as_ref() {
@@ -1804,6 +1833,22 @@ fn fetch_existing_media_bytes(
             attempts.join("; ")
         }
     ))
+}
+
+fn media_copy_count(items: &[PublishedChannelItem], kind: &str) -> usize {
+    items
+        .iter()
+        .filter(|item| item.item_type == "media")
+        .flat_map(|item| item.retrieval_refs.iter())
+        .filter(|retrieval_ref| match kind {
+            "blossom" => {
+                matches!(retrieval_ref.kind.as_str(), "direct-url" | "enclosure-url")
+                    && retrieval_ref.service.as_deref() == Some("blossom")
+            }
+            "ipfs-cid" => retrieval_ref.kind == "ipfs-cid" && retrieval_ref.cid.is_some(),
+            _ => false,
+        })
+        .count()
 }
 
 fn clip_publish_text(value: &str, max_chars: usize) -> String {
@@ -1927,7 +1972,11 @@ fn publish_lesson_blob(
     let ipfs_pin = pin_bytes_to_ipfs(
         client,
         &data,
-        &format!("{}.{}", safe_path_segment(&title), safe_extension(extension)),
+        &format!(
+            "{}.{}",
+            safe_path_segment(&title),
+            safe_extension(extension)
+        ),
         &mime_type,
         &sha256,
         ipfs_mirror,
@@ -1936,7 +1985,10 @@ fn publish_lesson_blob(
         &upload.urls,
         Some((
             &ipfs_pin.cid,
-            ipfs_mirror.gateway_url.as_deref().unwrap_or(ipfs_pin.url.as_str()),
+            ipfs_mirror
+                .gateway_url
+                .as_deref()
+                .unwrap_or(ipfs_pin.url.as_str()),
         )),
         &sha256,
         data.len() as i64,
@@ -2972,39 +3024,50 @@ fn public_key_fingerprint(public_key: &str) -> String {
     format!("DWK-{}-{}-{}", &prefix[0..4], &prefix[4..8], &prefix[8..12])
 }
 
-fn channel_invite_text(
-    channel_title: &str,
-    teacher_display_name: &str,
-    canonical_channel_link: &str,
-    manifest_sha256: &str,
-    verification_code: &str,
-    curator_public_key_fingerprint: &str,
-    relays: &[String],
-    manifest_urls: &[String],
-    blossom_servers: &[String],
-    archive_mirrors: &[String],
-) -> String {
+struct ChannelInviteTextInput<'a> {
+    channel_title: &'a str,
+    teacher_display_name: &'a str,
+    canonical_channel_link: &'a str,
+    manifest_sha256: &'a str,
+    verification_code: &'a str,
+    curator_public_key_fingerprint: &'a str,
+    relays: &'a [String],
+    manifest_urls: &'a [String],
+    blossom_servers: &'a [String],
+    archive_mirrors: &'a [String],
+}
+
+fn channel_invite_text(input: ChannelInviteTextInput<'_>) -> String {
     let mut lines = vec![
         "Duroos channel invite".to_string(),
-        format!("Channel: {channel_title}"),
-        format!("Teacher: {teacher_display_name}"),
-        format!("Open in Duroos Watcher: {canonical_channel_link}"),
-        format!("Manifest: {manifest_sha256}"),
-        format!("Check code: {verification_code}"),
-        format!("Curator public-key fingerprint: {curator_public_key_fingerprint}"),
+        format!("Channel: {}", input.channel_title),
+        format!("Teacher: {}", input.teacher_display_name),
+        format!("Open in Duroos Watcher: {}", input.canonical_channel_link),
+        format!("Manifest: {}", input.manifest_sha256),
+        format!("Check code: {}", input.verification_code),
+        format!(
+            "Curator public-key fingerprint: {}",
+            input.curator_public_key_fingerprint
+        ),
     ];
 
-    if !relays.is_empty() {
-        lines.push(format!("Relays: {}", relays.join(", ")));
+    if !input.relays.is_empty() {
+        lines.push(format!("Relays: {}", input.relays.join(", ")));
     }
-    if !manifest_urls.is_empty() {
-        lines.push(format!("Manifest URLs: {}", manifest_urls.join(", ")));
+    if !input.manifest_urls.is_empty() {
+        lines.push(format!("Manifest URLs: {}", input.manifest_urls.join(", ")));
     }
-    if !blossom_servers.is_empty() {
-        lines.push(format!("Blossom servers: {}", blossom_servers.join(", ")));
+    if !input.blossom_servers.is_empty() {
+        lines.push(format!(
+            "Blossom servers: {}",
+            input.blossom_servers.join(", ")
+        ));
     }
-    if !archive_mirrors.is_empty() {
-        lines.push(format!("Archive mirrors: {}", archive_mirrors.join(", ")));
+    if !input.archive_mirrors.is_empty() {
+        lines.push(format!(
+            "Archive mirrors: {}",
+            input.archive_mirrors.join(", ")
+        ));
     }
 
     lines.push("Preview before trusting this teacher key.".to_string());
@@ -3588,18 +3651,18 @@ mod tests {
             "sha256:83829c50baca669812884d16505873dd9d7318c8ab88e9630c9bfcd1d970570b";
         let canonical = canonical_channel_link(naddr);
         let code = manifest_verification_code(manifest_hash);
-        let invite = channel_invite_text(
-            "Foundations",
-            "Example Teacher",
-            &canonical,
-            manifest_hash,
-            &code,
-            "DWK-1234-5678-ABCD",
-            &["wss://relay.example".to_string()],
-            &["https://blossom.example/manifest.json".to_string()],
-            &["https://blossom.example".to_string()],
-            &["https://archive.example/manifest.json".to_string()],
-        );
+        let invite = channel_invite_text(ChannelInviteTextInput {
+            channel_title: "Foundations",
+            teacher_display_name: "Example Teacher",
+            canonical_channel_link: &canonical,
+            manifest_sha256: manifest_hash,
+            verification_code: &code,
+            curator_public_key_fingerprint: "DWK-1234-5678-ABCD",
+            relays: &["wss://relay.example".to_string()],
+            manifest_urls: &["https://blossom.example/manifest.json".to_string()],
+            blossom_servers: &["https://blossom.example".to_string()],
+            archive_mirrors: &["https://archive.example/manifest.json".to_string()],
+        });
 
         assert_eq!(canonical, "nostr:naddr1qqqqtest");
         assert_eq!(code, "DW-8382-9C50-BACA");
@@ -3734,6 +3797,61 @@ mod tests {
     }
 
     #[test]
+    fn archive_publish_configuration_requires_quorum_and_ipfs() {
+        let relays = vec![
+            NostrRelayConfig {
+                url: "wss://relay-a.example".to_string(),
+            },
+            NostrRelayConfig {
+                url: "wss://relay-b.example".to_string(),
+            },
+        ];
+        let blossom_servers = vec![
+            BlossomServerConfig {
+                url: "https://blossom-a.example".to_string(),
+            },
+            BlossomServerConfig {
+                url: "https://blossom-b.example".to_string(),
+            },
+        ];
+        let ipfs = ArchiveMirrorConfig {
+            service: "ipfs-http-api".to_string(),
+            url: "http://127.0.0.1:5001".to_string(),
+            gateway_url: Some("http://127.0.0.1:8080/ipfs".to_string()),
+            label: None,
+        };
+
+        assert!(enforce_archive_publish_configuration(&relays, &blossom_servers, &[ipfs]).is_ok());
+        assert!(
+            enforce_archive_publish_configuration(&relays[..1], &blossom_servers, &[])
+                .unwrap_err()
+                .contains("2 configured Nostr")
+        );
+        assert!(
+            enforce_archive_publish_configuration(&relays, &blossom_servers[..1], &[])
+                .unwrap_err()
+                .contains("2 configured Blossom")
+        );
+        assert!(
+            enforce_archive_publish_configuration(&relays, &blossom_servers, &[])
+                .unwrap_err()
+                .contains("local IPFS")
+        );
+    }
+
+    #[test]
+    fn ipfs_gateway_url_derives_cid_paths_from_root_or_ipfs_base() {
+        assert_eq!(
+            ipfs_gateway_url("http://127.0.0.1:8080", "bafytest"),
+            "http://127.0.0.1:8080/ipfs/bafytest"
+        );
+        assert_eq!(
+            ipfs_gateway_url("http://127.0.0.1:8080/ipfs", "bafytest"),
+            "http://127.0.0.1:8080/ipfs/bafytest"
+        );
+    }
+
+    #[test]
     fn vault_rejects_wrong_passphrase() {
         let plaintext = VaultPlaintext {
             curator_secret_key: general_purpose::STANDARD.encode([1_u8; 32]),
@@ -3799,6 +3917,16 @@ mod tests {
             content_type: "video".to_string(),
             description: Some("A local lesson exported through Blossom.".to_string()),
             url: "https://blossom.example/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.mp4".to_string(),
+            retrieval_refs: media_retrieval_refs(
+                &["https://blossom.example/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.mp4".to_string()],
+                Some((
+                    "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+                    "https://gateway.example/ipfs",
+                )),
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                42,
+                "video/mp4",
+            ),
             sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .to_string(),
             size_bytes: 42,
@@ -3921,6 +4049,10 @@ mod tests {
         let server = Server::http("127.0.0.1:0").unwrap();
         let url = format!("http://{}", server.server_addr());
         let (tx, rx) = mpsc::channel();
+        let data = b"lesson body".to_vec();
+        let hash = sha256_hex(&data);
+        let response_data = data.clone();
+        let response_hash = hash.clone();
         let server_thread = thread::spawn(move || {
             let mut request = server.recv().unwrap();
             let method = request.method().as_str().to_string();
@@ -3939,9 +4071,12 @@ mod tests {
             request.as_reader().read_to_end(&mut body).unwrap();
             request.respond(Response::from_string("ok")).unwrap();
             tx.send((method, path, headers, body)).unwrap();
+
+            let request = server.recv().unwrap();
+            assert_eq!(request.method().as_str(), "GET");
+            assert_eq!(request.url(), format!("/{response_hash}.pdf"));
+            request.respond(Response::from_data(response_data)).unwrap();
         });
-        let data = b"lesson body".to_vec();
-        let hash = sha256_hex(&data);
         let keys = PublisherKeys {
             curator_secret_key: [6_u8; 32],
             nostr_secret_key: [7_u8; 32],
@@ -4016,6 +4151,113 @@ mod tests {
         let pubkey_bytes = decode_hex_32(&auth_event.pubkey, "Nostr pubkey").unwrap();
         let pubkey = XOnlyPublicKey::from_slice(&pubkey_bytes).unwrap();
         secp.verify_schnorr(&signature, &message, &pubkey).unwrap();
+    }
+
+    fn verified_blossom_server(data: Vec<u8>) -> (String, thread::JoinHandle<()>) {
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr());
+        let thread = thread::spawn(move || {
+            let mut request = server.recv().unwrap();
+            assert_eq!(request.method().as_str(), "PUT");
+            assert_eq!(request.url(), "/upload");
+            let mut body = Vec::new();
+            request.as_reader().read_to_end(&mut body).unwrap();
+            assert_eq!(body, data);
+            request.respond(Response::from_string("ok")).unwrap();
+
+            let request = server.recv().unwrap();
+            assert_eq!(request.method().as_str(), "GET");
+            request.respond(Response::from_data(data)).unwrap();
+        });
+        (url, thread)
+    }
+
+    #[test]
+    fn publish_lesson_blob_emits_two_blossom_refs_and_ipfs_cid() {
+        let data = b"archive durable media bytes".to_vec();
+        let (blossom_a, blossom_a_thread) = verified_blossom_server(data.clone());
+        let (blossom_b, blossom_b_thread) = verified_blossom_server(data.clone());
+        let cid = "bafyduroosmedia";
+        let api_server = Server::http("127.0.0.1:0").unwrap();
+        let api_url = format!("http://{}", api_server.server_addr());
+        let api_thread = thread::spawn(move || {
+            let mut request = api_server.recv().unwrap();
+            assert!(request.url().starts_with("/api/v0/add"));
+            let mut body = Vec::new();
+            request.as_reader().read_to_end(&mut body).unwrap();
+            assert!(!body.is_empty());
+            request
+                .respond(Response::from_string(json!({ "Hash": cid }).to_string()))
+                .unwrap();
+        });
+        let gateway_server = Server::http("127.0.0.1:0").unwrap();
+        let gateway_url = format!("http://{}/ipfs", gateway_server.server_addr());
+        let gateway_data = data.clone();
+        let gateway_thread = thread::spawn(move || {
+            let request = gateway_server.recv().unwrap();
+            assert_eq!(request.url(), "/ipfs/bafyduroosmedia");
+            request.respond(Response::from_data(gateway_data)).unwrap();
+        });
+        let temp_dir = std::env::temp_dir().join(format!("duroos-publish-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let media_path = temp_dir.join("lesson.mp4");
+        fs::write(&media_path, &data).unwrap();
+        let draft = PublishedLessonDraft {
+            title: "Durable lesson".to_string(),
+            content_type: "video".to_string(),
+            path: media_path.to_string_lossy().to_string(),
+            description: None,
+        };
+        let keys = PublisherKeys {
+            curator_secret_key: [6_u8; 32],
+            nostr_secret_key: [7_u8; 32],
+        };
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let mut blossom_results = Vec::new();
+
+        let blob = publish_lesson_blob(
+            &client,
+            &draft,
+            &[
+                BlossomServerConfig { url: blossom_a },
+                BlossomServerConfig { url: blossom_b },
+            ],
+            &ArchiveMirrorConfig {
+                service: "ipfs-http-api".to_string(),
+                url: api_url,
+                gateway_url: Some(gateway_url),
+                label: None,
+            },
+            &keys,
+            &mut blossom_results,
+        )
+        .unwrap();
+        blossom_a_thread.join().unwrap();
+        blossom_b_thread.join().unwrap();
+        api_thread.join().unwrap();
+        gateway_thread.join().unwrap();
+        fs::remove_dir_all(temp_dir).ok();
+
+        assert_eq!(
+            blossom_results
+                .iter()
+                .filter(|result| result.uploaded)
+                .count(),
+            2
+        );
+        assert_eq!(
+            blob.retrieval_refs
+                .iter()
+                .filter(|reference| reference.service.as_deref() == Some("blossom"))
+                .count(),
+            2
+        );
+        assert!(blob.retrieval_refs.iter().any(|reference| {
+            reference.kind == "ipfs-cid" && reference.cid.as_deref() == Some("bafyduroosmedia")
+        }));
     }
 
     #[test]
@@ -4529,6 +4771,7 @@ mod tests {
                    description TEXT,
                    origin_url TEXT NOT NULL,
                    retrieval_url TEXT,
+                   retrieval_refs_json TEXT NOT NULL DEFAULT '[]',
                    sha256 TEXT NOT NULL,
                    size_bytes INTEGER,
                    mime_type TEXT,
@@ -4581,8 +4824,8 @@ mod tests {
             .execute(
                 "INSERT INTO publisher_channel_items
                  (id, channel_id, item_type, title, content_type, description, origin_url,
-                  retrieval_url, sha256, size_bytes, mime_type, published_at)
-                 VALUES (?1, ?2, 'media', ?3, 'audio', NULL, ?4, ?4, ?5, 1024,
+                  retrieval_url, retrieval_refs_json, sha256, size_bytes, mime_type, published_at)
+                 VALUES (?1, ?2, 'media', ?3, 'audio', NULL, ?4, ?4, '[]', ?5, 1024,
                          'audio/mpeg', ?6)",
                 params![
                     id,

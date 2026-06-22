@@ -45,5 +45,5 @@ export const endpointDurabilityWarning = (
     return null;
   }
 
-  return `Durability warning: ${uploadedCount} Blossom server(s) and ${acceptedCount} relay(s) passed. One accepted relay is enough to publish, but use at least two of each before relying on durable distribution.`;
+  return `Durability warning: ${uploadedCount} Blossom server(s) and ${acceptedCount} relay(s) passed. Archive durability requires at least two of each before publishing.`;
 };

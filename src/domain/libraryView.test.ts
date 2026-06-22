@@ -56,6 +56,7 @@ const lesson = (id: string, title: string): Lesson => ({
   collectionId: collection.id,
   sourceId: source.id,
   sourceUrl: `https://example.test/${id}`,
+  retrievalRefs: [],
   thumbnailTone: "emerald",
   provenanceId: `prov-${id}`,
 });

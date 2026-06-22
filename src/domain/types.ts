@@ -148,12 +148,26 @@ export interface Lesson {
   collectionId: string;
   sourceId: string;
   sourceUrl: string;
+  retrievalRefs: RetrievalRef[];
   publishedAt?: string;
   description?: string;
   thumbnailTone: "slate" | "emerald" | "amber" | "blue" | "rose";
   durationSeconds?: number;
   mediaFileId?: string;
   provenanceId: string;
+}
+
+export interface RetrievalRef {
+  kind: "direct-url" | "enclosure-url" | "ipfs-cid" | "magnet";
+  url?: string;
+  cid?: string;
+  magnetUri?: string;
+  gatewayUrl?: string;
+  service?: "blossom";
+  sha256?: string;
+  sizeBytes?: number;
+  mimeType?: string;
+  mediaType?: string;
 }
 
 export interface MediaFile {
@@ -435,6 +449,7 @@ export interface PublishedChannelItem {
   description?: string;
   originUrl: string;
   retrievalUrl?: string;
+  retrievalRefs: RetrievalRef[];
   sha256: string;
   sizeBytes?: number;
   mimeType?: string;

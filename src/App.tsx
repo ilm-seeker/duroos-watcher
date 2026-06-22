@@ -4357,9 +4357,14 @@ const TeacherPublisherPanel = ({
 
   const relays = endpointLines(relayText).map((url) => ({ url }));
   const blossomServers = endpointLines(blossomText).map((url) => ({ url }));
+  const hasRelayQuorum = relays.length >= 2;
+  const hasBlossomQuorum = blossomServers.length >= 2;
+  const hasLocalIpfsConfig = Boolean(ipfsApiUrl.trim() && ipfsGatewayUrl.trim());
   const endpointSignature = [
     relays.map((relay) => relay.url).join("|"),
     blossomServers.map((server) => server.url).join("|"),
+    ipfsApiUrl.trim(),
+    ipfsGatewayUrl.trim(),
   ].join("::");
   const endpointHealthHasFailures = endpointTestReport
     ? endpointTestHasFailures(endpointTestReport)
@@ -4374,7 +4379,7 @@ const TeacherPublisherPanel = ({
     ...endpointLines(archiveText).map((url) => ({
       service: "https",
       url,
-      label: "Public archive mirror",
+      label: "Extra manifest mirror",
     })),
     ...(ipfsApiUrl.trim()
       ? [
@@ -4382,7 +4387,7 @@ const TeacherPublisherPanel = ({
             service: "ipfs-http-api",
             url: ipfsApiUrl.trim(),
             gatewayUrl: ipfsGatewayUrl.trim() || undefined,
-            label: "Local IPFS manifest pin",
+            label: "Local IPFS archive pin",
           },
         ]
       : []),
@@ -4405,15 +4410,19 @@ const TeacherPublisherPanel = ({
     },
     {
       label: relays.length
-        ? `${relays.length} Nostr endpoint${relays.length === 1 ? "" : "s"}`
-        : "Nostr endpoint needed",
-      tone: relays.length ? "positive" : "warning",
+        ? `${relays.length} Nostr relay${relays.length === 1 ? "" : "s"}`
+        : "2 Nostr relays needed",
+      tone: hasRelayQuorum ? "positive" : "warning",
     },
     {
       label: blossomServers.length
         ? `${blossomServers.length} Blossom server${blossomServers.length === 1 ? "" : "s"}`
-        : "Storage needed",
-      tone: blossomServers.length ? "positive" : "warning",
+        : "2 Blossom servers needed",
+      tone: hasBlossomQuorum ? "positive" : "warning",
+    },
+    {
+      label: hasLocalIpfsConfig ? "Local IPFS ready" : "IPFS required",
+      tone: hasLocalIpfsConfig ? "positive" : "warning",
     },
     {
       label: endpointHealthPassed
@@ -4444,24 +4453,24 @@ const TeacherPublisherPanel = ({
       tone: channelTitle.trim() ? "positive" : "warning",
     },
     {
-      label: archiveMirrors.length
-        ? `${archiveMirrors.length} archive mirror${archiveMirrors.length === 1 ? "" : "s"}`
-        : "Archive optional",
-      tone: archiveMirrors.length ? "positive" : "neutral",
+      label: "Archive durability",
+      tone: hasLocalIpfsConfig ? "positive" : "warning",
     },
   ] satisfies Array<{ label: string; tone: "neutral" | "positive" | "warning" }>;
   const publishBlockedReason = !selectedProfile
     ? "Create or select a publisher profile."
     : passphrase.length < 8
       ? "Enter the vault passphrase."
-      : relays.length === 0
-        ? "Add at least one Nostr relay."
-        : blossomServers.length === 0
-          ? "Add at least one Blossom server."
-          : !endpointHealthPassed
-            ? "Run a passing endpoint test for the current relay and storage settings."
-            : ipfsApiUrl.trim() && !ipfsGatewayUrl.trim()
-              ? "Add the IPFS gateway URL for local IPFS archival."
+      : !hasRelayQuorum
+        ? "Add at least two Nostr relays."
+        : !hasBlossomQuorum
+          ? "Add at least two Blossom servers."
+          : !ipfsApiUrl.trim()
+            ? "Add the local IPFS API URL."
+            : !ipfsGatewayUrl.trim()
+              ? "Add the IPFS gateway URL for archive durability."
+              : !endpointHealthPassed
+                ? "Run a passing endpoint test for the current relay, storage, and IPFS settings."
               : !channelTitle.trim()
                 ? "Add a channel title."
                 : contentDraftCount === 0
@@ -4471,15 +4480,19 @@ const TeacherPublisherPanel = ({
     ? "Create or select a publisher profile."
     : passphrase.length < 8
       ? "Enter the vault passphrase."
-      : relays.length === 0
-        ? "Add at least one Nostr relay."
-        : blossomServers.length === 0
-          ? "Add at least one Blossom server."
+      : !hasRelayQuorum
+        ? "Add at least two Nostr relays."
+        : !hasBlossomQuorum
+          ? "Add at least two Blossom servers."
+          : !ipfsApiUrl.trim()
+            ? "Add the local IPFS API URL."
+            : !ipfsGatewayUrl.trim()
+              ? "Add the IPFS gateway URL."
           : "";
-  const syntheticProbeBlockedReason = relays.length === 0
-    ? "Add at least one Nostr relay."
-    : blossomServers.length === 0
-      ? "Add at least one Blossom server."
+  const syntheticProbeBlockedReason = !hasRelayQuorum
+    ? "Add at least two Nostr relays."
+    : !hasBlossomQuorum
+      ? "Add at least two Blossom servers."
       : "";
   const publisherSteps = [
     {
@@ -4504,7 +4517,7 @@ const TeacherPublisherPanel = ({
           : endpointHealthHasFailures
           ? "Quorum passed; fix or remove endpoints that failed."
           : "Every configured relay and Blossom server accepted the probe."
-        : "Test one working Nostr relay and one Blossom server.",
+        : "Test two Nostr relays and two Blossom servers.",
       complete: endpointHealthPassed,
     },
     {
@@ -4515,20 +4528,19 @@ const TeacherPublisherPanel = ({
       complete: contentDraftCount > 0,
     },
     {
-      title: "Mirrors",
-      detail: archiveMirrors.length
-        ? "Archive mirrors will be announced only after hash match."
-        : "Optional archive mirrors can stay empty.",
-      complete: archiveMirrors.length > 0,
-      optional: true,
+      title: "Archive",
+      detail: hasLocalIpfsConfig
+        ? "Local IPFS API and gateway are configured for media and manifest verification."
+        : "Add local IPFS API and gateway URLs.",
+      complete: hasLocalIpfsConfig,
     },
     {
       title: "Publish",
       detail: passphrase.length >= 8 ? "Passphrase ready for signing." : "Enter the local vault passphrase.",
       complete: passphrase.length >= 8,
     },
-  ] satisfies Array<{ title: string; detail: string; complete: boolean; optional?: boolean }>;
-  const requiredPublisherSteps = publisherSteps.filter((step) => !step.optional);
+  ] satisfies Array<{ title: string; detail: string; complete: boolean }>;
+  const requiredPublisherSteps = publisherSteps;
   const completedRequiredPublisherSteps = requiredPublisherSteps.filter((step) => step.complete);
   const nextRequiredPublisherStep = requiredPublisherSteps.find((step) => !step.complete);
   const publisherProgressPercent = Math.round(
@@ -4831,8 +4843,8 @@ const TeacherPublisherPanel = ({
       setPanelNotice("Create or select a publisher profile first.");
       return;
     }
-    if (!endpointHealthPassed) {
-      setPanelNotice("Run a passing endpoint test for the current relay and storage settings first.");
+    if (publishBlockedReason) {
+      setPanelNotice(publishBlockedReason);
       return;
     }
 
@@ -5224,12 +5236,12 @@ const TeacherPublisherPanel = ({
               <span className="field-hint">One storage server per line, for example https://blossom.example.</span>
             </label>
             <label className="field">
-              <span>Archive manifest mirrors</span>
+              <span>Extra manifest mirrors</span>
               <textarea
                 value={archiveText}
                 onChange={(event) => setArchiveText(event.target.value)}
               />
-              <span className="field-hint">Optional public mirror URLs, one per line.</span>
+              <span className="field-hint">Optional public manifest mirror URLs, one per line.</span>
             </label>
             <div className="archive-ipfs-grid">
               <label className="field">
@@ -5246,12 +5258,12 @@ const TeacherPublisherPanel = ({
                   value={ipfsGatewayUrl}
                   onChange={(event) => setIpfsGatewayUrl(event.target.value)}
                 />
-                <span className="field-hint">Gateway used to verify the pinned manifest.</span>
+                <span className="field-hint">Gateway used to verify pinned media and manifests.</span>
               </label>
             </div>
             <p className="publisher-inline-note">
-              Archive mirrors are public and may be hard to remove. Only hash-matched manifest
-              copies are announced.
+              Archive durability requires local IPFS plus two relays and two Blossom servers. Extra
+              manifest mirrors are announced only after a hash match.
             </p>
           </details>
           <div className="publisher-actions">
@@ -5571,6 +5583,11 @@ const TeacherPublisherPanel = ({
               />
               <StatusChip label={`${publishResult.mediaCount} media`} tone="neutral" />
               <StatusChip label={`${publishResult.postCount} posts`} tone="neutral" />
+              <StatusChip label={`${publishResult.relays.length} relays`} tone="positive" />
+              <StatusChip
+                label={`${publishResult.manifestUrls.length} manifest copies`}
+                tone="positive"
+              />
               <StatusChip label={publishInvite.verificationCode} tone="neutral" />
               <StatusChip label={publishResult.manifestSha256} tone="neutral" />
             </div>
@@ -5715,6 +5732,7 @@ const PublishedChannelCard = ({
           <div className="publisher-inventory-list">
             {items.map((item) => {
               const itemHash = compactHashReference(item.sha256);
+              const copyStatus = publishedItemCopyStatus(item);
               return (
                 <div className="publisher-inventory-row" key={item.id}>
                   <div>
@@ -5732,6 +5750,18 @@ const PublishedChannelCard = ({
                       <StatusChip label={formatBytes(item.sizeBytes)} tone="neutral" />
                     ) : null}
                     {item.mimeType ? <StatusChip label={item.mimeType} tone="neutral" /> : null}
+                    {item.itemType === "media" ? (
+                      <>
+                        <StatusChip
+                          label={`${copyStatus.blossomCopies} Blossom`}
+                          tone={copyStatus.blossomCopies >= 2 ? "positive" : "warning"}
+                        />
+                        <StatusChip
+                          label={copyStatus.ipfsPinned ? "IPFS pinned" : "IPFS missing"}
+                          tone={copyStatus.ipfsPinned ? "positive" : "warning"}
+                        />
+                      </>
+                    ) : null}
                   </div>
                   <code title={itemHash.full}>{itemHash.label}</code>
                 </div>
@@ -5752,6 +5782,20 @@ const PublishedChannelCard = ({
       </div>
     </article>
   );
+};
+
+const publishedItemCopyStatus = (item: PublishedChannelItem) => {
+  const blossomCopies = item.retrievalRefs.filter(
+    (ref) =>
+      (ref.kind === "direct-url" || ref.kind === "enclosure-url") &&
+      ref.service === "blossom" &&
+      Boolean(ref.url),
+  ).length;
+  const ipfsPinned = item.retrievalRefs.some(
+    (ref) => ref.kind === "ipfs-cid" && Boolean(ref.cid),
+  );
+
+  return { blossomCopies, ipfsPinned };
 };
 
 const endpointLines = (value: string): string[] =>
