@@ -81,17 +81,18 @@ verifies that GitHub reports the expected names. It does not print secret values
 - Successful tag release workflow with artifact audit uploads for each platform.
 - `media-tools-report.json` for each target whose package includes bundled media tools.
 - No open GitHub code scanning alerts for the exact release commit.
-- No open Dependabot alerts affecting macOS or Windows production. A Linux-only `glib` alert is allowed only when listed under `release.knownPlatformBlockers` and Linux is declared in `release.alphaPlatforms`.
+- No open Dependabot alerts affecting macOS or Windows production. If the Linux-only `glib` alert reopens, it is allowed only when listed under `release.knownPlatformBlockers` and Linux is declared in `release.alphaPlatforms`.
 - macOS signed and notarized app/DMG evidence.
 - Windows signed installer evidence.
 - Linux AppImage/deb artifact audit, bundled media-tool report, and launch smoke evidence for alpha labeling.
 - Manual smoke-test notes for every macOS and Windows item in the platform checklist above.
 
-The current `glib` Dependabot alert is a Linux production blocker, not a local application-code bug:
+The known `glib` advisory path is a Linux production blocker, not a local application-code bug:
 the Tauri Linux GTK/WebKit stack currently resolves `glib 0.18.x`, while the advisory is patched in
 `glib >= 0.20.0`. The current command evidence and dry-run update attempts live in
-`docs/release/glib-linux-alpha-blocker-2026-06-21.md`. Do not mark Linux production ready until that
-upstream dependency path is patched or Linux production distribution is explicitly removed from
+`docs/release/glib-linux-alpha-blocker-2026-06-21.md`. The GitHub alert may be dismissed as
+`tolerable_risk` while Linux remains alpha-scoped, but do not mark Linux production ready until
+that upstream dependency path is patched or Linux production distribution is explicitly removed from
 production scope. For `v0.1.0`, Linux is intentionally alpha-scoped in
 `docs/production-release-evidence.example.json`.
 

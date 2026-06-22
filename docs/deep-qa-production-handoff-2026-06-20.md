@@ -33,7 +33,7 @@ Release gates:
 - `npm run release:preflight` failed only on production/external blockers:
   - Missing GitHub Actions signing secrets for Tauri, Apple, and Windows.
   - Missing Windows signing variables.
-  - Open production-blocking Dependabot alert: `glib` `GHSA-wrw7-89jp-8q8g`.
+  - At the time of this handoff, the Dependabot `glib` alert `GHSA-wrw7-89jp-8q8g` also blocked production. It was later dismissed as `tolerable_risk` while Linux remains alpha-scoped; the advisory path is still a Linux production blocker.
   - No `v0.1.0*` GitHub release.
   - Missing `docs/production-release-evidence.json`.
 - `npm run release:production-gate` failed because `docs/production-release-evidence.json` is missing.

@@ -7,9 +7,10 @@ Do not treat Linux artifacts as production until the dependency chain moves to
 `glib >= 0.20.0` or a release owner explicitly accepts the risk in a signed
 release decision.
 
-This does not clear the alert. It only documents why the production evidence
-schema may classify Linux as alpha while macOS and Windows remain the intended
-production platforms.
+The GitHub Dependabot alert was dismissed as `tolerable_risk` on 2026-06-22
+after verifying that Linux remains alpha-scoped and no compatible dependency
+update lifts this Tauri GTK/WebKit path to `glib >= 0.20.0`. The dismissal
+closes the current GitHub report; it does not clear Linux for production.
 
 ## Advisory
 
@@ -58,8 +59,22 @@ glib v0.18.5
 `-- webkit2gtk v2.0.2
 ```
 
-The app does not directly depend on `glib`; the open alert comes through the
-Tauri Linux GTK/WebKit stack.
+The app does not directly depend on `glib`; the alert came through the Tauri
+Linux GTK/WebKit stack.
+
+## GitHub Alert Handling
+
+Dependabot alert `#1` for `glib` in `src-tauri/Cargo.lock` was dismissed with
+reason `tolerable_risk`.
+
+Dismissal comment:
+
+```text
+Linux alpha only. GHSA-wrw7-89jp-8q8g reaches glib 0.18.5 via Tauri GTK/WebKit; glib and tauri dry-runs do not reach >=0.20.0. Keep knownPlatformBlockers until upstream GTK4/glib fix or Linux prod scope removed.
+```
+
+If GitHub reopens the alert because advisory metadata or the dependency graph
+changes, re-run the dependency evidence below before dismissing it again.
 
 ## Update Attempts
 
@@ -83,7 +98,7 @@ Until resolved:
 - `docs/production-release-evidence.json` may list `linux` in
   `release.alphaPlatforms`.
 - `release.knownPlatformBlockers` may include `GHSA-wrw7-89jp-8q8g` for
-  `linux`.
+  `linux` even when the Dependabot alert is dismissed.
 - macOS and Windows production release evidence must still be real and complete:
   signing, notarization, artifact audits, media-tool reports, CI, release
   workflow, and manual QA cannot be replaced by this note.

@@ -112,10 +112,11 @@
       ]
     },
     "dependabot": {
-      "openAlerts": 1,
-      "openAlertIds": ["GHSA-wrw7-89jp-8q8g"],
+      "openAlerts": 0,
+      "openAlertIds": [],
       "evidence": [
-        "gh api repos/ilm-seeker/duroos-watcher/dependabot/alerts --paginate output pointer",
+        "gh api repos/ilm-seeker/duroos-watcher/dependabot/alerts?state=open --paginate output pointer",
+        "gh api repos/ilm-seeker/duroos-watcher/dependabot/alerts/1 dismissal output pointer",
         "docs/release/glib-linux-alpha-blocker-2026-06-21.md"
       ]
     }
